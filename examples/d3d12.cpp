@@ -11,13 +11,15 @@
 #include <cstdio>
 #include <cmath>
 
+#pragma comment(lib, "d3d12.lib")
+#pragma comment(lib, "dxgi.lib")
+
 int main() {
     window::Config config;
     config.title = "Direct3D 12 Example";
     config.width = 800;
     config.height = 600;
-    config.graphics_api = window::GraphicsAPI::D3D12;
-    config.d3d.debug_layer = true;
+    config.backend = window::Backend::D3D12;
 
     window::Result result;
     window::Window* win = window::Window::create(config, &result);
@@ -27,38 +29,45 @@ int main() {
         return 1;
     }
 
-    const window::GraphicsContext* ctx = win->get_graphics_context();
-    ID3D12Device* device = static_cast<ID3D12Device*>(ctx->d3d12.device);
-    ID3D12CommandQueue* command_queue = static_cast<ID3D12CommandQueue*>(ctx->d3d12.command_queue);
-    IDXGISwapChain4* swap_chain = static_cast<IDXGISwapChain4*>(ctx->d3d12.swap_chain);
-    ID3D12DescriptorHeap* rtv_heap = static_cast<ID3D12DescriptorHeap*>(ctx->d3d12.rtv_heap);
+    window::Graphics* gfx = win->graphics();
 
     printf("Direct3D 12 context created!\n");
-    printf("Frame count: %u\n", ctx->d3d12.frame_count);
-    printf("D3D12 Ultimate: %s\n", ctx->d3d12.supports_ultimate ? "Yes" : "No");
+    printf("Backend: %s\n", gfx->get_backend_name());
+    printf("Device: %s\n", gfx->get_device_name());
+
+    // Get native D3D12 handles
+    ID3D12Device* device = static_cast<ID3D12Device*>(gfx->native_device());
+    ID3D12CommandQueue* command_queue = static_cast<ID3D12CommandQueue*>(gfx->native_context());
+    IDXGISwapChain4* swap_chain = static_cast<IDXGISwapChain4*>(gfx->native_swapchain());
 
     // Create command allocator and list
-    ID3D12CommandAllocator* command_allocator;
+    ID3D12CommandAllocator* command_allocator = nullptr;
     device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                     IID_PPV_ARGS(&command_allocator));
 
-    ID3D12GraphicsCommandList* command_list;
+    ID3D12GraphicsCommandList* command_list = nullptr;
     device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                               command_allocator, nullptr,
                               IID_PPV_ARGS(&command_list));
     command_list->Close();
 
     // Create fence for synchronization
-    ID3D12Fence* fence;
+    ID3D12Fence* fence = nullptr;
     device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
     UINT64 fence_value = 1;
     HANDLE fence_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-    // Get RTV descriptor size
+    // Create RTV descriptor heap
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
+    rtv_heap_desc.NumDescriptors = 2;
+    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    ID3D12DescriptorHeap* rtv_heap = nullptr;
+    device->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&rtv_heap));
+
     UINT rtv_descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
     // Create render targets
-    ID3D12Resource* render_targets[2];
+    ID3D12Resource* render_targets[2] = {};
     D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     for (UINT i = 0; i < 2; i++) {
         swap_chain->GetBuffer(i, IID_PPV_ARGS(&render_targets[i]));
@@ -108,7 +117,7 @@ int main() {
         command_queue->ExecuteCommandLists(1, lists);
 
         // Present
-        win->present();
+        swap_chain->Present(1, 0);
 
         // Wait for GPU
         command_queue->Signal(fence, fence_value);
@@ -123,11 +132,12 @@ int main() {
 
     // Cleanup
     CloseHandle(fence_event);
-    fence->Release();
-    command_list->Release();
-    command_allocator->Release();
+    if (fence) fence->Release();
+    if (command_list) command_list->Release();
+    if (command_allocator) command_allocator->Release();
+    if (rtv_heap) rtv_heap->Release();
     for (UINT i = 0; i < 2; i++) {
-        render_targets[i]->Release();
+        if (render_targets[i]) render_targets[i]->Release();
     }
 
     win->destroy();

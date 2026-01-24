@@ -1,10 +1,9 @@
 /*
- * basic.cpp - Basic window example with unified graphics API
+ * basic.cpp - Basic window example
  */
 
 #include "window.hpp"
 #include <cstdio>
-#include <cmath>
 
 int main() {
     // Simple configuration
@@ -44,38 +43,14 @@ int main() {
         printf("Position: %d, %d\n", x, y);
     }
 
-    float time = 0.0f;
-
+    // Main loop
     while (!win->should_close()) {
         win->poll_events();
 
-        // Begin frame
-        if (!gfx->begin_frame()) {
-            continue;
-        }
-
-        // Animate background color
-        float r = (sinf(time) + 1.0f) * 0.5f;
-        float g = (sinf(time + 2.0f) + 1.0f) * 0.5f;
-        float b = (sinf(time + 4.0f) + 1.0f) * 0.5f;
-
-        // Begin render pass with clear
-        window::RenderTargetDesc rt;
-        rt.clear_color = window::Color(r * 0.3f, g * 0.3f, b * 0.3f);
-        rt.color_load = window::LoadOp::Clear;
-        gfx->begin_pass(rt);
-
-        // Set viewport
-        gfx->set_viewport(window::Rect(0, 0, win->get_width(), win->get_height()));
-
-        // ... render geometry here ...
-
-        gfx->end_pass();
-
-        // End frame (presents to screen)
-        gfx->end_frame();
-
-        time += 0.016f;
+        // Use native handles to render with backend-specific code
+        // For example with D3D11:
+        // ID3D11Device* device = (ID3D11Device*)gfx->native_device();
+        // IDXGISwapChain* swapchain = (IDXGISwapChain*)gfx->native_swapchain();
     }
 
     printf("Closing...\n");

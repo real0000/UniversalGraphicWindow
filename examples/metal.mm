@@ -17,7 +17,7 @@ int main() {
         config.title = "Metal Example";
         config.width = 800;
         config.height = 600;
-        config.graphics_api = window::GraphicsAPI::Metal;
+        config.backend = window::Backend::Metal;
 
         window::Result result;
         window::Window* win = window::Window::create(config, &result);
@@ -27,13 +27,18 @@ int main() {
             return 1;
         }
 
-        const window::GraphicsContext* ctx = win->get_graphics_context();
-        id<MTLDevice> device = (__bridge id<MTLDevice>)ctx->metal.device;
-        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)ctx->metal.queue;
-        CAMetalLayer* layer = (__bridge CAMetalLayer*)ctx->metal.layer;
+        window::Graphics* gfx = win->graphics();
 
         printf("Metal context created!\n");
-        printf("Device: %s\n", [[device name] UTF8String]);
+        printf("Backend: %s\n", gfx->get_backend_name());
+        printf("Device: %s\n", gfx->get_device_name());
+
+        // Get native Metal handles
+        id<MTLDevice> device = (__bridge id<MTLDevice>)gfx->native_device();
+        id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)gfx->native_context();
+        CAMetalLayer* layer = (__bridge CAMetalLayer*)gfx->native_swapchain();
+
+        printf("MTLDevice: %s\n", [[device name] UTF8String]);
 
         float time = 0.0f;
 

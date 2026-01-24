@@ -7,16 +7,19 @@
 #ifdef WINDOW_PLATFORM_WIN32
 
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <cstdio>
 #include <cmath>
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 
 int main() {
     window::Config config;
     config.title = "Direct3D 11 Example";
     config.width = 800;
     config.height = 600;
-    config.graphics_api = window::GraphicsAPI::D3D11;
-    config.d3d.debug_layer = true;
+    config.backend = window::Backend::D3D11;
 
     window::Result result;
     window::Window* win = window::Window::create(config, &result);
@@ -26,12 +29,27 @@ int main() {
         return 1;
     }
 
-    const window::GraphicsContext* ctx = win->get_graphics_context();
-    ID3D11Device* device = static_cast<ID3D11Device*>(ctx->d3d11.device);
-    ID3D11DeviceContext* context = static_cast<ID3D11DeviceContext*>(ctx->d3d11.device_context);
-    ID3D11RenderTargetView* rtv = static_cast<ID3D11RenderTargetView*>(ctx->d3d11.render_target);
+    window::Graphics* gfx = win->graphics();
 
     printf("Direct3D 11 context created!\n");
+    printf("Backend: %s\n", gfx->get_backend_name());
+    printf("Device: %s\n", gfx->get_device_name());
+
+    // Get native D3D11 handles
+    ID3D11Device* device = static_cast<ID3D11Device*>(gfx->native_device());
+    IDXGISwapChain1* swap_chain = static_cast<IDXGISwapChain1*>(gfx->native_swapchain());
+
+    // Get device context
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+
+    // Create render target view
+    ID3D11Texture2D* back_buffer = nullptr;
+    swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer));
+
+    ID3D11RenderTargetView* rtv = nullptr;
+    device->CreateRenderTargetView(back_buffer, nullptr, &rtv);
+    back_buffer->Release();
 
     D3D_FEATURE_LEVEL feature_level = device->GetFeatureLevel();
     printf("Feature Level: %x\n", feature_level);
@@ -49,9 +67,15 @@ int main() {
 
         context->ClearRenderTargetView(rtv, clear_color);
 
-        win->present();
+        // Present
+        swap_chain->Present(1, 0);
+
         time += 0.016f;
     }
+
+    // Cleanup
+    if (rtv) rtv->Release();
+    if (context) context->Release();
 
     win->destroy();
     return 0;

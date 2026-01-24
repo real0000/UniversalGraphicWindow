@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(window VERSION 1.0.0 LANGUAGES CXX)
+project(window VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -72,7 +72,7 @@ message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
 # OpenGL
 if(WINDOW_ENABLE_OPENGL)
     if(WINDOW_PLATFORM STREQUAL "WIN32")
-        list(APPEND WINDOW_SOURCES api_opengl.cpp)
+        list(APPEND WINDOW_SOURCES api_opengl.cpp glad.c)
         list(APPEND WINDOW_LIBS opengl32)
         list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
     elseif(WINDOW_PLATFORM STREQUAL "X11")
@@ -198,6 +198,22 @@ if(APPLE)
     set_source_files_properties(${WINDOW_SOURCES} PROPERTIES
         COMPILE_FLAGS "-x objective-c++"
     )
+endif()
+
+#=============================================================================
+# Tests
+#=============================================================================
+
+option(WINDOW_BUILD_TESTS "Build unit tests" ON)
+
+if(WINDOW_BUILD_TESTS)
+    enable_testing()
+
+    # Basic unit tests (headless, no display required)
+    add_executable(test_window tests/test_window.cpp)
+    target_link_libraries(test_window PRIVATE window)
+
+    add_test(NAME test_window COMMAND test_window)
 endif()
 
 #=============================================================================

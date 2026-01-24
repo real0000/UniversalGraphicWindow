@@ -336,7 +336,7 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
 //=============================================================================
 
 #ifdef VK_USE_PLATFORM_WIN32_KHR
-Graphics* create_vulkan_graphics_win32(void* hwnd, void* hinstance, const Config& config) {
+Graphics* create_vulkan_graphics_win32(void* hwnd, int width, int height, const Config& config) {
     // Use shared instance if available
     VkInstance instance = VK_NULL_HANDLE;
     bool owns_instance = true;
@@ -356,7 +356,7 @@ Graphics* create_vulkan_graphics_win32(void* hwnd, void* hinstance, const Config
     VkWin32SurfaceCreateInfoKHR surface_info = {};
     surface_info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
     surface_info.hwnd = static_cast<HWND>(hwnd);
-    surface_info.hinstance = static_cast<HINSTANCE>(hinstance);
+    surface_info.hinstance = GetModuleHandle(nullptr);
 
     VkSurfaceKHR surface;
     if (vkCreateWin32SurfaceKHR(instance, &surface_info, nullptr, &surface) != VK_SUCCESS) {
@@ -364,7 +364,7 @@ Graphics* create_vulkan_graphics_win32(void* hwnd, void* hinstance, const Config
         return nullptr;
     }
 
-    return create_vulkan_graphics_common(instance, surface, config.width, config.height, config, owns_instance, config.shared_graphics);
+    return create_vulkan_graphics_common(instance, surface, width, height, config, owns_instance, config.shared_graphics);
 }
 #endif
 

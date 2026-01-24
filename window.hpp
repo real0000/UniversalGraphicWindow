@@ -24,28 +24,43 @@
 
 //=============================================================================
 // Platform Detection (Internal)
+// These may already be defined by the build system (CMake), so check first
 //=============================================================================
 
 #if defined(_WIN32)
     #if defined(WINAPI_FAMILY) && (WINAPI_FAMILY == WINAPI_FAMILY_APP)
+        #ifndef WINDOW_PLATFORM_UWP
         #define WINDOW_PLATFORM_UWP
+        #endif
     #else
+        #ifndef WINDOW_PLATFORM_WIN32
         #define WINDOW_PLATFORM_WIN32
+        #endif
     #endif
 #elif defined(__APPLE__)
     #include <TargetConditionals.h>
     #if TARGET_OS_IPHONE
+        #ifndef WINDOW_PLATFORM_IOS
         #define WINDOW_PLATFORM_IOS
+        #endif
     #else
+        #ifndef WINDOW_PLATFORM_MACOS
         #define WINDOW_PLATFORM_MACOS
+        #endif
     #endif
 #elif defined(__ANDROID__)
+    #ifndef WINDOW_PLATFORM_ANDROID
     #define WINDOW_PLATFORM_ANDROID
+    #endif
 #elif defined(__linux__)
     #if defined(WINDOW_USE_WAYLAND)
+        #ifndef WINDOW_PLATFORM_WAYLAND
         #define WINDOW_PLATFORM_WAYLAND
+        #endif
     #else
+        #ifndef WINDOW_PLATFORM_X11
         #define WINDOW_PLATFORM_X11
+        #endif
     #endif
 #else
     #error "Unsupported platform"

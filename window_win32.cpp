@@ -19,22 +19,22 @@
 #include <string>
 
 //=============================================================================
-// Backend Configuration
+// Backend Configuration (use CMake-defined macros)
 //=============================================================================
 
-#if !defined(WINDOW_NO_OPENGL)
+#ifdef WINDOW_SUPPORT_OPENGL
 #define WINDOW_HAS_OPENGL 1
 #endif
 
-#if !defined(WINDOW_NO_D3D11)
+#ifdef WINDOW_SUPPORT_D3D11
 #define WINDOW_HAS_D3D11 1
 #endif
 
-#if !defined(WINDOW_NO_D3D12)
+#ifdef WINDOW_SUPPORT_D3D12
 #define WINDOW_HAS_D3D12 1
 #endif
 
-#if !defined(WINDOW_NO_VULKAN)
+#ifdef WINDOW_SUPPORT_VULKAN
 #define WINDOW_HAS_VULKAN 1
 #endif
 

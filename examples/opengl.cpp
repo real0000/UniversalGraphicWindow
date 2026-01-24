@@ -7,12 +7,16 @@
 #include <cmath>
 
 #if defined(_WIN32)
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
     #include <windows.h>
     #include <GL/gl.h>
 #elif defined(__APPLE__)
     #include <OpenGL/gl3.h>
 #else
     #include <GL/gl.h>
+    #include <GL/glx.h>
 #endif
 
 int main() {
@@ -20,10 +24,7 @@ int main() {
     config.title = "OpenGL Example";
     config.width = 800;
     config.height = 600;
-    config.graphics_api = window::GraphicsAPI::OpenGL;
-    config.opengl.major_version = 3;
-    config.opengl.minor_version = 3;
-    config.opengl.core_profile = true;
+    config.backend = window::Backend::OpenGL;
 
     window::Result result;
     window::Window* win = window::Window::create(config, &result);
@@ -33,7 +34,11 @@ int main() {
         return 1;
     }
 
+    window::Graphics* gfx = win->graphics();
+
     printf("OpenGL context created!\n");
+    printf("Backend: %s\n", gfx->get_backend_name());
+    printf("Device: %s\n", gfx->get_device_name());
     printf("Vendor: %s\n", glGetString(GL_VENDOR));
     printf("Renderer: %s\n", glGetString(GL_RENDERER));
     printf("Version: %s\n", glGetString(GL_VERSION));
@@ -54,7 +59,20 @@ int main() {
         glClearColor(r * 0.3f, g * 0.3f, b * 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        win->swap_buffers();
+        // Swap buffers using native handles
+#if defined(_WIN32)
+        HDC hdc = static_cast<HDC>(gfx->native_swapchain());
+        SwapBuffers(hdc);
+#elif defined(__APPLE__)
+        // On macOS, the context handles swap automatically with NSOpenGLView
+        // Or use CGLFlushDrawable if using CGL directly
+#else
+        // Linux X11/GLX
+        Display* display = static_cast<Display*>(gfx->native_swapchain());
+        Window x_window = reinterpret_cast<Window>(win->native_handle());
+        glXSwapBuffers(display, x_window);
+#endif
+
         time += 0.016f;
     }
 
