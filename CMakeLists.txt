@@ -1,0 +1,304 @@
+cmake_minimum_required(VERSION 3.16)
+project(window VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+#=============================================================================
+# Options
+#=============================================================================
+
+option(WINDOW_BUILD_EXAMPLES "Build example applications" ON)
+option(WINDOW_USE_WAYLAND "Use Wayland instead of X11 on Linux" OFF)
+
+# Graphics API options
+option(WINDOW_ENABLE_OPENGL "Enable OpenGL support" ON)
+option(WINDOW_ENABLE_VULKAN "Enable Vulkan support" ON)
+option(WINDOW_ENABLE_D3D11 "Enable Direct3D 11 support (Windows only)" ON)
+option(WINDOW_ENABLE_D3D12 "Enable Direct3D 12 support (Windows only)" ON)
+option(WINDOW_ENABLE_METAL "Enable Metal support (Apple only)" ON)
+
+#=============================================================================
+# Platform Detection
+#=============================================================================
+
+set(WINDOW_PLATFORM "")
+set(WINDOW_SOURCES "")
+set(WINDOW_LIBS "")
+set(WINDOW_DEFINES "")
+
+if(WIN32)
+    if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+        set(WINDOW_PLATFORM "UWP")
+        set(WINDOW_SOURCES window_uwp.cpp)
+        list(APPEND WINDOW_DEFINES WINDOW_PLATFORM_UWP)
+    else()
+        set(WINDOW_PLATFORM "WIN32")
+        set(WINDOW_SOURCES window_win32.cpp)
+        list(APPEND WINDOW_DEFINES WINDOW_PLATFORM_WIN32)
+    endif()
+elseif(APPLE)
+    if(IOS)
+        set(WINDOW_PLATFORM "IOS")
+        set(WINDOW_SOURCES window_ios.mm)
+        list(APPEND WINDOW_DEFINES WINDOW_PLATFORM_IOS)
+    else()
+        set(WINDOW_PLATFORM "MACOS")
+        set(WINDOW_SOURCES window_macos.mm)
+        list(APPEND WINDOW_DEFINES WINDOW_PLATFORM_MACOS)
+    endif()
+elseif(ANDROID)
+    set(WINDOW_PLATFORM "ANDROID")
+    set(WINDOW_SOURCES window_android.cpp)
+    list(APPEND WINDOW_DEFINES WINDOW_PLATFORM_ANDROID)
+elseif(UNIX)
+    if(WINDOW_USE_WAYLAND)
+        set(WINDOW_PLATFORM "WAYLAND")
+        set(WINDOW_SOURCES window_wayland.cpp)
+        list(APPEND WINDOW_DEFINES WINDOW_PLATFORM_WAYLAND WINDOW_USE_WAYLAND)
+    else()
+        set(WINDOW_PLATFORM "X11")
+        set(WINDOW_SOURCES window_x11.cpp)
+        list(APPEND WINDOW_DEFINES WINDOW_PLATFORM_X11)
+    endif()
+endif()
+
+message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
+
+#=============================================================================
+# Find Dependencies
+#=============================================================================
+
+# OpenGL
+if(WINDOW_ENABLE_OPENGL)
+    if(WINDOW_PLATFORM STREQUAL "WIN32")
+        list(APPEND WINDOW_SOURCES api_opengl.cpp)
+        list(APPEND WINDOW_LIBS opengl32)
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
+    elseif(WINDOW_PLATFORM STREQUAL "X11")
+        list(APPEND WINDOW_SOURCES api_opengl_glx.cpp)
+        find_package(OpenGL REQUIRED)
+        list(APPEND WINDOW_LIBS OpenGL::GL)
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
+    elseif(WINDOW_PLATFORM STREQUAL "WAYLAND")
+        list(APPEND WINDOW_SOURCES api_opengl_egl.cpp)
+        find_package(OpenGL REQUIRED COMPONENTS EGL)
+        list(APPEND WINDOW_LIBS OpenGL::EGL OpenGL::GL)
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
+    elseif(WINDOW_PLATFORM STREQUAL "MACOS")
+        list(APPEND WINDOW_SOURCES api_opengl_cocoa.mm)
+        find_library(OPENGL_FRAMEWORK OpenGL)
+        list(APPEND WINDOW_LIBS ${OPENGL_FRAMEWORK})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
+    elseif(WINDOW_PLATFORM STREQUAL "IOS")
+        list(APPEND WINDOW_SOURCES api_opengl_cocoa.mm)
+        find_library(OPENGLES_FRAMEWORK OpenGLES)
+        list(APPEND WINDOW_LIBS ${OPENGLES_FRAMEWORK})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
+    elseif(WINDOW_PLATFORM STREQUAL "ANDROID")
+        list(APPEND WINDOW_SOURCES api_opengl_egl.cpp)
+        find_library(EGL_LIB EGL)
+        find_library(GLES_LIB GLESv3)
+        list(APPEND WINDOW_LIBS ${EGL_LIB} ${GLES_LIB})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
+    endif()
+endif()
+
+# Vulkan
+if(WINDOW_ENABLE_VULKAN)
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND)
+        if(WINDOW_PLATFORM STREQUAL "WIN32" OR
+           WINDOW_PLATFORM STREQUAL "X11" OR
+           WINDOW_PLATFORM STREQUAL "WAYLAND" OR
+           WINDOW_PLATFORM STREQUAL "MACOS" OR
+           WINDOW_PLATFORM STREQUAL "ANDROID")
+            list(APPEND WINDOW_SOURCES api_vulkan.cpp)
+            list(APPEND WINDOW_LIBS Vulkan::Vulkan)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VULKAN)
+            message(STATUS "Vulkan support enabled")
+        endif()
+    else()
+        message(STATUS "Vulkan not found, Vulkan support disabled")
+    endif()
+endif()
+
+# Direct3D 11
+if(WINDOW_ENABLE_D3D11 AND (WINDOW_PLATFORM STREQUAL "WIN32" OR WINDOW_PLATFORM STREQUAL "UWP"))
+    list(APPEND WINDOW_SOURCES api_d3d11.cpp)
+    list(APPEND WINDOW_LIBS d3d11 dxgi)
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_D3D11)
+    message(STATUS "Direct3D 11 support enabled")
+endif()
+
+# Direct3D 12
+if(WINDOW_ENABLE_D3D12 AND (WINDOW_PLATFORM STREQUAL "WIN32" OR WINDOW_PLATFORM STREQUAL "UWP"))
+    list(APPEND WINDOW_SOURCES api_d3d12.cpp)
+    list(APPEND WINDOW_LIBS d3d12 dxgi)
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_D3D12 WINDOW_SUPPORT_D3D12_ULTIMATE)
+    message(STATUS "Direct3D 12 support enabled")
+endif()
+
+# Metal
+if(WINDOW_ENABLE_METAL AND (WINDOW_PLATFORM STREQUAL "MACOS" OR WINDOW_PLATFORM STREQUAL "IOS"))
+    list(APPEND WINDOW_SOURCES api_metal.mm)
+    find_library(METAL_FRAMEWORK Metal)
+    find_library(METALKIT_FRAMEWORK MetalKit)
+    find_library(QUARTZCORE_FRAMEWORK QuartzCore)
+    list(APPEND WINDOW_LIBS ${METAL_FRAMEWORK} ${METALKIT_FRAMEWORK} ${QUARTZCORE_FRAMEWORK})
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_METAL)
+    message(STATUS "Metal support enabled")
+endif()
+
+# Platform-specific dependencies
+if(WINDOW_PLATFORM STREQUAL "WIN32")
+    list(APPEND WINDOW_LIBS user32 gdi32)
+elseif(WINDOW_PLATFORM STREQUAL "UWP")
+    # UWP uses Windows Runtime
+elseif(WINDOW_PLATFORM STREQUAL "X11")
+    find_package(X11 REQUIRED)
+    list(APPEND WINDOW_LIBS ${X11_LIBRARIES})
+elseif(WINDOW_PLATFORM STREQUAL "WAYLAND")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(WAYLAND REQUIRED wayland-client wayland-egl)
+    list(APPEND WINDOW_LIBS ${WAYLAND_LIBRARIES})
+    include_directories(${WAYLAND_INCLUDE_DIRS})
+elseif(WINDOW_PLATFORM STREQUAL "MACOS")
+    find_library(COCOA_FRAMEWORK Cocoa)
+    list(APPEND WINDOW_LIBS ${COCOA_FRAMEWORK})
+elseif(WINDOW_PLATFORM STREQUAL "IOS")
+    find_library(UIKIT_FRAMEWORK UIKit)
+    find_library(FOUNDATION_FRAMEWORK Foundation)
+    list(APPEND WINDOW_LIBS ${UIKIT_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+elseif(WINDOW_PLATFORM STREQUAL "ANDROID")
+    find_library(ANDROID_LIB android)
+    find_library(LOG_LIB log)
+    list(APPEND WINDOW_LIBS ${ANDROID_LIB} ${LOG_LIB})
+endif()
+
+#=============================================================================
+# Library Target
+#=============================================================================
+
+add_library(window STATIC
+    window.hpp
+    ${WINDOW_SOURCES}
+)
+
+target_include_directories(window PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_compile_definitions(window PUBLIC ${WINDOW_DEFINES})
+target_link_libraries(window PUBLIC ${WINDOW_LIBS})
+
+# Enable Objective-C++ for Apple platforms
+if(APPLE)
+    set_source_files_properties(${WINDOW_SOURCES} PROPERTIES
+        COMPILE_FLAGS "-x objective-c++"
+    )
+endif()
+
+#=============================================================================
+# Examples
+#=============================================================================
+
+if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
+    # Basic window example
+    add_executable(example_basic examples/basic.cpp)
+    target_link_libraries(example_basic PRIVATE window)
+
+    # OpenGL example
+    if(WINDOW_ENABLE_OPENGL AND "WINDOW_SUPPORT_OPENGL" IN_LIST WINDOW_DEFINES)
+        add_executable(example_opengl examples/opengl.cpp)
+        target_link_libraries(example_opengl PRIVATE window)
+    endif()
+
+    # Vulkan example
+    if(Vulkan_FOUND AND "WINDOW_SUPPORT_VULKAN" IN_LIST WINDOW_DEFINES)
+        add_executable(example_vulkan examples/vulkan.cpp)
+        target_link_libraries(example_vulkan PRIVATE window)
+    endif()
+
+    # D3D11 example (Windows only)
+    if(WINDOW_PLATFORM STREQUAL "WIN32" AND WINDOW_ENABLE_D3D11)
+        add_executable(example_d3d11 examples/d3d11.cpp)
+        target_link_libraries(example_d3d11 PRIVATE window)
+    endif()
+
+    # D3D12 example (Windows only)
+    if(WINDOW_PLATFORM STREQUAL "WIN32" AND WINDOW_ENABLE_D3D12)
+        add_executable(example_d3d12 examples/d3d12.cpp)
+        target_link_libraries(example_d3d12 PRIVATE window)
+    endif()
+
+    # Metal example (macOS only)
+    if(WINDOW_PLATFORM STREQUAL "MACOS" AND WINDOW_ENABLE_METAL)
+        add_executable(example_metal examples/metal.mm)
+        target_link_libraries(example_metal PRIVATE window)
+    endif()
+endif()
+
+#=============================================================================
+# Installation
+#=============================================================================
+
+include(GNUInstallDirs)
+
+install(TARGETS window
+    EXPORT windowTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(FILES window.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(EXPORT windowTargets
+    FILE windowTargets.cmake
+    NAMESPACE window::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/window
+)
+
+# Create package config
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/windowConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/windowConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/window
+)
+
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/windowConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/windowConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/windowConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/window
+)
+
+#=============================================================================
+# Summary
+#=============================================================================
+
+message(STATUS "")
+message(STATUS "Window Library Configuration:")
+message(STATUS "  Platform:    ${WINDOW_PLATFORM}")
+message(STATUS "  OpenGL:      ${WINDOW_ENABLE_OPENGL}")
+message(STATUS "  Vulkan:      ${Vulkan_FOUND}")
+if(WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+    message(STATUS "  D3D11:       ${WINDOW_ENABLE_D3D11}")
+    message(STATUS "  D3D12:       ${WINDOW_ENABLE_D3D12}")
+endif()
+if(APPLE)
+    message(STATUS "  Metal:       ${WINDOW_ENABLE_METAL}")
+endif()
+message(STATUS "  Examples:    ${WINDOW_BUILD_EXAMPLES}")
+message(STATUS "")
