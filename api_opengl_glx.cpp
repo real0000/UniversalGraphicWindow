@@ -46,6 +46,25 @@ public:
     const char* get_backend_name() const override { return "OpenGL"; }
     const char* get_device_name() const override { return device_name.c_str(); }
 
+    bool resize(int width, int height) override {
+        // OpenGL doesn't need explicit resize - viewport is set by application
+        (void)width;
+        (void)height;
+        return true;
+    }
+
+    void present() override {
+        if (display && xwindow) {
+            glXSwapBuffers(display, xwindow);
+        }
+    }
+
+    void make_current() override {
+        if (display && xwindow && context) {
+            glXMakeCurrent(display, xwindow, context);
+        }
+    }
+
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return context; }
     void* native_swapchain() const override { return display; }

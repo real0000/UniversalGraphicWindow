@@ -45,6 +45,7 @@ public:
     IDXGISwapChain1* swap_chain = nullptr;
     std::string device_name;
     bool owns_device = true;
+    bool vsync = true;
 
     ~GraphicsD3D11() override {
         if (swap_chain) swap_chain->Release();
@@ -55,6 +56,29 @@ public:
     Backend get_backend() const override { return Backend::D3D11; }
     const char* get_backend_name() const override { return "Direct3D 11"; }
     const char* get_device_name() const override { return device_name.c_str(); }
+
+    bool resize(int width, int height) override {
+        if (!swap_chain || width <= 0 || height <= 0) return false;
+
+        // Release all references to back buffer before resizing
+        context->ClearState();
+        context->Flush();
+
+        HRESULT hr = swap_chain->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height),
+                                                DXGI_FORMAT_UNKNOWN, 0);
+        return SUCCEEDED(hr);
+    }
+
+    void present() override {
+        if (swap_chain) {
+            swap_chain->Present(vsync ? 1 : 0, 0);
+        }
+    }
+
+    void make_current() override {
+        // D3D11 doesn't have a "make current" concept like OpenGL
+        // Context is always bound to the device
+    }
 
     void* native_device() const override { return device; }
     void* native_context() const override { return context; }
@@ -127,6 +151,7 @@ Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     gfx->context = context;
     gfx->swap_chain = swap_chain;
     gfx->owns_device = owns_device;
+    gfx->vsync = config.vsync;
 
     char name[256];
     WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);
@@ -200,6 +225,7 @@ Graphics* create_d3d11_graphics_corewindow(void* core_window, int width, int hei
     gfx->device = device;
     gfx->context = context;
     gfx->swap_chain = swap_chain;
+    gfx->vsync = config.vsync;
 
     char name[256];
     WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);

@@ -71,6 +71,31 @@ public:
 #endif
     const char* get_device_name() const override { return device_name.c_str(); }
 
+    bool resize(int width, int height) override {
+#if defined(__linux__) && !defined(__ANDROID__)
+        // For Wayland, resize the EGL window
+        if (egl_window) {
+            wl_egl_window_resize(egl_window, width, height, 0, 0);
+        }
+#else
+        (void)width;
+        (void)height;
+#endif
+        return true;
+    }
+
+    void present() override {
+        if (egl_display != EGL_NO_DISPLAY && egl_surface != EGL_NO_SURFACE) {
+            eglSwapBuffers(egl_display, egl_surface);
+        }
+    }
+
+    void make_current() override {
+        if (egl_display != EGL_NO_DISPLAY && egl_surface != EGL_NO_SURFACE && egl_context != EGL_NO_CONTEXT) {
+            eglMakeCurrent(egl_display, egl_surface, egl_surface, egl_context);
+        }
+    }
+
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return egl_context; }
     void* native_swapchain() const override { return egl_surface; }

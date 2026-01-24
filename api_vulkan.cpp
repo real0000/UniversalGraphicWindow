@@ -63,6 +63,7 @@ public:
     std::string device_name;
     bool owns_instance = false;
     bool owns_device = true;
+    uint32_t queue_family_index = 0;
 
     ~GraphicsVulkan() override {
         if (swapchain && device) vkDestroySwapchainKHR(device, swapchain, nullptr);
@@ -74,6 +75,27 @@ public:
     Backend get_backend() const override { return Backend::Vulkan; }
     const char* get_backend_name() const override { return "Vulkan"; }
     const char* get_device_name() const override { return device_name.c_str(); }
+
+    bool resize(int width, int height) override {
+        // Vulkan swapchain resize requires recreation
+        // This is a simplified version - full implementation would recreate swapchain
+        // For now, return true and expect user to handle swapchain recreation
+        (void)width;
+        (void)height;
+        // Note: User should use vkGetPhysicalDeviceSurfaceCapabilitiesKHR and
+        // recreate swapchain with new extent when window resizes
+        return true;
+    }
+
+    void present() override {
+        // Vulkan presentation requires command buffer submission
+        // This is handled by the user via vkQueuePresentKHR
+        // This method is a no-op for Vulkan as presentation is more complex
+    }
+
+    void make_current() override {
+        // Vulkan doesn't have a "make current" concept like OpenGL
+    }
 
     void* native_device() const override { return device; }
     void* native_context() const override { return graphics_queue; }

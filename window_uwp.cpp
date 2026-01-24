@@ -25,22 +25,22 @@ using namespace Windows::Graphics::Display;
 namespace window {
 
 //=============================================================================
-// Backend Configuration
+// Backend Configuration (use CMake-defined macros)
 //=============================================================================
 
-#if !defined(WINDOW_NO_OPENGL)
+#ifdef WINDOW_SUPPORT_OPENGL
 #define WINDOW_HAS_OPENGL 1
 #endif
 
-#if !defined(WINDOW_NO_VULKAN)
+#ifdef WINDOW_SUPPORT_VULKAN
 #define WINDOW_HAS_VULKAN 1
 #endif
 
-#if !defined(WINDOW_NO_D3D11)
+#ifdef WINDOW_SUPPORT_D3D11
 #define WINDOW_HAS_D3D11 1
 #endif
 
-#if !defined(WINDOW_NO_D3D12)
+#ifdef WINDOW_SUPPORT_D3D12
 #define WINDOW_HAS_D3D12 1
 #endif
 
@@ -382,6 +382,85 @@ Backend get_default_backend() {
 #else
     return Backend::Auto;
 #endif
+}
+
+//=============================================================================
+// Graphics Context for External Windows
+//=============================================================================
+
+Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_result) {
+    auto set_result = [&](Result r) { if (out_result) *out_result = r; };
+
+    if (!config.native_handle) {
+        set_result(Result::ErrorInvalidParameter);
+        return nullptr;
+    }
+
+    if (config.width <= 0 || config.height <= 0) {
+        set_result(Result::ErrorInvalidParameter);
+        return nullptr;
+    }
+
+    // Convert ExternalWindowConfig to Config for backend creation
+    Config internal_config;
+    internal_config.width = config.width;
+    internal_config.height = config.height;
+    internal_config.vsync = config.vsync;
+    internal_config.samples = config.samples;
+    internal_config.red_bits = config.red_bits;
+    internal_config.green_bits = config.green_bits;
+    internal_config.blue_bits = config.blue_bits;
+    internal_config.alpha_bits = config.alpha_bits;
+    internal_config.depth_bits = config.depth_bits;
+    internal_config.stencil_bits = config.stencil_bits;
+    internal_config.back_buffers = config.back_buffers;
+    internal_config.backend = config.backend;
+    internal_config.shared_graphics = config.shared_graphics;
+
+    Backend requested = config.backend;
+    if (requested == Backend::Auto) {
+        requested = get_default_backend();
+    }
+
+    Graphics* gfx = nullptr;
+    void* core_window = config.native_handle;
+
+    switch (requested) {
+#ifdef WINDOW_HAS_D3D11
+        case Backend::D3D11:
+            gfx = create_d3d11_graphics_corewindow(core_window, config.width, config.height, internal_config);
+            break;
+#endif
+#ifdef WINDOW_HAS_D3D12
+        case Backend::D3D12:
+            gfx = create_d3d12_graphics_corewindow(core_window, config.width, config.height, internal_config);
+            break;
+#endif
+#ifdef WINDOW_HAS_OPENGL
+        case Backend::OpenGL:
+            gfx = create_opengl_graphics_corewindow(core_window, config.width, config.height, internal_config);
+            break;
+#endif
+#ifdef WINDOW_HAS_VULKAN
+        case Backend::Vulkan:
+            gfx = create_vulkan_graphics_corewindow(core_window, config.width, config.height, internal_config);
+            break;
+#endif
+        default:
+            break;
+    }
+
+    if (!gfx) {
+        set_result(Result::ErrorGraphicsInit);
+        return nullptr;
+    }
+
+    set_result(Result::Success);
+    return gfx;
+}
+
+void Graphics::destroy() {
+    delete this;
 }
 
 } // namespace window

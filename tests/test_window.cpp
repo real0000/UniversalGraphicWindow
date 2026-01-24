@@ -160,6 +160,77 @@ TEST(config_custom) {
 }
 
 //=============================================================================
+// Tests for ExternalWindowConfig struct
+//=============================================================================
+
+TEST(external_config_defaults) {
+    window::ExternalWindowConfig config;
+
+    ASSERT(config.native_handle == nullptr);
+    ASSERT(config.native_display == nullptr);
+    ASSERT_EQ(config.width, 0);
+    ASSERT_EQ(config.height, 0);
+    ASSERT(config.vsync == true);
+    ASSERT_EQ(config.samples, 1);
+    ASSERT_EQ(config.red_bits, 8);
+    ASSERT_EQ(config.green_bits, 8);
+    ASSERT_EQ(config.blue_bits, 8);
+    ASSERT_EQ(config.alpha_bits, 8);
+    ASSERT_EQ(config.depth_bits, 24);
+    ASSERT_EQ(config.stencil_bits, 8);
+    ASSERT_EQ(config.back_buffers, 2);
+    ASSERT(config.backend == window::Backend::Auto);
+    ASSERT(config.shared_graphics == nullptr);
+}
+
+TEST(external_config_custom) {
+    window::ExternalWindowConfig config;
+    config.native_handle = reinterpret_cast<void*>(0x12345678);
+    config.native_display = reinterpret_cast<void*>(0x87654321);
+    config.width = 1280;
+    config.height = 720;
+    config.vsync = false;
+    config.samples = 4;
+    config.backend = window::Backend::D3D11;
+
+    ASSERT(config.native_handle == reinterpret_cast<void*>(0x12345678));
+    ASSERT(config.native_display == reinterpret_cast<void*>(0x87654321));
+    ASSERT_EQ(config.width, 1280);
+    ASSERT_EQ(config.height, 720);
+    ASSERT(config.vsync == false);
+    ASSERT_EQ(config.samples, 4);
+    ASSERT(config.backend == window::Backend::D3D11);
+}
+
+TEST(external_graphics_null_handle) {
+    // Creating graphics with null handle should fail
+    window::ExternalWindowConfig config;
+    config.width = 800;
+    config.height = 600;
+    // native_handle is nullptr
+
+    window::Result result;
+    window::Graphics* gfx = window::Graphics::create(config, &result);
+
+    ASSERT(gfx == nullptr);
+    ASSERT(result == window::Result::ErrorInvalidParameter);
+}
+
+TEST(external_graphics_invalid_size) {
+    // Creating graphics with invalid size should fail
+    window::ExternalWindowConfig config;
+    config.native_handle = reinterpret_cast<void*>(0x12345678);  // Fake handle
+    config.width = 0;  // Invalid
+    config.height = 600;
+
+    window::Result result;
+    window::Graphics* gfx = window::Graphics::create(config, &result);
+
+    ASSERT(gfx == nullptr);
+    ASSERT(result == window::Result::ErrorInvalidParameter);
+}
+
+//=============================================================================
 // Tests for enum values
 //=============================================================================
 
@@ -206,6 +277,12 @@ int main() {
     // Config tests
     RUN_TEST(config_defaults);
     RUN_TEST(config_custom);
+
+    // ExternalWindowConfig tests
+    RUN_TEST(external_config_defaults);
+    RUN_TEST(external_config_custom);
+    RUN_TEST(external_graphics_null_handle);
+    RUN_TEST(external_graphics_invalid_size);
 
     // Enum tests
     RUN_TEST(result_enum_values);

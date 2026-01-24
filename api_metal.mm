@@ -42,6 +42,7 @@ public:
     CAMetalLayer* layer = nil;
     std::string device_name;
     bool owns_device = true;
+    bool vsync = true;
 
     ~GraphicsMetal() override {
         layer = nil;
@@ -52,6 +53,22 @@ public:
     Backend get_backend() const override { return Backend::Metal; }
     const char* get_backend_name() const override { return "Metal"; }
     const char* get_device_name() const override { return device_name.c_str(); }
+
+    bool resize(int width, int height) override {
+        if (layer) {
+            layer.drawableSize = CGSizeMake(width, height);
+        }
+        return true;
+    }
+
+    void present() override {
+        // Metal presentation is done via command buffer presentDrawable:
+        // This is a no-op as user should use native Metal APIs
+    }
+
+    void make_current() override {
+        // Metal doesn't have a "make current" concept like OpenGL
+    }
 
     void* native_device() const override { return (__bridge void*)device; }
     void* native_context() const override { return (__bridge void*)command_queue; }

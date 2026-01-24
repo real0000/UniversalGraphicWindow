@@ -32,6 +32,7 @@ class GraphicsOpenGLMacOS : public Graphics {
 public:
     NSOpenGLContext* context = nil;
     NSOpenGLPixelFormat* pixel_format = nil;
+    NSView* view = nil;
     std::string device_name;
 
     ~GraphicsOpenGLMacOS() override {
@@ -45,6 +46,27 @@ public:
     Backend get_backend() const override { return Backend::OpenGL; }
     const char* get_backend_name() const override { return "OpenGL"; }
     const char* get_device_name() const override { return device_name.c_str(); }
+
+    bool resize(int width, int height) override {
+        (void)width;
+        (void)height;
+        if (context) {
+            [context update];
+        }
+        return true;
+    }
+
+    void present() override {
+        if (context) {
+            [context flushBuffer];
+        }
+    }
+
+    void make_current() override {
+        if (context) {
+            [context makeCurrentContext];
+        }
+    }
 
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return (__bridge void*)context; }
@@ -152,6 +174,30 @@ public:
     Backend get_backend() const override { return Backend::OpenGL; }
     const char* get_backend_name() const override { return "OpenGL ES"; }
     const char* get_device_name() const override { return device_name.c_str(); }
+
+    bool resize(int width, int height) override {
+        // For iOS, we'd need to recreate renderbuffers on resize
+        // This is typically handled by the view's layoutSubviews
+        (void)width;
+        (void)height;
+        return true;
+    }
+
+    void present() override {
+        if (context && color_renderbuffer) {
+            glBindRenderbuffer(GL_RENDERBUFFER, color_renderbuffer);
+            [context presentRenderbuffer:GL_RENDERBUFFER];
+        }
+    }
+
+    void make_current() override {
+        if (context) {
+            [EAGLContext setCurrentContext:context];
+            if (framebuffer) {
+                glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+            }
+        }
+    }
 
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return (__bridge void*)context; }

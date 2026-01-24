@@ -45,6 +45,8 @@ public:
     IDXGISwapChain4* swap_chain = nullptr;
     std::string device_name;
     bool owns_device = true;
+    bool vsync = true;
+    UINT buffer_count = 2;
 
     ~GraphicsD3D12() override {
         if (swap_chain) swap_chain->Release();
@@ -55,6 +57,25 @@ public:
     Backend get_backend() const override { return Backend::D3D12; }
     const char* get_backend_name() const override { return "Direct3D 12"; }
     const char* get_device_name() const override { return device_name.c_str(); }
+
+    bool resize(int width, int height) override {
+        if (!swap_chain || width <= 0 || height <= 0) return false;
+
+        // Note: Caller must ensure GPU is idle before resizing
+        HRESULT hr = swap_chain->ResizeBuffers(buffer_count, static_cast<UINT>(width),
+                                                static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN, 0);
+        return SUCCEEDED(hr);
+    }
+
+    void present() override {
+        if (swap_chain) {
+            swap_chain->Present(vsync ? 1 : 0, 0);
+        }
+    }
+
+    void make_current() override {
+        // D3D12 doesn't have a "make current" concept like OpenGL
+    }
 
     void* native_device() const override { return device; }
     void* native_context() const override { return command_queue; }
@@ -160,6 +181,8 @@ Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
     gfx->command_queue = command_queue;
     gfx->swap_chain = swap_chain;
     gfx->owns_device = owns_device;
+    gfx->vsync = config.vsync;
+    gfx->buffer_count = static_cast<UINT>(config.back_buffers);
 
     char name[256];
     WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);
@@ -263,6 +286,8 @@ Graphics* create_d3d12_graphics_corewindow(void* core_window, int width, int hei
     gfx->device = device;
     gfx->command_queue = command_queue;
     gfx->swap_chain = swap_chain;
+    gfx->vsync = config.vsync;
+    gfx->buffer_count = static_cast<UINT>(config.back_buffers);
 
     char name[256];
     WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);

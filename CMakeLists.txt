@@ -249,6 +249,12 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         target_link_libraries(example_d3d12 PRIVATE window)
     endif()
 
+    # External window example (Windows only for now)
+    if(WINDOW_PLATFORM STREQUAL "WIN32")
+        add_executable(example_external_window examples/external_window.cpp)
+        target_link_libraries(example_external_window PRIVATE window)
+    endif()
+
     # Metal example (macOS only)
     if(WINDOW_PLATFORM STREQUAL "MACOS" AND WINDOW_ENABLE_METAL)
         add_executable(example_metal examples/metal.mm)

@@ -134,6 +134,45 @@ struct Config {
     Graphics* shared_graphics = nullptr;
 };
 
+// Configuration for attaching graphics to an existing external window
+struct ExternalWindowConfig {
+    // Native window handle (required)
+    // Win32: HWND
+    // X11: Window (unsigned long)
+    // Wayland: wl_surface*
+    // macOS: NSView*
+    // iOS: UIView*
+    // Android: ANativeWindow*
+    void* native_handle = nullptr;
+
+    // Native display handle (required for X11/Wayland, optional for others)
+    // X11: Display*
+    // Wayland: wl_display*
+    // Others: nullptr
+    void* native_display = nullptr;
+
+    // Window dimensions (required - used for swapchain/viewport setup)
+    int width = 0;
+    int height = 0;
+
+    // Graphics settings
+    bool vsync = true;
+    int samples = 1;        // MSAA samples (1 = disabled)
+    int red_bits = 8;
+    int green_bits = 8;
+    int blue_bits = 8;
+    int alpha_bits = 8;
+    int depth_bits = 24;
+    int stencil_bits = 8;
+    int back_buffers = 2;
+
+    // Graphics backend selection
+    Backend backend = Backend::Auto;
+
+    // Shared context for resource sharing
+    Graphics* shared_graphics = nullptr;
+};
+
 //-----------------------------------------------------------------------------
 // Graphics Context
 //-----------------------------------------------------------------------------
@@ -142,10 +181,30 @@ class Graphics {
 public:
     virtual ~Graphics() = default;
 
+    // Create graphics context for an existing external window
+    // Use this when you have your own window (e.g., from Qt, wxWidgets, SDL, GLFW, etc.)
+    // The caller is responsible for:
+    //   - Managing the window lifetime (don't destroy window while Graphics exists)
+    //   - Calling resize() when the window size changes
+    //   - Presenting/swapping buffers using native APIs or present()
+    static Graphics* create(const ExternalWindowConfig& config, Result* out_result = nullptr);
+
+    // Destroy this graphics context (call instead of delete)
+    void destroy();
+
     // Backend info
     virtual Backend get_backend() const = 0;
     virtual const char* get_backend_name() const = 0;
     virtual const char* get_device_name() const = 0;
+
+    // Resize swapchain (call when external window is resized)
+    virtual bool resize(int width, int height) = 0;
+
+    // Present/swap buffers (convenience method, can also use native APIs directly)
+    virtual void present() = 0;
+
+    // Make this context current (for OpenGL)
+    virtual void make_current() = 0;
 
     // Native handles
     virtual void* native_device() const = 0;
