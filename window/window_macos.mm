@@ -82,7 +82,44 @@ struct Window::Impl {
     int y = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    WindowStyle style = WindowStyle::Default;
+    bool is_fullscreen = false;
+    // For fullscreen toggle restoration
+    NSRect windowed_frame = NSZeroRect;
+    NSWindowStyleMask windowed_style_mask = 0;
 };
+
+// Helper to convert WindowStyle to NSWindowStyleMask
+static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
+    if (has_style(style, WindowStyle::Fullscreen)) {
+        return NSWindowStyleMaskBorderless;
+    }
+
+    NSWindowStyleMask mask = 0;
+
+    if (has_style(style, WindowStyle::TitleBar)) {
+        mask |= NSWindowStyleMaskTitled;
+    }
+
+    if (has_style(style, WindowStyle::CloseButton)) {
+        mask |= NSWindowStyleMaskClosable;
+    }
+
+    if (has_style(style, WindowStyle::MinimizeButton)) {
+        mask |= NSWindowStyleMaskMiniaturizable;
+    }
+
+    if (has_style(style, WindowStyle::Resizable)) {
+        mask |= NSWindowStyleMaskResizable;
+    }
+
+    // Borderless if no title bar and no border
+    if (!has_style(style, WindowStyle::TitleBar) && !has_style(style, WindowStyle::Border)) {
+        mask = NSWindowStyleMaskBorderless;
+    }
+
+    return mask;
+}
 
 } // namespace window
 
@@ -200,19 +237,33 @@ Window* Window::create(const Config& config, Result* out_result) {
         window->impl->height = config.height;
         window->impl->title = config.title;
 
-        NSWindowStyleMask style = NSWindowStyleMaskTitled |
-                                   NSWindowStyleMaskClosable |
-                                   NSWindowStyleMaskMiniaturizable;
-        if (config.resizable) {
-            style |= NSWindowStyleMaskResizable;
+        // Combine config.style with legacy config.resizable flag
+        WindowStyle effective_style = config.style;
+        if (!config.resizable) {
+            effective_style = effective_style & ~WindowStyle::Resizable;
+        }
+        window->impl->style = effective_style;
+        window->impl->is_fullscreen = has_style(effective_style, WindowStyle::Fullscreen);
+
+        NSWindowStyleMask styleMask = style_to_ns_style_mask(effective_style);
+
+        NSRect frame;
+        if (has_style(effective_style, WindowStyle::Fullscreen)) {
+            frame = [[NSScreen mainScreen] frame];
+        } else {
+            frame = NSMakeRect(0, 0, config.width, config.height);
         }
 
-        NSRect frame = NSMakeRect(0, 0, config.width, config.height);
         NSWindow* nsWindow = [[NSWindow alloc]
             initWithContentRect:frame
-                      styleMask:style
+                      styleMask:styleMask
                         backing:NSBackingStoreBuffered
                           defer:NO];
+
+        // Set level for always-on-top
+        if (has_style(effective_style, WindowStyle::AlwaysOnTop)) {
+            [nsWindow setLevel:NSFloatingWindowLevel];
+        }
 
         [nsWindow setTitle:[NSString stringWithUTF8String:config.title]];
 
@@ -403,6 +454,84 @@ bool Window::get_position(int* x, int* y) const {
 
 bool Window::supports_position() const {
     return true;
+}
+
+void Window::set_style(WindowStyle style) {
+    if (!impl || !impl->ns_window) return;
+
+    impl->style = style;
+
+    // Handle fullscreen
+    if (has_style(style, WindowStyle::Fullscreen) && !impl->is_fullscreen) {
+        set_fullscreen(true);
+        return;
+    } else if (!has_style(style, WindowStyle::Fullscreen) && impl->is_fullscreen) {
+        set_fullscreen(false);
+    }
+
+    NSWindowStyleMask styleMask = style_to_ns_style_mask(style);
+    [impl->ns_window setStyleMask:styleMask];
+
+    // Handle always-on-top
+    if (has_style(style, WindowStyle::AlwaysOnTop)) {
+        [impl->ns_window setLevel:NSFloatingWindowLevel];
+    } else {
+        [impl->ns_window setLevel:NSNormalWindowLevel];
+    }
+}
+
+WindowStyle Window::get_style() const {
+    return impl ? impl->style : WindowStyle::Default;
+}
+
+void Window::set_fullscreen(bool fullscreen) {
+    if (!impl || !impl->ns_window) return;
+    if (impl->is_fullscreen == fullscreen) return;
+
+    @autoreleasepool {
+        if (fullscreen) {
+            // Save windowed state
+            impl->windowed_frame = [impl->ns_window frame];
+            impl->windowed_style_mask = [impl->ns_window styleMask];
+
+            // Enter fullscreen
+            [impl->ns_window setStyleMask:NSWindowStyleMaskBorderless];
+            [impl->ns_window setFrame:[[NSScreen mainScreen] frame] display:YES animate:NO];
+            [impl->ns_window setLevel:NSMainMenuWindowLevel + 1];
+
+            impl->is_fullscreen = true;
+            impl->style = impl->style | WindowStyle::Fullscreen;
+        } else {
+            // Restore windowed state
+            [impl->ns_window setStyleMask:impl->windowed_style_mask];
+            [impl->ns_window setFrame:impl->windowed_frame display:YES animate:NO];
+            [impl->ns_window setLevel:has_style(impl->style, WindowStyle::AlwaysOnTop) ?
+                NSFloatingWindowLevel : NSNormalWindowLevel];
+
+            impl->is_fullscreen = false;
+            impl->style = impl->style & ~WindowStyle::Fullscreen;
+        }
+    }
+}
+
+bool Window::is_fullscreen() const {
+    return impl ? impl->is_fullscreen : false;
+}
+
+void Window::set_always_on_top(bool always_on_top) {
+    if (!impl || !impl->ns_window) return;
+
+    if (always_on_top) {
+        impl->style = impl->style | WindowStyle::AlwaysOnTop;
+        [impl->ns_window setLevel:NSFloatingWindowLevel];
+    } else {
+        impl->style = impl->style & ~WindowStyle::AlwaysOnTop;
+        [impl->ns_window setLevel:NSNormalWindowLevel];
+    }
+}
+
+bool Window::is_always_on_top() const {
+    return impl ? has_style(impl->style, WindowStyle::AlwaysOnTop) : false;
 }
 
 bool Window::should_close() const {

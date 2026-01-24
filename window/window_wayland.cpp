@@ -85,6 +85,8 @@ extern "C" {
     #define XDG_TOPLEVEL_SET_APP_ID 3
     #define XDG_TOPLEVEL_SET_MIN_SIZE 7
     #define XDG_TOPLEVEL_SET_MAX_SIZE 8
+    #define XDG_TOPLEVEL_SET_FULLSCREEN 10
+    #define XDG_TOPLEVEL_UNSET_FULLSCREEN 11
 
     static inline void xdg_toplevel_set_title(struct xdg_toplevel *xdg_toplevel, const char *title) {
         wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_SET_TITLE, title);
@@ -96,6 +98,14 @@ extern "C" {
 
     static inline void xdg_toplevel_set_max_size(struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height) {
         wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_SET_MAX_SIZE, width, height);
+    }
+
+    static inline void xdg_toplevel_set_fullscreen(struct xdg_toplevel *xdg_toplevel, struct wl_output *output) {
+        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_SET_FULLSCREEN, output);
+    }
+
+    static inline void xdg_toplevel_unset_fullscreen(struct xdg_toplevel *xdg_toplevel) {
+        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_UNSET_FULLSCREEN);
     }
 
     static inline void xdg_toplevel_destroy(struct xdg_toplevel *xdg_toplevel) {
@@ -166,6 +176,11 @@ struct Window::Impl {
     int pending_height = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    WindowStyle style = WindowStyle::Default;
+    bool is_fullscreen = false;
+    // For fullscreen toggle restoration
+    int windowed_width = 0;
+    int windowed_height = 0;
 };
 
 //=============================================================================
@@ -446,6 +461,78 @@ bool Window::get_position(int* x, int* y) const {
 }
 
 bool Window::supports_position() const { return false; }
+
+void Window::set_style(WindowStyle style) {
+    if (!impl || !impl->toplevel) return;
+
+    impl->style = style;
+
+    // Handle fullscreen
+    if (has_style(style, WindowStyle::Fullscreen) && !impl->is_fullscreen) {
+        set_fullscreen(true);
+    } else if (!has_style(style, WindowStyle::Fullscreen) && impl->is_fullscreen) {
+        set_fullscreen(false);
+    }
+
+    // Handle resizable
+    if (!has_style(style, WindowStyle::Resizable)) {
+        xdg_toplevel_set_min_size(impl->toplevel, impl->width, impl->height);
+        xdg_toplevel_set_max_size(impl->toplevel, impl->width, impl->height);
+    } else {
+        xdg_toplevel_set_min_size(impl->toplevel, 0, 0);
+        xdg_toplevel_set_max_size(impl->toplevel, 0, 0);
+    }
+
+    wl_surface_commit(impl->surface);
+    wl_display_flush(impl->display);
+}
+
+WindowStyle Window::get_style() const {
+    return impl ? impl->style : WindowStyle::Default;
+}
+
+void Window::set_fullscreen(bool fullscreen) {
+    if (!impl || !impl->toplevel) return;
+    if (impl->is_fullscreen == fullscreen) return;
+
+    if (fullscreen) {
+        // Save windowed state
+        impl->windowed_width = impl->width;
+        impl->windowed_height = impl->height;
+
+        xdg_toplevel_set_fullscreen(impl->toplevel, nullptr);
+        impl->is_fullscreen = true;
+        impl->style = impl->style | WindowStyle::Fullscreen;
+    } else {
+        xdg_toplevel_unset_fullscreen(impl->toplevel);
+        impl->is_fullscreen = false;
+        impl->style = impl->style & ~WindowStyle::Fullscreen;
+    }
+
+    wl_surface_commit(impl->surface);
+    wl_display_flush(impl->display);
+}
+
+bool Window::is_fullscreen() const {
+    return impl ? impl->is_fullscreen : false;
+}
+
+void Window::set_always_on_top(bool always_on_top) {
+    // Wayland doesn't have a standard way to set always-on-top
+    // This would require compositor-specific protocols
+    if (impl) {
+        if (always_on_top) {
+            impl->style = impl->style | WindowStyle::AlwaysOnTop;
+        } else {
+            impl->style = impl->style & ~WindowStyle::AlwaysOnTop;
+        }
+    }
+}
+
+bool Window::is_always_on_top() const {
+    return impl ? has_style(impl->style, WindowStyle::AlwaysOnTop) : false;
+}
+
 bool Window::should_close() const { return impl ? impl->should_close_flag : true; }
 void Window::set_should_close(bool close) { if (impl) impl->should_close_flag = close; }
 

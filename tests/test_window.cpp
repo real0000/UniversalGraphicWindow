@@ -262,6 +262,80 @@ TEST(backend_enum_values) {
 }
 
 //=============================================================================
+// Tests for WindowStyle flags
+//=============================================================================
+
+TEST(window_style_defaults) {
+    // Check that WindowStyle::Default has expected flags
+    window::WindowStyle def = window::WindowStyle::Default;
+
+    ASSERT(window::has_style(def, window::WindowStyle::TitleBar));
+    ASSERT(window::has_style(def, window::WindowStyle::Border));
+    ASSERT(window::has_style(def, window::WindowStyle::CloseButton));
+    ASSERT(window::has_style(def, window::WindowStyle::MinimizeButton));
+    ASSERT(window::has_style(def, window::WindowStyle::MaximizeButton));
+    ASSERT(window::has_style(def, window::WindowStyle::Resizable));
+    ASSERT(!window::has_style(def, window::WindowStyle::Fullscreen));
+    ASSERT(!window::has_style(def, window::WindowStyle::AlwaysOnTop));
+}
+
+TEST(window_style_operators) {
+    using namespace window;
+
+    // Test OR operator
+    WindowStyle style = WindowStyle::TitleBar | WindowStyle::Border;
+    ASSERT(has_style(style, WindowStyle::TitleBar));
+    ASSERT(has_style(style, WindowStyle::Border));
+    ASSERT(!has_style(style, WindowStyle::Resizable));
+
+    // Test AND operator
+    WindowStyle masked = style & WindowStyle::TitleBar;
+    ASSERT(has_style(masked, WindowStyle::TitleBar));
+    ASSERT(!has_style(masked, WindowStyle::Border));
+
+    // Test NOT operator
+    WindowStyle inverted = ~WindowStyle::TitleBar;
+    ASSERT(!has_style(inverted, WindowStyle::TitleBar));
+
+    // Test |= operator
+    style |= WindowStyle::Resizable;
+    ASSERT(has_style(style, WindowStyle::Resizable));
+
+    // Test &= operator
+    style &= ~WindowStyle::Border;
+    ASSERT(!has_style(style, WindowStyle::Border));
+}
+
+TEST(window_style_combinations) {
+    using namespace window;
+
+    // Test Borderless
+    ASSERT(WindowStyle::Borderless == WindowStyle::None);
+
+    // Test FixedSize
+    WindowStyle fixed = WindowStyle::FixedSize;
+    ASSERT(has_style(fixed, WindowStyle::TitleBar));
+    ASSERT(has_style(fixed, WindowStyle::Border));
+    ASSERT(has_style(fixed, WindowStyle::CloseButton));
+    ASSERT(has_style(fixed, WindowStyle::MinimizeButton));
+    ASSERT(!has_style(fixed, WindowStyle::MaximizeButton));
+    ASSERT(!has_style(fixed, WindowStyle::Resizable));
+
+    // Test FullscreenBorderless
+    WindowStyle fs = WindowStyle::FullscreenBorderless;
+    ASSERT(has_style(fs, WindowStyle::Fullscreen));
+    ASSERT(!has_style(fs, WindowStyle::TitleBar));
+    ASSERT(!has_style(fs, WindowStyle::Border));
+}
+
+TEST(config_style_default) {
+    window::Config config;
+
+    // Default style should be Default
+    ASSERT(config.style == window::WindowStyle::Default);
+}
+
+//=============================================================================
 // Main
 //=============================================================================
 
@@ -287,6 +361,12 @@ int main() {
     // Enum tests
     RUN_TEST(result_enum_values);
     RUN_TEST(backend_enum_values);
+
+    // WindowStyle tests
+    RUN_TEST(window_style_defaults);
+    RUN_TEST(window_style_operators);
+    RUN_TEST(window_style_combinations);
+    RUN_TEST(config_style_default);
 
     printf("\n=== Test Results ===\n");
     printf("Passed: %d\n", g_tests_passed);

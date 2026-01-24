@@ -62,6 +62,7 @@ struct Window::Impl {
     std::string title;
     Graphics* gfx = nullptr;
     Config config;
+    WindowStyle style = WindowStyle::Fullscreen; // Android NativeActivity is always fullscreen
 };
 
 // Global window instance for Android callbacks
@@ -363,6 +364,33 @@ bool Window::get_position(int* x, int* y) const {
 
 bool Window::supports_position() const {
     return false;
+}
+
+void Window::set_style(WindowStyle style) {
+    // Android NativeActivity windows are always fullscreen, style changes not supported
+    (void)style;
+}
+
+WindowStyle Window::get_style() const {
+    return impl ? impl->style : WindowStyle::Fullscreen;
+}
+
+void Window::set_fullscreen(bool fullscreen) {
+    // Android is always fullscreen
+    (void)fullscreen;
+}
+
+bool Window::is_fullscreen() const {
+    return true; // Android NativeActivity is always fullscreen
+}
+
+void Window::set_always_on_top(bool always_on_top) {
+    // Not applicable on Android
+    (void)always_on_top;
+}
+
+bool Window::is_always_on_top() const {
+    return false; // Not applicable on Android
 }
 
 bool Window::should_close() const {

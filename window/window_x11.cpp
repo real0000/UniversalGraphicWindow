@@ -64,11 +64,35 @@ struct Window::Impl {
     int y = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    WindowStyle style = WindowStyle::Default;
+    bool is_fullscreen = false;
+    // For fullscreen toggle restoration
+    int windowed_x = 0;
+    int windowed_y = 0;
+    int windowed_width = 0;
+    int windowed_height = 0;
 
 #ifdef WINDOW_HAS_OPENGL
     void* fb_config = nullptr;
 #endif
 };
+
+// Helper to send _NET_WM_STATE client message
+static void send_wm_state_event(Display* display, ::Window window, bool add, Atom state1, Atom state2 = 0) {
+    XEvent event = {};
+    event.type = ClientMessage;
+    event.xclient.window = window;
+    event.xclient.message_type = XInternAtom(display, "_NET_WM_STATE", False);
+    event.xclient.format = 32;
+    event.xclient.data.l[0] = add ? 1 : 0; // _NET_WM_STATE_ADD or _NET_WM_STATE_REMOVE
+    event.xclient.data.l[1] = state1;
+    event.xclient.data.l[2] = state2;
+    event.xclient.data.l[3] = 1; // Source indication: normal application
+
+    XSendEvent(display, DefaultRootWindow(display), False,
+               SubstructureRedirectMask | SubstructureNotifyMask, &event);
+    XFlush(display);
+}
 
 //=============================================================================
 // Window Implementation
@@ -179,14 +203,37 @@ Window* Window::create(const Config& config, Result* out_result) {
     window->impl->wm_delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(display, xwindow, &window->impl->wm_delete_window, 1);
 
-    // Set resizable hints
+    // Combine config.style with legacy config.resizable flag
+    WindowStyle effective_style = config.style;
     if (!config.resizable) {
+        effective_style = effective_style & ~WindowStyle::Resizable;
+    }
+
+    window->impl->style = effective_style;
+
+    // Set resizable hints
+    if (!has_style(effective_style, WindowStyle::Resizable)) {
         XSizeHints* hints = XAllocSizeHints();
         hints->flags = PMinSize | PMaxSize;
         hints->min_width = hints->max_width = config.width;
         hints->min_height = hints->max_height = config.height;
         XSetWMNormalHints(display, xwindow, hints);
         XFree(hints);
+    }
+
+    // Set window type hints for borderless/tool windows
+    if (!has_style(effective_style, WindowStyle::TitleBar) && !has_style(effective_style, WindowStyle::Border)) {
+        // Borderless window - set override redirect or use _MOTIF_WM_HINTS
+        Atom motif_hints = XInternAtom(display, "_MOTIF_WM_HINTS", False);
+        struct {
+            unsigned long flags;
+            unsigned long functions;
+            unsigned long decorations;
+            long input_mode;
+            unsigned long status;
+        } hints = { 2, 0, 0, 0, 0 }; // MWM_HINTS_DECORATIONS, no decorations
+        XChangeProperty(display, xwindow, motif_hints, motif_hints, 32, PropModeReplace,
+                        (unsigned char*)&hints, 5);
     }
 
     // Center window if position not specified
@@ -349,6 +396,113 @@ bool Window::get_position(int* x, int* y) const {
 
 bool Window::supports_position() const {
     return true;
+}
+
+void Window::set_style(WindowStyle style) {
+    if (!impl || !impl->display || !impl->xwindow) return;
+
+    impl->style = style;
+
+    // Handle fullscreen
+    if (has_style(style, WindowStyle::Fullscreen) && !impl->is_fullscreen) {
+        set_fullscreen(true);
+    } else if (!has_style(style, WindowStyle::Fullscreen) && impl->is_fullscreen) {
+        set_fullscreen(false);
+    }
+
+    // Handle always-on-top
+    Atom above = XInternAtom(impl->display, "_NET_WM_STATE_ABOVE", False);
+    send_wm_state_event(impl->display, impl->xwindow, has_style(style, WindowStyle::AlwaysOnTop), above);
+
+    // Handle resizable
+    if (!has_style(style, WindowStyle::Resizable)) {
+        XSizeHints* hints = XAllocSizeHints();
+        hints->flags = PMinSize | PMaxSize;
+        hints->min_width = hints->max_width = impl->width;
+        hints->min_height = hints->max_height = impl->height;
+        XSetWMNormalHints(impl->display, impl->xwindow, hints);
+        XFree(hints);
+    } else {
+        XSizeHints* hints = XAllocSizeHints();
+        hints->flags = 0;
+        XSetWMNormalHints(impl->display, impl->xwindow, hints);
+        XFree(hints);
+    }
+
+    // Handle decorations (title bar, border)
+    Atom motif_hints = XInternAtom(impl->display, "_MOTIF_WM_HINTS", False);
+    struct {
+        unsigned long flags;
+        unsigned long functions;
+        unsigned long decorations;
+        long input_mode;
+        unsigned long status;
+    } hints = { 2, 0, 0, 0, 0 };
+
+    if (has_style(style, WindowStyle::TitleBar) || has_style(style, WindowStyle::Border)) {
+        hints.decorations = 1; // Enable decorations
+    }
+
+    XChangeProperty(impl->display, impl->xwindow, motif_hints, motif_hints, 32, PropModeReplace,
+                    (unsigned char*)&hints, 5);
+
+    XFlush(impl->display);
+}
+
+WindowStyle Window::get_style() const {
+    return impl ? impl->style : WindowStyle::Default;
+}
+
+void Window::set_fullscreen(bool fullscreen) {
+    if (!impl || !impl->display || !impl->xwindow) return;
+    if (impl->is_fullscreen == fullscreen) return;
+
+    Atom fullscreen_atom = XInternAtom(impl->display, "_NET_WM_STATE_FULLSCREEN", False);
+
+    if (fullscreen) {
+        // Save windowed state
+        impl->windowed_x = impl->x;
+        impl->windowed_y = impl->y;
+        impl->windowed_width = impl->width;
+        impl->windowed_height = impl->height;
+
+        send_wm_state_event(impl->display, impl->xwindow, true, fullscreen_atom);
+        impl->is_fullscreen = true;
+        impl->style = impl->style | WindowStyle::Fullscreen;
+    } else {
+        send_wm_state_event(impl->display, impl->xwindow, false, fullscreen_atom);
+
+        // Restore windowed state
+        XMoveResizeWindow(impl->display, impl->xwindow,
+                          impl->windowed_x, impl->windowed_y,
+                          impl->windowed_width, impl->windowed_height);
+
+        impl->is_fullscreen = false;
+        impl->style = impl->style & ~WindowStyle::Fullscreen;
+    }
+
+    XFlush(impl->display);
+}
+
+bool Window::is_fullscreen() const {
+    return impl ? impl->is_fullscreen : false;
+}
+
+void Window::set_always_on_top(bool always_on_top) {
+    if (!impl || !impl->display || !impl->xwindow) return;
+
+    Atom above = XInternAtom(impl->display, "_NET_WM_STATE_ABOVE", False);
+    send_wm_state_event(impl->display, impl->xwindow, always_on_top, above);
+
+    if (always_on_top) {
+        impl->style = impl->style | WindowStyle::AlwaysOnTop;
+    } else {
+        impl->style = impl->style & ~WindowStyle::AlwaysOnTop;
+    }
+}
+
+bool Window::is_always_on_top() const {
+    return impl ? has_style(impl->style, WindowStyle::AlwaysOnTop) : false;
 }
 
 bool Window::should_close() const {

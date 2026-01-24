@@ -97,6 +97,46 @@ enum class Backend {
     Metal
 };
 
+// Window style flags (can be combined with |)
+enum class WindowStyle : uint32_t {
+    None            = 0,
+    TitleBar        = 1 << 0,   // Has title bar
+    Border          = 1 << 1,   // Has border/frame
+    CloseButton     = 1 << 2,   // Has close button
+    MinimizeButton  = 1 << 3,   // Has minimize button
+    MaximizeButton  = 1 << 4,   // Has maximize button
+    Resizable       = 1 << 5,   // Can be resized by dragging edges
+    Fullscreen      = 1 << 6,   // Fullscreen mode
+    AlwaysOnTop     = 1 << 7,   // Always on top of other windows
+    ToolWindow      = 1 << 8,   // Tool window (smaller title bar, not in taskbar)
+
+    // Convenience combinations
+    Borderless      = None,
+    Default         = TitleBar | Border | CloseButton | MinimizeButton | MaximizeButton | Resizable,
+    FixedSize       = TitleBar | Border | CloseButton | MinimizeButton,
+    FullscreenBorderless = Fullscreen | Borderless
+};
+
+// Bitwise operators for WindowStyle
+inline WindowStyle operator|(WindowStyle a, WindowStyle b) {
+    return static_cast<WindowStyle>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+inline WindowStyle operator&(WindowStyle a, WindowStyle b) {
+    return static_cast<WindowStyle>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
+inline WindowStyle operator~(WindowStyle a) {
+    return static_cast<WindowStyle>(~static_cast<uint32_t>(a));
+}
+inline WindowStyle& operator|=(WindowStyle& a, WindowStyle b) {
+    return a = a | b;
+}
+inline WindowStyle& operator&=(WindowStyle& a, WindowStyle b) {
+    return a = a & b;
+}
+inline bool has_style(WindowStyle styles, WindowStyle flag) {
+    return (static_cast<uint32_t>(styles) & static_cast<uint32_t>(flag)) != 0;
+}
+
 //-----------------------------------------------------------------------------
 // Forward Declarations
 //-----------------------------------------------------------------------------
@@ -113,10 +153,12 @@ struct Config {
     int height = 600;
     int x = -1;             // -1 = centered/default
     int y = -1;             // -1 = centered/default
-    bool resizable = true;
+    bool resizable = true;  // Deprecated: use style instead. Kept for backward compatibility.
     bool visible = true;
     bool vsync = true;
     int samples = 1;        // MSAA samples (1 = disabled)
+    // Window style flags (default: titled, bordered, with all buttons, resizable)
+    WindowStyle style = WindowStyle::Default;
     // Back buffer settings
     int red_bits = 8;
     int green_bits = 8;
@@ -244,6 +286,14 @@ public:
     bool set_position(int x, int y);
     bool get_position(int* x, int* y) const;
     bool supports_position() const;
+
+    // Style
+    void set_style(WindowStyle style);
+    WindowStyle get_style() const;
+    void set_fullscreen(bool fullscreen);
+    bool is_fullscreen() const;
+    void set_always_on_top(bool always_on_top);
+    bool is_always_on_top() const;
 
     // State
     bool should_close() const;

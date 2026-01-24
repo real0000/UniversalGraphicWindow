@@ -74,7 +74,60 @@ struct Window::Impl {
     int y = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    WindowStyle style = WindowStyle::Default;
+    // For fullscreen toggle restoration
+    RECT windowed_rect = {};
+    DWORD windowed_style = 0;
+    DWORD windowed_ex_style = 0;
+    bool is_fullscreen = false;
 };
+
+// Helper function to convert WindowStyle flags to Win32 style
+static DWORD style_to_win32_style(WindowStyle style) {
+    if (has_style(style, WindowStyle::Fullscreen)) {
+        return WS_POPUP | WS_VISIBLE;
+    }
+
+    DWORD win_style = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+
+    if (has_style(style, WindowStyle::TitleBar)) {
+        win_style |= WS_CAPTION | WS_SYSMENU;
+    }
+
+    if (has_style(style, WindowStyle::Border) && !has_style(style, WindowStyle::TitleBar)) {
+        win_style |= WS_POPUP | WS_BORDER;
+    } else if (!has_style(style, WindowStyle::TitleBar) && !has_style(style, WindowStyle::Border)) {
+        win_style |= WS_POPUP;
+    }
+
+    if (has_style(style, WindowStyle::MinimizeButton)) {
+        win_style |= WS_MINIMIZEBOX;
+    }
+
+    if (has_style(style, WindowStyle::MaximizeButton)) {
+        win_style |= WS_MAXIMIZEBOX;
+    }
+
+    if (has_style(style, WindowStyle::Resizable)) {
+        win_style |= WS_THICKFRAME;
+    }
+
+    return win_style;
+}
+
+static DWORD style_to_win32_ex_style(WindowStyle style) {
+    DWORD ex_style = WS_EX_APPWINDOW;
+
+    if (has_style(style, WindowStyle::AlwaysOnTop)) {
+        ex_style |= WS_EX_TOPMOST;
+    }
+
+    if (has_style(style, WindowStyle::ToolWindow)) {
+        ex_style = (ex_style & ~WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW;
+    }
+
+    return ex_style;
+}
 
 static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     Window::Impl* impl = reinterpret_cast<Window::Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -124,22 +177,38 @@ Window* Window::create(const Config& config, Result* out_result) {
         class_registered = true;
     }
 
-    DWORD style = WS_OVERLAPPEDWINDOW;
-    if (!config.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    // Combine config.style with legacy config.resizable flag
+    WindowStyle effective_style = config.style;
+    if (!config.resizable) {
+        effective_style = effective_style & ~WindowStyle::Resizable;
+    }
 
-    RECT rect = { 0, 0, config.width, config.height };
-    AdjustWindowRect(&rect, style, FALSE);
+    DWORD style = style_to_win32_style(effective_style);
+    DWORD ex_style = style_to_win32_ex_style(effective_style);
 
-    int win_width = rect.right - rect.left;
-    int win_height = rect.bottom - rect.top;
-    int pos_x = config.x >= 0 ? config.x : CW_USEDEFAULT;
-    int pos_y = config.y >= 0 ? config.y : CW_USEDEFAULT;
+    int win_width, win_height;
+    int pos_x, pos_y;
+
+    if (has_style(effective_style, WindowStyle::Fullscreen)) {
+        // Fullscreen: use entire screen
+        pos_x = 0;
+        pos_y = 0;
+        win_width = GetSystemMetrics(SM_CXSCREEN);
+        win_height = GetSystemMetrics(SM_CYSCREEN);
+    } else {
+        RECT rect = { 0, 0, config.width, config.height };
+        AdjustWindowRectEx(&rect, style, FALSE, ex_style);
+        win_width = rect.right - rect.left;
+        win_height = rect.bottom - rect.top;
+        pos_x = config.x >= 0 ? config.x : CW_USEDEFAULT;
+        pos_y = config.y >= 0 ? config.y : CW_USEDEFAULT;
+    }
 
     int title_len = MultiByteToWideChar(CP_UTF8, 0, config.title, -1, nullptr, 0);
     wchar_t* title_wide = new wchar_t[title_len];
     MultiByteToWideChar(CP_UTF8, 0, config.title, -1, title_wide, title_len);
 
-    HWND hwnd = CreateWindowExW(0, CLASS_NAME, title_wide, style, pos_x, pos_y, win_width, win_height,
+    HWND hwnd = CreateWindowExW(ex_style, CLASS_NAME, title_wide, style, pos_x, pos_y, win_width, win_height,
                                  nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     delete[] title_wide;
 
@@ -154,11 +223,20 @@ Window* Window::create(const Config& config, Result* out_result) {
     window->impl->width = config.width;
     window->impl->height = config.height;
     window->impl->title = config.title;
+    window->impl->style = effective_style;
+    window->impl->is_fullscreen = has_style(effective_style, WindowStyle::Fullscreen);
 
     RECT win_rect;
     GetWindowRect(hwnd, &win_rect);
     window->impl->x = win_rect.left;
     window->impl->y = win_rect.top;
+
+    // Save windowed state for fullscreen toggle
+    if (!window->impl->is_fullscreen) {
+        window->impl->windowed_rect = win_rect;
+        window->impl->windowed_style = style;
+        window->impl->windowed_ex_style = ex_style;
+    }
 
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window->impl));
 
@@ -303,6 +381,100 @@ bool Window::get_position(int* x, int* y) const {
 }
 
 bool Window::supports_position() const { return true; }
+
+void Window::set_style(WindowStyle style) {
+    if (!impl || !impl->hwnd) return;
+
+    impl->style = style;
+
+    // Handle fullscreen separately
+    if (has_style(style, WindowStyle::Fullscreen) && !impl->is_fullscreen) {
+        set_fullscreen(true);
+        return;
+    } else if (!has_style(style, WindowStyle::Fullscreen) && impl->is_fullscreen) {
+        set_fullscreen(false);
+    }
+
+    DWORD win_style = style_to_win32_style(style);
+    DWORD ex_style = style_to_win32_ex_style(style);
+
+    SetWindowLongPtrW(impl->hwnd, GWL_STYLE, win_style);
+    SetWindowLongPtrW(impl->hwnd, GWL_EXSTYLE, ex_style);
+
+    // Recalculate window size to maintain client area
+    RECT rect = { 0, 0, impl->width, impl->height };
+    AdjustWindowRectEx(&rect, win_style, FALSE, ex_style);
+
+    SetWindowPos(impl->hwnd, has_style(style, WindowStyle::AlwaysOnTop) ? HWND_TOPMOST : HWND_NOTOPMOST,
+                 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                 SWP_NOMOVE | SWP_FRAMECHANGED);
+}
+
+WindowStyle Window::get_style() const {
+    return impl ? impl->style : WindowStyle::Default;
+}
+
+void Window::set_fullscreen(bool fullscreen) {
+    if (!impl || !impl->hwnd) return;
+    if (impl->is_fullscreen == fullscreen) return;
+
+    if (fullscreen) {
+        // Save current windowed state
+        impl->windowed_style = static_cast<DWORD>(GetWindowLongPtrW(impl->hwnd, GWL_STYLE));
+        impl->windowed_ex_style = static_cast<DWORD>(GetWindowLongPtrW(impl->hwnd, GWL_EXSTYLE));
+        GetWindowRect(impl->hwnd, &impl->windowed_rect);
+
+        // Switch to fullscreen
+        DWORD style = WS_POPUP | WS_VISIBLE;
+        SetWindowLongPtrW(impl->hwnd, GWL_STYLE, style);
+        SetWindowLongPtrW(impl->hwnd, GWL_EXSTYLE, WS_EX_APPWINDOW);
+
+        int screen_width = GetSystemMetrics(SM_CXSCREEN);
+        int screen_height = GetSystemMetrics(SM_CYSCREEN);
+
+        SetWindowPos(impl->hwnd, HWND_TOP, 0, 0, screen_width, screen_height,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+
+        impl->is_fullscreen = true;
+        impl->style = impl->style | WindowStyle::Fullscreen;
+    } else {
+        // Restore windowed state
+        SetWindowLongPtrW(impl->hwnd, GWL_STYLE, impl->windowed_style);
+        SetWindowLongPtrW(impl->hwnd, GWL_EXSTYLE, impl->windowed_ex_style);
+
+        int x = impl->windowed_rect.left;
+        int y = impl->windowed_rect.top;
+        int w = impl->windowed_rect.right - impl->windowed_rect.left;
+        int h = impl->windowed_rect.bottom - impl->windowed_rect.top;
+
+        SetWindowPos(impl->hwnd, HWND_NOTOPMOST, x, y, w, h,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+
+        impl->is_fullscreen = false;
+        impl->style = impl->style & ~WindowStyle::Fullscreen;
+    }
+}
+
+bool Window::is_fullscreen() const {
+    return impl ? impl->is_fullscreen : false;
+}
+
+void Window::set_always_on_top(bool always_on_top) {
+    if (!impl || !impl->hwnd) return;
+
+    if (always_on_top) {
+        impl->style = impl->style | WindowStyle::AlwaysOnTop;
+        SetWindowPos(impl->hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    } else {
+        impl->style = impl->style & ~WindowStyle::AlwaysOnTop;
+        SetWindowPos(impl->hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    }
+}
+
+bool Window::is_always_on_top() const {
+    return impl ? has_style(impl->style, WindowStyle::AlwaysOnTop) : false;
+}
+
 bool Window::should_close() const { return impl ? impl->should_close_flag : true; }
 void Window::set_should_close(bool close) { if (impl) impl->should_close_flag = close; }
 

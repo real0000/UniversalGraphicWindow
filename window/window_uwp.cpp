@@ -77,6 +77,8 @@ struct Window::Impl {
     float dpi = 96.0f;
     std::string title;
     Graphics* gfx = nullptr;
+    WindowStyle style = WindowStyle::Default;
+    bool is_fullscreen = false;
 };
 
 // Global window instance for UWP
@@ -296,6 +298,60 @@ bool Window::get_position(int* x, int* y) const {
 
 bool Window::supports_position() const {
     return false;
+}
+
+void Window::set_style(WindowStyle style) {
+    if (!impl) return;
+
+    impl->style = style;
+
+    // Handle fullscreen
+    if (has_style(style, WindowStyle::Fullscreen) && !impl->is_fullscreen) {
+        set_fullscreen(true);
+    } else if (!has_style(style, WindowStyle::Fullscreen) && impl->is_fullscreen) {
+        set_fullscreen(false);
+    }
+}
+
+WindowStyle Window::get_style() const {
+    return impl ? impl->style : WindowStyle::Default;
+}
+
+void Window::set_fullscreen(bool fullscreen) {
+    if (!impl) return;
+    if (impl->is_fullscreen == fullscreen) return;
+
+    auto view = ApplicationView::GetForCurrentView();
+
+    if (fullscreen) {
+        if (view.TryEnterFullScreenMode()) {
+            impl->is_fullscreen = true;
+            impl->style = impl->style | WindowStyle::Fullscreen;
+        }
+    } else {
+        view.ExitFullScreenMode();
+        impl->is_fullscreen = false;
+        impl->style = impl->style & ~WindowStyle::Fullscreen;
+    }
+}
+
+bool Window::is_fullscreen() const {
+    return impl ? impl->is_fullscreen : false;
+}
+
+void Window::set_always_on_top(bool always_on_top) {
+    // UWP doesn't support always-on-top for regular apps
+    if (impl) {
+        if (always_on_top) {
+            impl->style = impl->style | WindowStyle::AlwaysOnTop;
+        } else {
+            impl->style = impl->style & ~WindowStyle::AlwaysOnTop;
+        }
+    }
+}
+
+bool Window::is_always_on_top() const {
+    return impl ? has_style(impl->style, WindowStyle::AlwaysOnTop) : false;
 }
 
 bool Window::should_close() const {

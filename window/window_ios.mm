@@ -75,6 +75,7 @@ struct Window::Impl {
     int height = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    WindowStyle style = WindowStyle::Fullscreen; // iOS is always fullscreen
 };
 
 } // namespace window
@@ -313,6 +314,33 @@ bool Window::get_position(int* x, int* y) const {
 
 bool Window::supports_position() const {
     return false;
+}
+
+void Window::set_style(WindowStyle style) {
+    // iOS windows are always fullscreen, style changes are not supported
+    (void)style;
+}
+
+WindowStyle Window::get_style() const {
+    return impl ? impl->style : WindowStyle::Fullscreen;
+}
+
+void Window::set_fullscreen(bool fullscreen) {
+    // iOS is always fullscreen
+    (void)fullscreen;
+}
+
+bool Window::is_fullscreen() const {
+    return true; // iOS is always fullscreen
+}
+
+void Window::set_always_on_top(bool always_on_top) {
+    // Not applicable on iOS
+    (void)always_on_top;
+}
+
+bool Window::is_always_on_top() const {
+    return false; // Not applicable on iOS
 }
 
 bool Window::should_close() const {
