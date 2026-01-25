@@ -336,6 +336,183 @@ TEST(config_style_default) {
 }
 
 //=============================================================================
+// Tests for GraphicsConfig
+//=============================================================================
+
+TEST(graphics_config_defaults) {
+    window::GraphicsConfig config;
+
+    ASSERT_STREQ(config.title, "Window");
+    ASSERT_EQ(config.window_x, -1);
+    ASSERT_EQ(config.window_y, -1);
+    ASSERT_EQ(config.window_width, 800);
+    ASSERT_EQ(config.window_height, 600);
+    ASSERT(config.style == window::WindowStyle::Default);
+    ASSERT_EQ(config.monitor_index, 0);
+    ASSERT(config.fullscreen == false);
+    ASSERT_EQ(config.fullscreen_width, 0);
+    ASSERT_EQ(config.fullscreen_height, 0);
+    ASSERT_EQ(config.refresh_rate, 0);
+    ASSERT(config.backend == window::Backend::Auto);
+    ASSERT_EQ(config.device_index, -1);
+    ASSERT(config.vsync == true);
+    ASSERT_EQ(config.samples, 1);
+    ASSERT_EQ(config.back_buffers, 2);
+    ASSERT_EQ(config.color_bits, 32);
+    ASSERT_EQ(config.depth_bits, 24);
+    ASSERT_EQ(config.stencil_bits, 8);
+}
+
+TEST(graphics_config_to_config) {
+    window::GraphicsConfig gfx_config;
+    gfx_config.window_width = 1920;
+    gfx_config.window_height = 1080;
+    gfx_config.vsync = false;
+    gfx_config.samples = 4;
+    gfx_config.backend = window::Backend::OpenGL;
+
+    window::Config config = gfx_config.to_config();
+
+    ASSERT_EQ(config.width, 1920);
+    ASSERT_EQ(config.height, 1080);
+    ASSERT(config.vsync == false);
+    ASSERT_EQ(config.samples, 4);
+    ASSERT(config.backend == window::Backend::OpenGL);
+}
+
+TEST(graphics_config_validate) {
+    window::GraphicsConfig config;
+
+    // Set some invalid values
+    config.window_width = -1;
+    config.window_height = 0;
+    config.samples = 7;  // Not power of 2
+    config.back_buffers = 10;
+    config.color_bits = 48;
+    config.depth_bits = 12;
+    config.stencil_bits = 4;
+
+    // Validate should fix them
+    bool all_valid = config.validate();
+
+    ASSERT(all_valid == false);  // Should return false since we had invalid values
+    ASSERT_EQ(config.window_width, 800);
+    ASSERT_EQ(config.window_height, 600);
+    ASSERT_EQ(config.samples, 1);
+    ASSERT_EQ(config.back_buffers, 2);
+    ASSERT_EQ(config.color_bits, 32);
+    ASSERT_EQ(config.depth_bits, 24);
+    ASSERT_EQ(config.stencil_bits, 8);
+}
+
+TEST(graphics_config_save_load) {
+    // Create a config
+    window::GraphicsConfig save_config;
+    strncpy(save_config.title, "Test Window", window::MAX_DEVICE_NAME_LENGTH - 1);
+    save_config.window_width = 1280;
+    save_config.window_height = 720;
+    save_config.vsync = false;
+    save_config.samples = 4;
+    save_config.backend = window::Backend::D3D11;
+    save_config.fullscreen = true;
+    save_config.refresh_rate = 60;
+
+    // Save to temp file
+    const char* temp_file = "test_config.ini";
+    bool save_result = save_config.save(temp_file);
+    ASSERT(save_result == true);
+
+    // Load it back
+    window::GraphicsConfig load_config;
+    bool load_result = window::GraphicsConfig::load(temp_file, &load_config);
+    ASSERT(load_result == true);
+
+    // Verify values match
+    ASSERT_STREQ(load_config.title, "Test Window");
+    ASSERT_EQ(load_config.window_width, 1280);
+    ASSERT_EQ(load_config.window_height, 720);
+    ASSERT(load_config.vsync == false);
+    ASSERT_EQ(load_config.samples, 4);
+    ASSERT(load_config.backend == window::Backend::D3D11);
+    ASSERT(load_config.fullscreen == true);
+    ASSERT_EQ(load_config.refresh_rate, 60);
+
+    // Cleanup
+    remove(temp_file);
+}
+
+TEST(graphics_config_load_nonexistent) {
+    window::GraphicsConfig config;
+    bool result = window::GraphicsConfig::load("nonexistent_file.ini", &config);
+    ASSERT(result == false);
+}
+
+//=============================================================================
+// Tests for Device/Monitor Enumeration
+//=============================================================================
+
+TEST(enumerate_devices) {
+    window::DeviceEnumeration devices;
+    int count = window::enumerate_devices(window::Backend::Auto, &devices);
+
+    // Should find at least one device on a Windows system
+    ASSERT(count >= 0);  // Might be 0 on systems without GPU
+    ASSERT_EQ(count, devices.device_count);
+
+    // If devices found, check they have valid data
+    for (int i = 0; i < devices.device_count; i++) {
+        ASSERT(devices.devices[i].name[0] != '\0');  // Name should not be empty
+        ASSERT(devices.devices[i].device_index == i);
+    }
+}
+
+TEST(enumerate_monitors) {
+    window::MonitorEnumeration monitors;
+    int count = window::enumerate_monitors(&monitors);
+
+    // Should find at least one monitor
+    ASSERT(count >= 1);
+    ASSERT_EQ(count, monitors.monitor_count);
+
+    // Check for primary monitor
+    bool found_primary = false;
+    for (int i = 0; i < monitors.monitor_count; i++) {
+        if (monitors.monitors[i].is_primary) {
+            found_primary = true;
+        }
+        // Each monitor should have at least one display mode
+        ASSERT(monitors.monitors[i].mode_count >= 1);
+    }
+    ASSERT(found_primary == true);
+}
+
+TEST(get_primary_monitor) {
+    window::MonitorInfo monitor;
+    bool result = window::get_primary_monitor(&monitor);
+
+    ASSERT(result == true);
+    ASSERT(monitor.is_primary == true);
+    ASSERT(monitor.width > 0);
+    ASSERT(monitor.height > 0);
+}
+
+TEST(find_display_mode) {
+    window::MonitorInfo monitor;
+    if (!window::get_primary_monitor(&monitor)) {
+        // Skip test if no monitor available
+        return;
+    }
+
+    // Find the native resolution
+    window::DisplayMode mode;
+    bool found = window::find_display_mode(monitor, monitor.width, monitor.height, 0, &mode);
+
+    ASSERT(found == true);
+    ASSERT_EQ(mode.width, monitor.width);
+    ASSERT_EQ(mode.height, monitor.height);
+}
+
+//=============================================================================
 // Main
 //=============================================================================
 
@@ -367,6 +544,19 @@ int main() {
     RUN_TEST(window_style_operators);
     RUN_TEST(window_style_combinations);
     RUN_TEST(config_style_default);
+
+    // GraphicsConfig tests
+    RUN_TEST(graphics_config_defaults);
+    RUN_TEST(graphics_config_to_config);
+    RUN_TEST(graphics_config_validate);
+    RUN_TEST(graphics_config_save_load);
+    RUN_TEST(graphics_config_load_nonexistent);
+
+    // Device/Monitor enumeration tests
+    RUN_TEST(enumerate_devices);
+    RUN_TEST(enumerate_monitors);
+    RUN_TEST(get_primary_monitor);
+    RUN_TEST(find_display_mode);
 
     printf("\n=== Test Results ===\n");
     printf("Passed: %d\n", g_tests_passed);

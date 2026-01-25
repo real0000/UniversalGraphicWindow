@@ -631,6 +631,29 @@ void Graphics::destroy() {
     delete this;
 }
 
+//=============================================================================
+// Window::create_from_config
+//=============================================================================
+
+Window* Window::create_from_config(const char* config_filepath, Result* out_result) {
+    auto set_result = [&](Result r) { if (out_result) *out_result = r; };
+
+    GraphicsConfig gfx_config;
+
+    // Try to load config file
+    if (config_filepath && GraphicsConfig::load(config_filepath, &gfx_config)) {
+        // Config loaded and validated
+    } else {
+        // Use defaults
+        gfx_config = GraphicsConfig{};
+    }
+
+    // Convert to Config and create window
+    Config config = gfx_config.to_config();
+
+    return Window::create(config, out_result);
+}
+
 } // namespace window
 
 #endif // WINDOW_PLATFORM_WIN32

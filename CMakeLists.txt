@@ -65,6 +65,24 @@ endif()
 
 message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
 
+# Add platform-independent source files
+list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp)
+
+# Add device enumeration files (platform-specific)
+if(WIN32)
+    if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+        list(APPEND WINDOW_SOURCES device/device_uwp.cpp)
+    else()
+        list(APPEND WINDOW_SOURCES device/device_win32.cpp)
+    endif()
+elseif(APPLE)
+    list(APPEND WINDOW_SOURCES device/device_apple.mm)
+elseif(ANDROID)
+    list(APPEND WINDOW_SOURCES device/device_android.cpp)
+elseif(UNIX)
+    list(APPEND WINDOW_SOURCES device/device_linux.cpp)
+endif()
+
 #=============================================================================
 # Find Dependencies
 #=============================================================================
@@ -158,6 +176,15 @@ elseif(WINDOW_PLATFORM STREQUAL "UWP")
 elseif(WINDOW_PLATFORM STREQUAL "X11")
     find_package(X11 REQUIRED)
     list(APPEND WINDOW_LIBS ${X11_LIBRARIES})
+    # Xrandr for monitor enumeration
+    if(X11_Xrandr_FOUND)
+        list(APPEND WINDOW_LIBS ${X11_Xrandr_LIB})
+    else()
+        find_library(XRANDR_LIB Xrandr)
+        if(XRANDR_LIB)
+            list(APPEND WINDOW_LIBS ${XRANDR_LIB})
+        endif()
+    endif()
 elseif(WINDOW_PLATFORM STREQUAL "WAYLAND")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(WAYLAND REQUIRED wayland-client wayland-egl)
@@ -165,7 +192,9 @@ elseif(WINDOW_PLATFORM STREQUAL "WAYLAND")
     include_directories(${WAYLAND_INCLUDE_DIRS})
 elseif(WINDOW_PLATFORM STREQUAL "MACOS")
     find_library(COCOA_FRAMEWORK Cocoa)
-    list(APPEND WINDOW_LIBS ${COCOA_FRAMEWORK})
+    find_library(IOKIT_FRAMEWORK IOKit)
+    find_library(COREGRAPHICS_FRAMEWORK CoreGraphics)
+    list(APPEND WINDOW_LIBS ${COCOA_FRAMEWORK} ${IOKIT_FRAMEWORK} ${COREGRAPHICS_FRAMEWORK})
 elseif(WINDOW_PLATFORM STREQUAL "IOS")
     find_library(UIKIT_FRAMEWORK UIKit)
     find_library(FOUNDATION_FRAMEWORK Foundation)
@@ -254,6 +283,10 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
     if(WINDOW_PLATFORM STREQUAL "WIN32")
         add_executable(example_external_window examples/external_window.cpp)
         target_link_libraries(example_external_window PRIVATE window)
+
+        # Graphics config example
+        add_executable(example_graphics_config examples/graphics_config.cpp)
+        target_link_libraries(example_graphics_config PRIVATE window)
     endif()
 
     # Metal example (macOS only)
