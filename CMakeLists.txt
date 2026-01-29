@@ -18,6 +18,9 @@ option(WINDOW_ENABLE_D3D11 "Enable Direct3D 11 support (Windows only)" ON)
 option(WINDOW_ENABLE_D3D12 "Enable Direct3D 12 support (Windows only)" ON)
 option(WINDOW_ENABLE_METAL "Enable Metal support (Apple only)" ON)
 
+# Gamepad API options (Windows only)
+option(WINDOW_ENABLE_DINPUT "Use DirectInput for gamepad support instead of XInput (Windows only)" OFF)
+
 #=============================================================================
 # Platform Detection
 #=============================================================================
@@ -66,7 +69,7 @@ endif()
 message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
 
 # Add platform-independent source files
-list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input_keyboard.cpp input/input_mouse.cpp)
+list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input_keyboard.cpp input/input_mouse.cpp input/input_gamepad.cpp)
 
 # Add device enumeration files (platform-specific)
 if(WIN32)
@@ -81,6 +84,45 @@ elseif(ANDROID)
     list(APPEND WINDOW_SOURCES device/device_android.cpp)
 elseif(UNIX)
     list(APPEND WINDOW_SOURCES device/device_linux.cpp)
+endif()
+
+# Add platform-specific gamepad implementations
+if(WIN32)
+    if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+        # UWP: TODO - add gamepad_uwp.cpp when implemented
+    else()
+        if(WINDOW_ENABLE_DINPUT)
+            # DirectInput - supports more controller types
+            list(APPEND WINDOW_SOURCES input/gamepad_dinput.cpp)
+            list(APPEND WINDOW_LIBS dinput8 dxguid)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_DINPUT)
+            message(STATUS "Gamepad support: DirectInput")
+        else()
+            # XInput - better for Xbox controllers (default)
+            list(APPEND WINDOW_SOURCES input/gamepad_xinput.cpp)
+            list(APPEND WINDOW_LIBS xinput)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_XINPUT)
+            message(STATUS "Gamepad support: XInput")
+        endif()
+    endif()
+elseif(APPLE)
+    list(APPEND WINDOW_SOURCES input/gamepad_gccontroller.mm)
+    find_library(GAMECONTROLLER_FRAMEWORK GameController)
+    if(GAMECONTROLLER_FRAMEWORK)
+        list(APPEND WINDOW_LIBS ${GAMECONTROLLER_FRAMEWORK})
+        message(STATUS "Gamepad support: GCController")
+    endif()
+elseif(ANDROID)
+    list(APPEND WINDOW_SOURCES input/gamepad_android.cpp)
+    message(STATUS "Gamepad support: Android InputDevice")
+elseif(UNIX)
+    list(APPEND WINDOW_SOURCES input/gamepad_evdev.cpp)
+    # libudev for device enumeration (optional)
+    find_library(UDEV_LIB udev)
+    if(UDEV_LIB)
+        list(APPEND WINDOW_LIBS ${UDEV_LIB})
+    endif()
+    message(STATUS "Gamepad support: evdev")
 endif()
 
 #=============================================================================
@@ -292,6 +334,10 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         # Events example
         add_executable(example_events examples/events.cpp)
         target_link_libraries(example_events PRIVATE window)
+
+        # Gamepad example
+        add_executable(example_gamepad examples/gamepad.cpp)
+        target_link_libraries(example_gamepad PRIVATE window)
     endif()
 
     # Metal example (macOS only)
@@ -321,6 +367,7 @@ install(FILES window.hpp
 install(FILES
     input/input_keyboard.hpp
     input/input_mouse.hpp
+    input/input_gamepad.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/input
 )
 
@@ -363,9 +410,15 @@ message(STATUS "  Vulkan:      ${Vulkan_FOUND}")
 if(WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
     message(STATUS "  D3D11:       ${WINDOW_ENABLE_D3D11}")
     message(STATUS "  D3D12:       ${WINDOW_ENABLE_D3D12}")
+    if(WINDOW_ENABLE_DINPUT)
+        message(STATUS "  Gamepad:     DirectInput")
+    else()
+        message(STATUS "  Gamepad:     XInput")
+    endif()
 endif()
 if(APPLE)
     message(STATUS "  Metal:       ${WINDOW_ENABLE_METAL}")
+    message(STATUS "  Gamepad:     GCController")
 endif()
 message(STATUS "  Examples:    ${WINDOW_BUILD_EXAMPLES}")
 message(STATUS "")
