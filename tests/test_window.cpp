@@ -513,6 +513,118 @@ TEST(find_display_mode) {
 }
 
 //=============================================================================
+// Tests for Event System
+//=============================================================================
+
+TEST(key_enum_values) {
+    using namespace window;
+
+    // Letters should match ASCII
+    ASSERT_EQ(static_cast<int>(Key::A), 'A');
+    ASSERT_EQ(static_cast<int>(Key::Z), 'Z');
+
+    // Numbers should match ASCII
+    ASSERT_EQ(static_cast<int>(Key::Num0), '0');
+    ASSERT_EQ(static_cast<int>(Key::Num9), '9');
+
+    // Function keys should be sequential
+    ASSERT_EQ(static_cast<int>(Key::F2), static_cast<int>(Key::F1) + 1);
+    ASSERT_EQ(static_cast<int>(Key::F12), static_cast<int>(Key::F1) + 11);
+}
+
+TEST(key_mod_operators) {
+    using namespace window;
+
+    // Test OR operator
+    KeyMod mods = KeyMod::Shift | KeyMod::Control;
+    ASSERT(has_mod(mods, KeyMod::Shift));
+    ASSERT(has_mod(mods, KeyMod::Control));
+    ASSERT(!has_mod(mods, KeyMod::Alt));
+
+    // Test AND operator
+    KeyMod masked = mods & KeyMod::Shift;
+    ASSERT(has_mod(masked, KeyMod::Shift));
+    ASSERT(!has_mod(masked, KeyMod::Control));
+
+    // Test None
+    ASSERT(!has_mod(KeyMod::None, KeyMod::Shift));
+    ASSERT(!has_mod(KeyMod::None, KeyMod::Control));
+}
+
+TEST(key_to_string) {
+    using namespace window;
+
+    ASSERT_STREQ(key_to_string(Key::A), "A");
+    ASSERT_STREQ(key_to_string(Key::Z), "Z");
+    ASSERT_STREQ(key_to_string(Key::Num0), "0");
+    ASSERT_STREQ(key_to_string(Key::F1), "F1");
+    ASSERT_STREQ(key_to_string(Key::F12), "F12");
+    ASSERT_STREQ(key_to_string(Key::Escape), "Escape");
+    ASSERT_STREQ(key_to_string(Key::Space), "Space");
+    ASSERT_STREQ(key_to_string(Key::Enter), "Enter");
+    ASSERT_STREQ(key_to_string(Key::LeftShift), "LeftShift");
+    ASSERT_STREQ(key_to_string(Key::RightControl), "RightControl");
+    ASSERT_STREQ(key_to_string(Key::Unknown), "Unknown");
+}
+
+TEST(mouse_button_to_string) {
+    using namespace window;
+
+    ASSERT_STREQ(mouse_button_to_string(MouseButton::Left), "Left");
+    ASSERT_STREQ(mouse_button_to_string(MouseButton::Right), "Right");
+    ASSERT_STREQ(mouse_button_to_string(MouseButton::Middle), "Middle");
+    ASSERT_STREQ(mouse_button_to_string(MouseButton::X1), "X1");
+    ASSERT_STREQ(mouse_button_to_string(MouseButton::X2), "X2");
+    ASSERT_STREQ(mouse_button_to_string(MouseButton::Unknown), "Unknown");
+}
+
+TEST(event_type_to_string) {
+    using namespace window;
+
+    ASSERT_STREQ(event_type_to_string(EventType::None), "None");
+    ASSERT_STREQ(event_type_to_string(EventType::WindowClose), "WindowClose");
+    ASSERT_STREQ(event_type_to_string(EventType::WindowResize), "WindowResize");
+    ASSERT_STREQ(event_type_to_string(EventType::KeyDown), "KeyDown");
+    ASSERT_STREQ(event_type_to_string(EventType::KeyUp), "KeyUp");
+    ASSERT_STREQ(event_type_to_string(EventType::MouseMove), "MouseMove");
+    ASSERT_STREQ(event_type_to_string(EventType::MouseDown), "MouseDown");
+    ASSERT_STREQ(event_type_to_string(EventType::MouseScroll), "MouseScroll");
+    ASSERT_STREQ(event_type_to_string(EventType::DropFile), "DropFile");
+}
+
+TEST(event_structs_defaults) {
+    using namespace window;
+
+    // KeyEvent
+    KeyEvent key_event;
+    ASSERT(key_event.type == EventType::None);
+    ASSERT(key_event.window == nullptr);
+    ASSERT(key_event.key == Key::Unknown);
+    ASSERT(key_event.modifiers == KeyMod::None);
+    ASSERT(key_event.scancode == 0);
+    ASSERT(key_event.repeat == false);
+
+    // MouseButtonEvent
+    MouseButtonEvent mouse_event;
+    ASSERT(mouse_event.type == EventType::None);
+    ASSERT(mouse_event.button == MouseButton::Unknown);
+    ASSERT(mouse_event.x == 0);
+    ASSERT(mouse_event.y == 0);
+    ASSERT(mouse_event.clicks == 1);
+
+    // MouseScrollEvent
+    MouseScrollEvent scroll_event;
+    ASSERT(scroll_event.dx == 0.0f);
+    ASSERT(scroll_event.dy == 0.0f);
+
+    // WindowResizeEvent
+    WindowResizeEvent resize_event;
+    ASSERT(resize_event.width == 0);
+    ASSERT(resize_event.height == 0);
+    ASSERT(resize_event.minimized == false);
+}
+
+//=============================================================================
 // Main
 //=============================================================================
 
@@ -557,6 +669,14 @@ int main() {
     RUN_TEST(enumerate_monitors);
     RUN_TEST(get_primary_monitor);
     RUN_TEST(find_display_mode);
+
+    // Event system tests
+    RUN_TEST(key_enum_values);
+    RUN_TEST(key_mod_operators);
+    RUN_TEST(key_to_string);
+    RUN_TEST(mouse_button_to_string);
+    RUN_TEST(event_type_to_string);
+    RUN_TEST(event_structs_defaults);
 
     printf("\n=== Test Results ===\n");
     printf("Passed: %d\n", g_tests_passed);

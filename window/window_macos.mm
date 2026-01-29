@@ -4,12 +4,16 @@
  */
 
 #include "window.hpp"
+#include "input/input_mouse.hpp"
+#include "input/input_keyboard.hpp"
 
 #if defined(WINDOW_PLATFORM_MACOS)
 
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <Carbon/Carbon.h>  // For key codes
 #include <string>
+#include <mach/mach_time.h>
 
 //=============================================================================
 // Backend Configuration (use CMake-defined macros)
@@ -31,6 +35,141 @@
 #endif
 
 namespace window {
+
+//=============================================================================
+// Key Translation
+//=============================================================================
+
+static Key translate_keycode(unsigned short keyCode) {
+    switch (keyCode) {
+        case kVK_ANSI_A: return Key::A; case kVK_ANSI_B: return Key::B;
+        case kVK_ANSI_C: return Key::C; case kVK_ANSI_D: return Key::D;
+        case kVK_ANSI_E: return Key::E; case kVK_ANSI_F: return Key::F;
+        case kVK_ANSI_G: return Key::G; case kVK_ANSI_H: return Key::H;
+        case kVK_ANSI_I: return Key::I; case kVK_ANSI_J: return Key::J;
+        case kVK_ANSI_K: return Key::K; case kVK_ANSI_L: return Key::L;
+        case kVK_ANSI_M: return Key::M; case kVK_ANSI_N: return Key::N;
+        case kVK_ANSI_O: return Key::O; case kVK_ANSI_P: return Key::P;
+        case kVK_ANSI_Q: return Key::Q; case kVK_ANSI_R: return Key::R;
+        case kVK_ANSI_S: return Key::S; case kVK_ANSI_T: return Key::T;
+        case kVK_ANSI_U: return Key::U; case kVK_ANSI_V: return Key::V;
+        case kVK_ANSI_W: return Key::W; case kVK_ANSI_X: return Key::X;
+        case kVK_ANSI_Y: return Key::Y; case kVK_ANSI_Z: return Key::Z;
+        case kVK_ANSI_0: return Key::Num0; case kVK_ANSI_1: return Key::Num1;
+        case kVK_ANSI_2: return Key::Num2; case kVK_ANSI_3: return Key::Num3;
+        case kVK_ANSI_4: return Key::Num4; case kVK_ANSI_5: return Key::Num5;
+        case kVK_ANSI_6: return Key::Num6; case kVK_ANSI_7: return Key::Num7;
+        case kVK_ANSI_8: return Key::Num8; case kVK_ANSI_9: return Key::Num9;
+        case kVK_F1: return Key::F1; case kVK_F2: return Key::F2;
+        case kVK_F3: return Key::F3; case kVK_F4: return Key::F4;
+        case kVK_F5: return Key::F5; case kVK_F6: return Key::F6;
+        case kVK_F7: return Key::F7; case kVK_F8: return Key::F8;
+        case kVK_F9: return Key::F9; case kVK_F10: return Key::F10;
+        case kVK_F11: return Key::F11; case kVK_F12: return Key::F12;
+        case kVK_Escape: return Key::Escape;
+        case kVK_Tab: return Key::Tab;
+        case kVK_CapsLock: return Key::CapsLock;
+        case kVK_Space: return Key::Space;
+        case kVK_Return: return Key::Enter;
+        case kVK_Delete: return Key::Backspace;
+        case kVK_ForwardDelete: return Key::Delete;
+        case kVK_Help: return Key::Insert;
+        case kVK_Home: return Key::Home;
+        case kVK_End: return Key::End;
+        case kVK_PageUp: return Key::PageUp;
+        case kVK_PageDown: return Key::PageDown;
+        case kVK_LeftArrow: return Key::Left;
+        case kVK_RightArrow: return Key::Right;
+        case kVK_UpArrow: return Key::Up;
+        case kVK_DownArrow: return Key::Down;
+        case kVK_Shift: return Key::LeftShift;
+        case kVK_RightShift: return Key::RightShift;
+        case kVK_Control: return Key::LeftControl;
+        case kVK_RightControl: return Key::RightControl;
+        case kVK_Option: return Key::LeftAlt;
+        case kVK_RightOption: return Key::RightAlt;
+        case kVK_Command: return Key::LeftSuper;
+        case kVK_RightCommand: return Key::RightSuper;
+        case kVK_ANSI_Grave: return Key::Grave;
+        case kVK_ANSI_Minus: return Key::Minus;
+        case kVK_ANSI_Equal: return Key::Equal;
+        case kVK_ANSI_LeftBracket: return Key::LeftBracket;
+        case kVK_ANSI_RightBracket: return Key::RightBracket;
+        case kVK_ANSI_Backslash: return Key::Backslash;
+        case kVK_ANSI_Semicolon: return Key::Semicolon;
+        case kVK_ANSI_Quote: return Key::Apostrophe;
+        case kVK_ANSI_Comma: return Key::Comma;
+        case kVK_ANSI_Period: return Key::Period;
+        case kVK_ANSI_Slash: return Key::Slash;
+        case kVK_ANSI_Keypad0: return Key::Numpad0;
+        case kVK_ANSI_Keypad1: return Key::Numpad1;
+        case kVK_ANSI_Keypad2: return Key::Numpad2;
+        case kVK_ANSI_Keypad3: return Key::Numpad3;
+        case kVK_ANSI_Keypad4: return Key::Numpad4;
+        case kVK_ANSI_Keypad5: return Key::Numpad5;
+        case kVK_ANSI_Keypad6: return Key::Numpad6;
+        case kVK_ANSI_Keypad7: return Key::Numpad7;
+        case kVK_ANSI_Keypad8: return Key::Numpad8;
+        case kVK_ANSI_Keypad9: return Key::Numpad9;
+        case kVK_ANSI_KeypadDecimal: return Key::NumpadDecimal;
+        case kVK_ANSI_KeypadEnter: return Key::NumpadEnter;
+        case kVK_ANSI_KeypadPlus: return Key::NumpadAdd;
+        case kVK_ANSI_KeypadMinus: return Key::NumpadSubtract;
+        case kVK_ANSI_KeypadMultiply: return Key::NumpadMultiply;
+        case kVK_ANSI_KeypadDivide: return Key::NumpadDivide;
+        case kVK_ANSI_KeypadClear: return Key::NumLock;
+        default: return Key::Unknown;
+    }
+}
+
+static KeyMod get_cocoa_modifiers(NSEventModifierFlags flags) {
+    KeyMod mods = KeyMod::None;
+    if (flags & NSEventModifierFlagShift) mods = mods | KeyMod::Shift;
+    if (flags & NSEventModifierFlagControl) mods = mods | KeyMod::Control;
+    if (flags & NSEventModifierFlagOption) mods = mods | KeyMod::Alt;
+    if (flags & NSEventModifierFlagCommand) mods = mods | KeyMod::Super;
+    if (flags & NSEventModifierFlagCapsLock) mods = mods | KeyMod::CapsLock;
+    return mods;
+}
+
+static double get_event_timestamp() {
+    static mach_timebase_info_data_t timebase = {};
+    if (timebase.denom == 0) {
+        mach_timebase_info(&timebase);
+    }
+    uint64_t time = mach_absolute_time();
+    return static_cast<double>(time * timebase.numer / timebase.denom) / 1e9;
+}
+
+//=============================================================================
+// Event Callbacks Storage
+//=============================================================================
+
+struct EventCallbacks {
+    WindowCloseCallback close_callback = nullptr;
+    void* close_user_data = nullptr;
+
+    WindowResizeCallback resize_callback = nullptr;
+    void* resize_user_data = nullptr;
+
+    WindowMoveCallback move_callback = nullptr;
+    void* move_user_data = nullptr;
+
+    WindowFocusCallback focus_callback = nullptr;
+    void* focus_user_data = nullptr;
+
+    WindowStateCallback state_callback = nullptr;
+    void* state_user_data = nullptr;
+
+    TouchCallback touch_callback = nullptr;
+    void* touch_user_data = nullptr;
+
+    DpiChangeCallback dpi_change_callback = nullptr;
+    void* dpi_change_user_data = nullptr;
+
+    DropFileCallback drop_file_callback = nullptr;
+    void* drop_file_user_data = nullptr;
+};
 
 //=============================================================================
 // External Graphics Creation Functions (from api_*.cpp)
@@ -74,8 +213,10 @@ struct Window::Impl {
     NSWindow* ns_window = nil;
     WindowView* view = nil;
     WindowDelegate* delegate = nil;
+    Window* owner = nullptr;  // Back-pointer for event dispatch
     bool should_close_flag = false;
     bool visible = false;
+    bool focused = false;
     int width = 0;
     int height = 0;
     int x = 0;
@@ -87,6 +228,20 @@ struct Window::Impl {
     // For fullscreen toggle restoration
     NSRect windowed_frame = NSZeroRect;
     NSWindowStyleMask windowed_style_mask = 0;
+
+    // Event callbacks
+    EventCallbacks callbacks;
+
+    // Input state
+    bool mouse_in_window = false;
+
+    // Mouse input handler system
+    input::MouseEventDispatcher mouse_dispatcher;
+    input::DefaultMouseDevice mouse_device;
+
+    // Keyboard input handler system
+    input::KeyboardEventDispatcher keyboard_dispatcher;
+    input::DefaultKeyboardDevice keyboard_device;
 };
 
 // Helper to convert WindowStyle to NSWindowStyleMask
@@ -152,6 +307,235 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
     }
 }
 
+// Keyboard events
+- (void)keyDown:(NSEvent*)event {
+    if (!_impl) return;
+
+    window::Key key = window::translate_keycode([event keyCode]);
+    if (key != window::Key::Unknown && static_cast<int>(key) < 512) {
+        _impl->key_states[static_cast<int>(key)] = true;
+    }
+
+    bool isRepeat = [event isARepeat];
+
+    if (_impl->callbacks.key_callback) {
+        window::KeyEvent keyEvent;
+        keyEvent.type = isRepeat ? window::EventType::KeyRepeat : window::EventType::KeyDown;
+        keyEvent.window = _impl->owner;
+        keyEvent.timestamp = window::get_event_timestamp();
+        keyEvent.key = key;
+        keyEvent.modifiers = window::get_cocoa_modifiers([event modifierFlags]);
+        keyEvent.scancode = [event keyCode];
+        keyEvent.repeat = isRepeat;
+        _impl->callbacks.key_callback(keyEvent, _impl->callbacks.key_user_data);
+    }
+
+    // Character input
+    if (_impl->callbacks.char_callback) {
+        NSString* chars = [event characters];
+        if ([chars length] > 0) {
+            unichar c = [chars characterAtIndex:0];
+            if (c >= 32 || c == '\t' || c == '\n' || c == '\r') {
+                window::CharEvent charEvent;
+                charEvent.type = window::EventType::CharInput;
+                charEvent.window = _impl->owner;
+                charEvent.timestamp = window::get_event_timestamp();
+                charEvent.codepoint = c;
+                charEvent.modifiers = window::get_cocoa_modifiers([event modifierFlags]);
+                _impl->callbacks.char_callback(charEvent, _impl->callbacks.char_user_data);
+            }
+        }
+    }
+}
+
+- (void)keyUp:(NSEvent*)event {
+    if (!_impl) return;
+
+    window::Key key = window::translate_keycode([event keyCode]);
+    if (key != window::Key::Unknown && static_cast<int>(key) < 512) {
+        _impl->key_states[static_cast<int>(key)] = false;
+    }
+
+    if (_impl->callbacks.key_callback) {
+        window::KeyEvent keyEvent;
+        keyEvent.type = window::EventType::KeyUp;
+        keyEvent.window = _impl->owner;
+        keyEvent.timestamp = window::get_event_timestamp();
+        keyEvent.key = key;
+        keyEvent.modifiers = window::get_cocoa_modifiers([event modifierFlags]);
+        keyEvent.scancode = [event keyCode];
+        keyEvent.repeat = false;
+        _impl->callbacks.key_callback(keyEvent, _impl->callbacks.key_user_data);
+    }
+}
+
+- (void)flagsChanged:(NSEvent*)event {
+    // Handle modifier key changes
+    if (!_impl || !_impl->callbacks.key_callback) return;
+
+    window::Key key = window::translate_keycode([event keyCode]);
+    bool pressed = false;
+
+    NSEventModifierFlags flags = [event modifierFlags];
+    switch ([event keyCode]) {
+        case kVK_Shift:
+        case kVK_RightShift:
+            pressed = (flags & NSEventModifierFlagShift) != 0;
+            break;
+        case kVK_Control:
+        case kVK_RightControl:
+            pressed = (flags & NSEventModifierFlagControl) != 0;
+            break;
+        case kVK_Option:
+        case kVK_RightOption:
+            pressed = (flags & NSEventModifierFlagOption) != 0;
+            break;
+        case kVK_Command:
+        case kVK_RightCommand:
+            pressed = (flags & NSEventModifierFlagCommand) != 0;
+            break;
+        case kVK_CapsLock:
+            pressed = (flags & NSEventModifierFlagCapsLock) != 0;
+            break;
+    }
+
+    if (key != window::Key::Unknown && static_cast<int>(key) < 512) {
+        _impl->key_states[static_cast<int>(key)] = pressed;
+    }
+
+    window::KeyEvent keyEvent;
+    keyEvent.type = pressed ? window::EventType::KeyDown : window::EventType::KeyUp;
+    keyEvent.window = _impl->owner;
+    keyEvent.timestamp = window::get_event_timestamp();
+    keyEvent.key = key;
+    keyEvent.modifiers = window::get_cocoa_modifiers(flags);
+    keyEvent.scancode = [event keyCode];
+    keyEvent.repeat = false;
+    _impl->callbacks.key_callback(keyEvent, _impl->callbacks.key_user_data);
+}
+
+// Mouse events
+- (void)mouseDown:(NSEvent*)event {
+    [self handleMouseButton:event button:window::MouseButton::Left pressed:YES];
+}
+
+- (void)mouseUp:(NSEvent*)event {
+    [self handleMouseButton:event button:window::MouseButton::Left pressed:NO];
+}
+
+- (void)rightMouseDown:(NSEvent*)event {
+    [self handleMouseButton:event button:window::MouseButton::Right pressed:YES];
+}
+
+- (void)rightMouseUp:(NSEvent*)event {
+    [self handleMouseButton:event button:window::MouseButton::Right pressed:NO];
+}
+
+- (void)otherMouseDown:(NSEvent*)event {
+    window::MouseButton btn = window::MouseButton::Middle;
+    if ([event buttonNumber] == 3) btn = window::MouseButton::X1;
+    else if ([event buttonNumber] == 4) btn = window::MouseButton::X2;
+    [self handleMouseButton:event button:btn pressed:YES];
+}
+
+- (void)otherMouseUp:(NSEvent*)event {
+    window::MouseButton btn = window::MouseButton::Middle;
+    if ([event buttonNumber] == 3) btn = window::MouseButton::X1;
+    else if ([event buttonNumber] == 4) btn = window::MouseButton::X2;
+    [self handleMouseButton:event button:btn pressed:NO];
+}
+
+- (void)handleMouseButton:(NSEvent*)event button:(window::MouseButton)button pressed:(BOOL)pressed {
+    if (!_impl) return;
+
+    NSPoint pos = [self convertPoint:[event locationInWindow] fromView:nil];
+    CGFloat scale = [[self window] backingScaleFactor];
+    int x = static_cast<int>(pos.x * scale);
+    int y = static_cast<int>((_impl->height / scale - pos.y) * scale);  // Flip Y
+    window::KeyMod modifiers = window::get_cocoa_modifiers([event modifierFlags]);
+    double timestamp = window::get_event_timestamp();
+
+    if (pressed) {
+        _impl->mouse_device.inject_button_down(button, x, y, static_cast<int>([event clickCount]), modifiers, timestamp);
+    } else {
+        _impl->mouse_device.inject_button_up(button, x, y, modifiers, timestamp);
+    }
+}
+
+- (void)mouseMoved:(NSEvent*)event {
+    [self handleMouseMove:event];
+}
+
+- (void)mouseDragged:(NSEvent*)event {
+    [self handleMouseMove:event];
+}
+
+- (void)rightMouseDragged:(NSEvent*)event {
+    [self handleMouseMove:event];
+}
+
+- (void)otherMouseDragged:(NSEvent*)event {
+    [self handleMouseMove:event];
+}
+
+- (void)handleMouseMove:(NSEvent*)event {
+    if (!_impl) return;
+
+    NSPoint pos = [self convertPoint:[event locationInWindow] fromView:nil];
+    CGFloat scale = [[self window] backingScaleFactor];
+    int x = static_cast<int>(pos.x * scale);
+    int y = static_cast<int>((_impl->height / scale - pos.y) * scale);  // Flip Y
+
+    _impl->mouse_device.inject_move(x, y, window::get_cocoa_modifiers([event modifierFlags]), window::get_event_timestamp());
+}
+
+- (void)scrollWheel:(NSEvent*)event {
+    if (!_impl) return;
+
+    NSPoint pos = [self convertPoint:[event locationInWindow] fromView:nil];
+    CGFloat scale = [[self window] backingScaleFactor];
+    int x = static_cast<int>(pos.x * scale);
+    int y = static_cast<int>((_impl->height / scale - pos.y) * scale);
+
+    _impl->mouse_device.inject_wheel(
+        static_cast<float>([event scrollingDeltaX]),
+        static_cast<float>([event scrollingDeltaY]),
+        x, y,
+        window::get_cocoa_modifiers([event modifierFlags]),
+        window::get_event_timestamp()
+    );
+}
+
+- (void)mouseEntered:(NSEvent*)event {
+    (void)event;
+    if (!_impl) return;
+    _impl->mouse_in_window = true;
+}
+
+- (void)mouseExited:(NSEvent*)event {
+    (void)event;
+    if (!_impl) return;
+    _impl->mouse_in_window = false;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+
+    // Remove old tracking areas
+    for (NSTrackingArea* area in [self trackingAreas]) {
+        [self removeTrackingArea:area];
+    }
+
+    // Add new tracking area for mouse enter/exit
+    NSTrackingArea* trackingArea = [[NSTrackingArea alloc]
+        initWithRect:[self bounds]
+        options:(NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved |
+                 NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect)
+        owner:self
+        userInfo:nil];
+    [self addTrackingArea:trackingArea];
+}
+
 @end
 
 //=============================================================================
@@ -163,6 +547,14 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
 - (BOOL)windowShouldClose:(NSWindow*)sender {
     if (_impl) {
         _impl->should_close_flag = true;
+
+        if (_impl->callbacks.close_callback) {
+            window::WindowCloseEvent closeEvent;
+            closeEvent.type = window::EventType::WindowClose;
+            closeEvent.window = _impl->owner;
+            closeEvent.timestamp = window::get_event_timestamp();
+            _impl->callbacks.close_callback(closeEvent, _impl->callbacks.close_user_data);
+        }
     }
     return NO;
 }
@@ -174,6 +566,17 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
         CGFloat scale = [window backingScaleFactor];
         _impl->width = static_cast<int>(frame.size.width * scale);
         _impl->height = static_cast<int>(frame.size.height * scale);
+
+        if (_impl->callbacks.resize_callback) {
+            window::WindowResizeEvent resizeEvent;
+            resizeEvent.type = window::EventType::WindowResize;
+            resizeEvent.window = _impl->owner;
+            resizeEvent.timestamp = window::get_event_timestamp();
+            resizeEvent.width = _impl->width;
+            resizeEvent.height = _impl->height;
+            resizeEvent.minimized = false;
+            _impl->callbacks.resize_callback(resizeEvent, _impl->callbacks.resize_user_data);
+        }
     }
 }
 
@@ -183,18 +586,81 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
         NSRect frame = [window frame];
         _impl->x = static_cast<int>(frame.origin.x);
         _impl->y = static_cast<int>(frame.origin.y);
+
+        if (_impl->callbacks.move_callback) {
+            window::WindowMoveEvent moveEvent;
+            moveEvent.type = window::EventType::WindowMove;
+            moveEvent.window = _impl->owner;
+            moveEvent.timestamp = window::get_event_timestamp();
+            moveEvent.x = _impl->x;
+            moveEvent.y = _impl->y;
+            _impl->callbacks.move_callback(moveEvent, _impl->callbacks.move_user_data);
+        }
     }
 }
 
 - (void)windowDidMiniaturize:(NSNotification*)notification {
     if (_impl) {
         _impl->visible = false;
+
+        if (_impl->callbacks.state_callback) {
+            window::WindowStateEvent stateEvent;
+            stateEvent.type = window::EventType::WindowMinimize;
+            stateEvent.window = _impl->owner;
+            stateEvent.timestamp = window::get_event_timestamp();
+            stateEvent.minimized = true;
+            stateEvent.maximized = false;
+            _impl->callbacks.state_callback(stateEvent, _impl->callbacks.state_user_data);
+        }
     }
 }
 
 - (void)windowDidDeminiaturize:(NSNotification*)notification {
     if (_impl) {
         _impl->visible = true;
+
+        if (_impl->callbacks.state_callback) {
+            window::WindowStateEvent stateEvent;
+            stateEvent.type = window::EventType::WindowRestore;
+            stateEvent.window = _impl->owner;
+            stateEvent.timestamp = window::get_event_timestamp();
+            stateEvent.minimized = false;
+            stateEvent.maximized = false;
+            _impl->callbacks.state_callback(stateEvent, _impl->callbacks.state_user_data);
+        }
+    }
+}
+
+- (void)windowDidBecomeKey:(NSNotification*)notification {
+    if (_impl) {
+        _impl->focused = true;
+
+        if (_impl->callbacks.focus_callback) {
+            window::WindowFocusEvent focusEvent;
+            focusEvent.type = window::EventType::WindowFocus;
+            focusEvent.window = _impl->owner;
+            focusEvent.timestamp = window::get_event_timestamp();
+            focusEvent.focused = true;
+            _impl->callbacks.focus_callback(focusEvent, _impl->callbacks.focus_user_data);
+        }
+    }
+}
+
+- (void)windowDidResignKey:(NSNotification*)notification {
+    if (_impl) {
+        _impl->focused = false;
+        // Reset key states on focus loss
+        memset(_impl->key_states, 0, sizeof(_impl->key_states));
+        _impl->mouse_device.reset();
+
+        if (_impl->callbacks.focus_callback) {
+            window::WindowFocusEvent focusEvent;
+            focusEvent.type = window::EventType::WindowBlur;
+            focusEvent.window = _impl->owner;
+            focusEvent.timestamp = window::get_event_timestamp();
+            focusEvent.focused = false;
+            _impl->callbacks.focus_callback(focusEvent, _impl->callbacks.focus_user_data);
+        }
     }
 }
 
@@ -233,6 +699,7 @@ Window* Window::create(const Config& config, Result* out_result) {
 
         Window* window = new Window();
         window->impl = new Window::Impl();
+        window->impl->owner = window;  // Set back-pointer for event dispatch
         window->impl->width = config.width;
         window->impl->height = config.height;
         window->impl->title = config.title;
@@ -280,6 +747,10 @@ Window* Window::create(const Config& config, Result* out_result) {
         window->impl->delegate = delegate;
 
         window->impl->ns_window = nsWindow;
+
+        // Initialize mouse input system
+        window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
+        window->impl->mouse_device.set_window(window);
 
         // Set position
         if (config.x >= 0 && config.y >= 0) {
@@ -567,6 +1038,71 @@ void* Window::native_display() const {
 }
 
 //=============================================================================
+// Event Callback Setters
+//=============================================================================
+
+void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.close_callback = callback; impl->callbacks.close_user_data = user_data; }
+}
+
+void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.resize_callback = callback; impl->callbacks.resize_user_data = user_data; }
+}
+
+void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.move_callback = callback; impl->callbacks.move_user_data = user_data; }
+}
+
+void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.focus_callback = callback; impl->callbacks.focus_user_data = user_data; }
+}
+
+void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.state_callback = callback; impl->callbacks.state_user_data = user_data; }
+}
+
+void Window::set_touch_callback(TouchCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.touch_callback = callback; impl->callbacks.touch_user_data = user_data; }
+}
+
+void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.dpi_change_callback = callback; impl->callbacks.dpi_change_user_data = user_data; }
+}
+
+void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.drop_file_callback = callback; impl->callbacks.drop_file_user_data = user_data; }
+}
+
+//=============================================================================
+// Input State Queries
+//=============================================================================
+
+bool Window::is_key_down(Key key) const {
+    if (!impl || key == Key::Unknown) return false;
+    return impl->keyboard_device.is_key_down(key);
+}
+
+bool Window::is_mouse_button_down(MouseButton button) const {
+    if (!impl) return false;
+    return impl->mouse_device.is_button_down(button);
+}
+
+void Window::get_mouse_position(int* x, int* y) const {
+    if (impl) {
+        impl->mouse_device.get_position(x, y);
+    } else {
+        if (x) *x = 0;
+        if (y) *y = 0;
+    }
+}
+
+KeyMod Window::get_current_modifiers() const {
+    if (!impl) return KeyMod::None;
+    NSEventModifierFlags flags = [NSEvent modifierFlags];
+    return get_cocoa_modifiers(flags);
+}
+
+//=============================================================================
 // Utility Functions
 //=============================================================================
 
@@ -621,6 +1157,55 @@ Backend get_default_backend() {
 #else
     return Backend::Auto;
 #endif
+}
+
+// key_to_string, mouse_button_to_string, event_type_to_string
+// are implemented in input/input_keyboard.cpp
+
+//=============================================================================
+// Mouse Handler API
+//=============================================================================
+
+bool Window::add_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_mouse_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler_id);
+}
+
+input::MouseEventDispatcher* Window::get_mouse_dispatcher() {
+    return impl ? &impl->mouse_dispatcher : nullptr;
+}
+
+//=============================================================================
+// Keyboard Handler API
+//=============================================================================
+
+bool Window::add_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler_id);
+}
+
+input::KeyboardEventDispatcher* Window::get_keyboard_dispatcher() {
+    return impl ? &impl->keyboard_dispatcher : nullptr;
 }
 
 //=============================================================================

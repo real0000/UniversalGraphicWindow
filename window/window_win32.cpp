@@ -4,6 +4,8 @@
  */
 
 #include "window.hpp"
+#include "input/input_mouse.hpp"
+#include "input/input_keyboard.hpp"
 
 #if defined(WINDOW_PLATFORM_WIN32)
 
@@ -15,6 +17,8 @@
 #endif
 
 #include <windows.h>
+#include <windowsx.h>
+#include <shellapi.h>
 #include <cstring>
 #include <string>
 
@@ -61,11 +65,166 @@ Graphics* create_vulkan_graphics_win32(void* hwnd, int width, int height, const 
 #endif
 
 //=============================================================================
+// Key Translation
+//=============================================================================
+
+static Key translate_key(WPARAM vk, LPARAM lparam) {
+    // Check for extended key flag
+    bool extended = (lparam & (1 << 24)) != 0;
+    UINT scancode = (lparam >> 16) & 0xFF;
+
+    switch (vk) {
+        // Letters
+        case 'A': return Key::A; case 'B': return Key::B; case 'C': return Key::C;
+        case 'D': return Key::D; case 'E': return Key::E; case 'F': return Key::F;
+        case 'G': return Key::G; case 'H': return Key::H; case 'I': return Key::I;
+        case 'J': return Key::J; case 'K': return Key::K; case 'L': return Key::L;
+        case 'M': return Key::M; case 'N': return Key::N; case 'O': return Key::O;
+        case 'P': return Key::P; case 'Q': return Key::Q; case 'R': return Key::R;
+        case 'S': return Key::S; case 'T': return Key::T; case 'U': return Key::U;
+        case 'V': return Key::V; case 'W': return Key::W; case 'X': return Key::X;
+        case 'Y': return Key::Y; case 'Z': return Key::Z;
+
+        // Numbers
+        case '0': return Key::Num0; case '1': return Key::Num1; case '2': return Key::Num2;
+        case '3': return Key::Num3; case '4': return Key::Num4; case '5': return Key::Num5;
+        case '6': return Key::Num6; case '7': return Key::Num7; case '8': return Key::Num8;
+        case '9': return Key::Num9;
+
+        // Function keys
+        case VK_F1: return Key::F1; case VK_F2: return Key::F2; case VK_F3: return Key::F3;
+        case VK_F4: return Key::F4; case VK_F5: return Key::F5; case VK_F6: return Key::F6;
+        case VK_F7: return Key::F7; case VK_F8: return Key::F8; case VK_F9: return Key::F9;
+        case VK_F10: return Key::F10; case VK_F11: return Key::F11; case VK_F12: return Key::F12;
+        case VK_F13: return Key::F13; case VK_F14: return Key::F14; case VK_F15: return Key::F15;
+        case VK_F16: return Key::F16; case VK_F17: return Key::F17; case VK_F18: return Key::F18;
+        case VK_F19: return Key::F19; case VK_F20: return Key::F20; case VK_F21: return Key::F21;
+        case VK_F22: return Key::F22; case VK_F23: return Key::F23; case VK_F24: return Key::F24;
+
+        // Navigation
+        case VK_ESCAPE: return Key::Escape;
+        case VK_TAB: return Key::Tab;
+        case VK_CAPITAL: return Key::CapsLock;
+        case VK_SPACE: return Key::Space;
+        case VK_RETURN: return extended ? Key::NumpadEnter : Key::Enter;
+        case VK_BACK: return Key::Backspace;
+        case VK_DELETE: return Key::Delete;
+        case VK_INSERT: return Key::Insert;
+        case VK_HOME: return Key::Home;
+        case VK_END: return Key::End;
+        case VK_PRIOR: return Key::PageUp;
+        case VK_NEXT: return Key::PageDown;
+        case VK_LEFT: return Key::Left;
+        case VK_RIGHT: return Key::Right;
+        case VK_UP: return Key::Up;
+        case VK_DOWN: return Key::Down;
+
+        // Modifiers
+        case VK_SHIFT:
+            return (scancode == 0x36) ? Key::RightShift : Key::LeftShift;
+        case VK_CONTROL:
+            return extended ? Key::RightControl : Key::LeftControl;
+        case VK_MENU:
+            return extended ? Key::RightAlt : Key::LeftAlt;
+        case VK_LWIN: return Key::LeftSuper;
+        case VK_RWIN: return Key::RightSuper;
+
+        // Punctuation
+        case VK_OEM_3: return Key::Grave;
+        case VK_OEM_MINUS: return Key::Minus;
+        case VK_OEM_PLUS: return Key::Equal;
+        case VK_OEM_4: return Key::LeftBracket;
+        case VK_OEM_6: return Key::RightBracket;
+        case VK_OEM_5: return Key::Backslash;
+        case VK_OEM_1: return Key::Semicolon;
+        case VK_OEM_7: return Key::Apostrophe;
+        case VK_OEM_COMMA: return Key::Comma;
+        case VK_OEM_PERIOD: return Key::Period;
+        case VK_OEM_2: return Key::Slash;
+
+        // Numpad
+        case VK_NUMPAD0: return Key::Numpad0; case VK_NUMPAD1: return Key::Numpad1;
+        case VK_NUMPAD2: return Key::Numpad2; case VK_NUMPAD3: return Key::Numpad3;
+        case VK_NUMPAD4: return Key::Numpad4; case VK_NUMPAD5: return Key::Numpad5;
+        case VK_NUMPAD6: return Key::Numpad6; case VK_NUMPAD7: return Key::Numpad7;
+        case VK_NUMPAD8: return Key::Numpad8; case VK_NUMPAD9: return Key::Numpad9;
+        case VK_DECIMAL: return Key::NumpadDecimal;
+        case VK_ADD: return Key::NumpadAdd;
+        case VK_SUBTRACT: return Key::NumpadSubtract;
+        case VK_MULTIPLY: return Key::NumpadMultiply;
+        case VK_DIVIDE: return Key::NumpadDivide;
+        case VK_NUMLOCK: return Key::NumLock;
+
+        // Other
+        case VK_SNAPSHOT: return Key::PrintScreen;
+        case VK_SCROLL: return Key::ScrollLock;
+        case VK_PAUSE: return Key::Pause;
+        case VK_APPS: return Key::Menu;
+
+        default: return Key::Unknown;
+    }
+}
+
+static KeyMod get_current_key_modifiers() {
+    KeyMod mods = KeyMod::None;
+    if (GetKeyState(VK_SHIFT) & 0x8000) mods = mods | KeyMod::Shift;
+    if (GetKeyState(VK_CONTROL) & 0x8000) mods = mods | KeyMod::Control;
+    if (GetKeyState(VK_MENU) & 0x8000) mods = mods | KeyMod::Alt;
+    if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) mods = mods | KeyMod::Super;
+    if (GetKeyState(VK_CAPITAL) & 0x0001) mods = mods | KeyMod::CapsLock;
+    if (GetKeyState(VK_NUMLOCK) & 0x0001) mods = mods | KeyMod::NumLock;
+    return mods;
+}
+
+static MouseButton translate_mouse_button(UINT msg, WPARAM wparam) {
+    switch (msg) {
+        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+            return MouseButton::Left;
+        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+            return MouseButton::Right;
+        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+            return MouseButton::Middle;
+        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+            return (GET_XBUTTON_WPARAM(wparam) == XBUTTON1) ? MouseButton::X1 : MouseButton::X2;
+        default:
+            return MouseButton::Unknown;
+    }
+}
+
+//=============================================================================
 // Window Implementation
 //=============================================================================
 
+// Callback storage structure
+struct EventCallbacks {
+    WindowCloseCallback close_callback = nullptr;
+    void* close_user_data = nullptr;
+
+    WindowResizeCallback resize_callback = nullptr;
+    void* resize_user_data = nullptr;
+
+    WindowMoveCallback move_callback = nullptr;
+    void* move_user_data = nullptr;
+
+    WindowFocusCallback focus_callback = nullptr;
+    void* focus_user_data = nullptr;
+
+    WindowStateCallback state_callback = nullptr;
+    void* state_user_data = nullptr;
+
+    TouchCallback touch_callback = nullptr;
+    void* touch_user_data = nullptr;
+
+    DpiChangeCallback dpi_change_callback = nullptr;
+    void* dpi_change_user_data = nullptr;
+
+    DropFileCallback drop_file_callback = nullptr;
+    void* drop_file_user_data = nullptr;
+};
+
 struct Window::Impl {
     HWND hwnd = nullptr;
+    Window* owner = nullptr;  // Back-pointer to Window for event dispatch
     bool should_close_flag = false;
     bool visible = false;
     int width = 0;
@@ -80,6 +239,21 @@ struct Window::Impl {
     DWORD windowed_style = 0;
     DWORD windowed_ex_style = 0;
     bool is_fullscreen = false;
+
+    // Event callbacks
+    EventCallbacks callbacks;
+
+    // Mouse input system
+    input::MouseEventDispatcher mouse_dispatcher;
+    input::DefaultMouseDevice mouse_device;
+
+    // Keyboard input system
+    input::KeyboardEventDispatcher keyboard_dispatcher;
+    input::DefaultKeyboardDevice keyboard_device;
+
+    // Input state
+    bool mouse_in_window = false;
+    bool focused = true;
 };
 
 // Helper function to convert WindowStyle flags to Win32 style
@@ -129,31 +303,289 @@ static DWORD style_to_win32_ex_style(WindowStyle style) {
     return ex_style;
 }
 
+static double get_event_timestamp() {
+    static LARGE_INTEGER frequency = {};
+    static bool initialized = false;
+    if (!initialized) {
+        QueryPerformanceFrequency(&frequency);
+        initialized = true;
+    }
+    LARGE_INTEGER counter;
+    QueryPerformanceCounter(&counter);
+    return static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
+}
+
 static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     Window::Impl* impl = reinterpret_cast<Window::Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (msg) {
         case WM_CLOSE:
-            if (impl) impl->should_close_flag = true;
+            if (impl) {
+                impl->should_close_flag = true;
+                if (impl->callbacks.close_callback) {
+                    WindowCloseEvent event;
+                    event.type = EventType::WindowClose;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    impl->callbacks.close_callback(event, impl->callbacks.close_user_data);
+                }
+            }
             return 0;
+
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
+
         case WM_SIZE:
             if (impl) {
-                impl->width = LOWORD(lparam);
-                impl->height = HIWORD(lparam);
+                int new_width = LOWORD(lparam);
+                int new_height = HIWORD(lparam);
+                bool minimized = (wparam == SIZE_MINIMIZED);
+                bool maximized = (wparam == SIZE_MAXIMIZED);
+
+                impl->width = new_width;
+                impl->height = new_height;
+
+                if (impl->callbacks.resize_callback) {
+                    WindowResizeEvent event;
+                    event.type = EventType::WindowResize;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    event.width = new_width;
+                    event.height = new_height;
+                    event.minimized = minimized;
+                    impl->callbacks.resize_callback(event, impl->callbacks.resize_user_data);
+                }
+
+                if (impl->callbacks.state_callback && (wparam == SIZE_MINIMIZED || wparam == SIZE_MAXIMIZED || wparam == SIZE_RESTORED)) {
+                    WindowStateEvent event;
+                    event.type = wparam == SIZE_MINIMIZED ? EventType::WindowMinimize :
+                                 wparam == SIZE_MAXIMIZED ? EventType::WindowMaximize : EventType::WindowRestore;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    event.minimized = minimized;
+                    event.maximized = maximized;
+                    impl->callbacks.state_callback(event, impl->callbacks.state_user_data);
+                }
             }
             return 0;
+
         case WM_MOVE:
             if (impl) {
                 impl->x = (int)(short)LOWORD(lparam);
                 impl->y = (int)(short)HIWORD(lparam);
+
+                if (impl->callbacks.move_callback) {
+                    WindowMoveEvent event;
+                    event.type = EventType::WindowMove;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    event.x = impl->x;
+                    event.y = impl->y;
+                    impl->callbacks.move_callback(event, impl->callbacks.move_user_data);
+                }
             }
             return 0;
+
+        case WM_SETFOCUS:
+            if (impl) {
+                impl->focused = true;
+                if (impl->callbacks.focus_callback) {
+                    WindowFocusEvent event;
+                    event.type = EventType::WindowFocus;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    event.focused = true;
+                    impl->callbacks.focus_callback(event, impl->callbacks.focus_user_data);
+                }
+            }
+            return 0;
+
+        case WM_KILLFOCUS:
+            if (impl) {
+                impl->focused = false;
+                // Reset input state on focus loss to avoid stuck keys
+                impl->keyboard_device.reset();
+                impl->mouse_device.reset();
+
+                if (impl->callbacks.focus_callback) {
+                    WindowFocusEvent event;
+                    event.type = EventType::WindowBlur;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    event.focused = false;
+                    impl->callbacks.focus_callback(event, impl->callbacks.focus_user_data);
+                }
+            }
+            return 0;
+
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if (impl) {
+                Key key = translate_key(wparam, lparam);
+                bool repeat = (lparam & 0x40000000) != 0;
+                int scancode = (lparam >> 16) & 0xFF;
+
+                impl->keyboard_device.inject_key_down(key, get_current_key_modifiers(), scancode, repeat, get_event_timestamp());
+            }
+            // Don't return 0 for SYSKEYDOWN - allow Alt+F4 etc.
+            if (msg == WM_KEYDOWN) return 0;
+            break;
+
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+            if (impl) {
+                Key key = translate_key(wparam, lparam);
+                int scancode = (lparam >> 16) & 0xFF;
+
+                impl->keyboard_device.inject_key_up(key, get_current_key_modifiers(), scancode, get_event_timestamp());
+            }
+            if (msg == WM_KEYUP) return 0;
+            break;
+
+        case WM_CHAR:
+        case WM_SYSCHAR:
+            if (impl) {
+                // Filter control characters except for common ones
+                if (wparam >= 32 || wparam == '\t' || wparam == '\n' || wparam == '\r') {
+                    impl->keyboard_device.inject_char(static_cast<uint32_t>(wparam), get_current_key_modifiers(), get_event_timestamp());
+                }
+            }
+            return 0;
+
+        case WM_MOUSEMOVE:
+            if (impl) {
+                int x = GET_X_LPARAM(lparam);
+                int y = GET_Y_LPARAM(lparam);
+
+                // Track mouse for WM_MOUSELEAVE
+                if (!impl->mouse_in_window) {
+                    impl->mouse_in_window = true;
+                    TRACKMOUSEEVENT tme = {};
+                    tme.cbSize = sizeof(tme);
+                    tme.dwFlags = TME_LEAVE;
+                    tme.hwndTrack = hwnd;
+                    TrackMouseEvent(&tme);
+                }
+
+                // Inject into mouse device (dispatches to handlers and legacy callback)
+                impl->mouse_device.inject_move(x, y, get_current_key_modifiers(), get_event_timestamp());
+            }
+            return 0;
+
+        case WM_MOUSELEAVE:
+            if (impl) {
+                impl->mouse_in_window = false;
+            }
+            return 0;
+
+        case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN:
+        case WM_LBUTTONDBLCLK: case WM_RBUTTONDBLCLK: case WM_MBUTTONDBLCLK: case WM_XBUTTONDBLCLK:
+            if (impl) {
+                MouseButton button = translate_mouse_button(msg, wparam);
+                int x = GET_X_LPARAM(lparam);
+                int y = GET_Y_LPARAM(lparam);
+                bool dblclick = (msg == WM_LBUTTONDBLCLK || msg == WM_RBUTTONDBLCLK ||
+                                 msg == WM_MBUTTONDBLCLK || msg == WM_XBUTTONDBLCLK);
+
+                SetCapture(hwnd);  // Capture mouse for drag operations
+
+                // Inject into mouse device (dispatches to handlers and legacy callback)
+                impl->mouse_device.inject_button_down(button, x, y, dblclick ? 2 : 1,
+                                                       get_current_key_modifiers(), get_event_timestamp());
+            }
+            return 0;
+
+        case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP:
+            if (impl) {
+                MouseButton button = translate_mouse_button(msg, wparam);
+                int x = GET_X_LPARAM(lparam);
+                int y = GET_Y_LPARAM(lparam);
+
+                ReleaseCapture();
+
+                // Inject into mouse device (dispatches to handlers and legacy callback)
+                impl->mouse_device.inject_button_up(button, x, y,
+                                                     get_current_key_modifiers(), get_event_timestamp());
+            }
+            return 0;
+
+        case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL:
+            if (impl) {
+                int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+                POINT pt = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
+                ScreenToClient(hwnd, &pt);
+
+                float dx = (msg == WM_MOUSEHWHEEL) ? static_cast<float>(delta) / WHEEL_DELTA : 0.0f;
+                float dy = (msg == WM_MOUSEWHEEL) ? static_cast<float>(delta) / WHEEL_DELTA : 0.0f;
+
+                // Inject into mouse device (dispatches to handlers and legacy callback)
+                impl->mouse_device.inject_wheel(dx, dy, pt.x, pt.y,
+                                                 get_current_key_modifiers(), get_event_timestamp());
+            }
+            return 0;
+
+        case WM_DPICHANGED:
+            if (impl && impl->callbacks.dpi_change_callback) {
+                int dpi = HIWORD(wparam);
+                DpiChangeEvent event;
+                event.type = EventType::DpiChange;
+                event.window = impl->owner;
+                event.timestamp = get_event_timestamp();
+                event.dpi = dpi;
+                event.scale = static_cast<float>(dpi) / 96.0f;
+                impl->callbacks.dpi_change_callback(event, impl->callbacks.dpi_change_user_data);
+
+                // Optionally resize window to suggested rect
+                RECT* suggested = reinterpret_cast<RECT*>(lparam);
+                SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                             suggested->right - suggested->left, suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return 0;
+
+        case WM_DROPFILES:
+            if (impl && impl->callbacks.drop_file_callback) {
+                HDROP hdrop = reinterpret_cast<HDROP>(wparam);
+                UINT count = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
+
+                if (count > 0) {
+                    char** paths = new char*[count];
+                    for (UINT i = 0; i < count; i++) {
+                        UINT len = DragQueryFileW(hdrop, i, nullptr, 0) + 1;
+                        wchar_t* wpath = new wchar_t[len];
+                        DragQueryFileW(hdrop, i, wpath, len);
+
+                        int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wpath, -1, nullptr, 0, nullptr, nullptr);
+                        paths[i] = new char[utf8_len];
+                        WideCharToMultiByte(CP_UTF8, 0, wpath, -1, paths[i], utf8_len, nullptr, nullptr);
+                        delete[] wpath;
+                    }
+
+                    DropFileEvent event;
+                    event.type = EventType::DropFile;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    event.paths = paths;
+                    event.count = static_cast<int>(count);
+                    impl->callbacks.drop_file_callback(event, impl->callbacks.drop_file_user_data);
+
+                    for (UINT i = 0; i < count; i++) {
+                        delete[] paths[i];
+                    }
+                    delete[] paths;
+                }
+
+                DragFinish(hdrop);
+            }
+            return 0;
+
         default:
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
+            break;
     }
+
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 Window* Window::create(const Config& config, Result* out_result) {
@@ -220,11 +652,15 @@ Window* Window::create(const Config& config, Result* out_result) {
     Window* window = new Window();
     window->impl = new Window::Impl();
     window->impl->hwnd = hwnd;
+    window->impl->owner = window;  // Set back-pointer for event dispatch
     window->impl->width = config.width;
     window->impl->height = config.height;
     window->impl->title = config.title;
     window->impl->style = effective_style;
     window->impl->is_fullscreen = has_style(effective_style, WindowStyle::Fullscreen);
+
+    // Enable drag-drop
+    DragAcceptFiles(hwnd, TRUE);
 
     RECT win_rect;
     GetWindowRect(hwnd, &win_rect);
@@ -305,6 +741,14 @@ Window* Window::create(const Config& config, Result* out_result) {
     }
 
     window->impl->gfx = gfx;
+
+    // Initialize mouse input system
+    window->impl->mouse_device.set_window(window);
+    window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
+
+    // Initialize keyboard input system
+    window->impl->keyboard_device.set_window(window);
+    window->impl->keyboard_device.set_dispatcher(&window->impl->keyboard_dispatcher);
 
     if (config.visible) {
         ShowWindow(hwnd, SW_SHOW);
@@ -491,6 +935,141 @@ void* Window::native_handle() const { return impl ? impl->hwnd : nullptr; }
 void* Window::native_display() const { return nullptr; }
 
 //=============================================================================
+// Event Callback Setters
+//=============================================================================
+
+void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.close_callback = callback;
+        impl->callbacks.close_user_data = user_data;
+    }
+}
+
+void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.resize_callback = callback;
+        impl->callbacks.resize_user_data = user_data;
+    }
+}
+
+void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.move_callback = callback;
+        impl->callbacks.move_user_data = user_data;
+    }
+}
+
+void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.focus_callback = callback;
+        impl->callbacks.focus_user_data = user_data;
+    }
+}
+
+void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.state_callback = callback;
+        impl->callbacks.state_user_data = user_data;
+    }
+}
+
+void Window::set_touch_callback(TouchCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.touch_callback = callback;
+        impl->callbacks.touch_user_data = user_data;
+    }
+}
+
+void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.dpi_change_callback = callback;
+        impl->callbacks.dpi_change_user_data = user_data;
+    }
+}
+
+void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
+    if (impl) {
+        impl->callbacks.drop_file_callback = callback;
+        impl->callbacks.drop_file_user_data = user_data;
+    }
+}
+
+//=============================================================================
+// Input State Queries
+//=============================================================================
+
+bool Window::is_key_down(Key key) const {
+    if (!impl || key == Key::Unknown) return false;
+    return impl->keyboard_device.is_key_down(key);
+}
+
+bool Window::is_mouse_button_down(MouseButton button) const {
+    if (!impl || button == MouseButton::Unknown) return false;
+    return impl->mouse_device.is_button_down(button);
+}
+
+void Window::get_mouse_position(int* x, int* y) const {
+    if (impl) {
+        impl->mouse_device.get_position(x, y);
+    } else {
+        if (x) *x = 0;
+        if (y) *y = 0;
+    }
+}
+
+KeyMod Window::get_current_modifiers() const {
+    return get_current_key_modifiers();
+}
+
+//=============================================================================
+// Mouse Handler API
+//=============================================================================
+
+bool Window::add_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_mouse_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler_id);
+}
+
+input::MouseEventDispatcher* Window::get_mouse_dispatcher() {
+    if (!impl) return nullptr;
+    return &impl->mouse_dispatcher;
+}
+
+//=============================================================================
+// Keyboard Handler API
+//=============================================================================
+
+bool Window::add_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler_id);
+}
+
+input::KeyboardEventDispatcher* Window::get_keyboard_dispatcher() {
+    if (!impl) return nullptr;
+    return &impl->keyboard_dispatcher;
+}
+
+//=============================================================================
 // Utility Functions
 //=============================================================================
 
@@ -551,6 +1130,9 @@ Backend get_default_backend() {
     return Backend::Auto;
 #endif
 }
+
+// key_to_string, mouse_button_to_string, event_type_to_string
+// are implemented in input/input_keyboard.cpp
 
 //=============================================================================
 // Graphics Context for External Windows

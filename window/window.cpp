@@ -4,8 +4,68 @@
 
 #include "window.hpp"
 #include <cstring>
+#include <cctype>
 
 namespace window {
+
+//=============================================================================
+// Helper Functions
+//=============================================================================
+
+static bool str_iequals(const char* a, const char* b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+//=============================================================================
+// Cursor Type Utilities
+//=============================================================================
+
+const char* cursor_type_to_string(CursorType type) {
+    switch (type) {
+        case CursorType::Arrow: return "Arrow";
+        case CursorType::IBeam: return "IBeam";
+        case CursorType::Crosshair: return "Crosshair";
+        case CursorType::Hand: return "Hand";
+        case CursorType::ResizeH: return "ResizeH";
+        case CursorType::ResizeV: return "ResizeV";
+        case CursorType::ResizeNESW: return "ResizeNESW";
+        case CursorType::ResizeNWSE: return "ResizeNWSE";
+        case CursorType::ResizeAll: return "ResizeAll";
+        case CursorType::NotAllowed: return "NotAllowed";
+        case CursorType::Wait: return "Wait";
+        case CursorType::WaitArrow: return "WaitArrow";
+        case CursorType::Help: return "Help";
+        case CursorType::Hidden: return "Hidden";
+        case CursorType::Custom: return "Custom";
+        default: return "Unknown";
+    }
+}
+
+CursorType string_to_cursor_type(const char* str) {
+    if (!str || !*str) return CursorType::Arrow;
+
+    if (str_iequals(str, "Arrow") || str_iequals(str, "Default") || str_iequals(str, "Normal")) return CursorType::Arrow;
+    if (str_iequals(str, "IBeam") || str_iequals(str, "Text") || str_iequals(str, "Caret")) return CursorType::IBeam;
+    if (str_iequals(str, "Crosshair") || str_iequals(str, "Cross")) return CursorType::Crosshair;
+    if (str_iequals(str, "Hand") || str_iequals(str, "Pointer") || str_iequals(str, "Link")) return CursorType::Hand;
+    if (str_iequals(str, "ResizeH") || str_iequals(str, "ResizeHorizontal") || str_iequals(str, "SizeWE") || str_iequals(str, "EWResize")) return CursorType::ResizeH;
+    if (str_iequals(str, "ResizeV") || str_iequals(str, "ResizeVertical") || str_iequals(str, "SizeNS") || str_iequals(str, "NSResize")) return CursorType::ResizeV;
+    if (str_iequals(str, "ResizeNESW") || str_iequals(str, "SizeNESW") || str_iequals(str, "NESWResize")) return CursorType::ResizeNESW;
+    if (str_iequals(str, "ResizeNWSE") || str_iequals(str, "SizeNWSE") || str_iequals(str, "NWSEResize")) return CursorType::ResizeNWSE;
+    if (str_iequals(str, "ResizeAll") || str_iequals(str, "Move") || str_iequals(str, "SizeAll")) return CursorType::ResizeAll;
+    if (str_iequals(str, "NotAllowed") || str_iequals(str, "No") || str_iequals(str, "Forbidden") || str_iequals(str, "Unavailable")) return CursorType::NotAllowed;
+    if (str_iequals(str, "Wait") || str_iequals(str, "Busy") || str_iequals(str, "Loading")) return CursorType::Wait;
+    if (str_iequals(str, "WaitArrow") || str_iequals(str, "AppStarting") || str_iequals(str, "Progress")) return CursorType::WaitArrow;
+    if (str_iequals(str, "Help") || str_iequals(str, "Question")) return CursorType::Help;
+    if (str_iequals(str, "Hidden") || str_iequals(str, "None") || str_iequals(str, "Invisible")) return CursorType::Hidden;
+    if (str_iequals(str, "Custom")) return CursorType::Custom;
+
+    return CursorType::Arrow;
+}
 
 //=============================================================================
 // WindowStyle string conversion

@@ -4,15 +4,20 @@
  */
 
 #include "window.hpp"
+#include "input/input_mouse.hpp"
+#include "input/input_keyboard.hpp"
 
 #if defined(WINDOW_PLATFORM_X11)
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#include <X11/keysym.h>
+#include <X11/XKBlib.h>
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <ctime>
 #include <string>
 
 //=============================================================================
@@ -47,12 +52,161 @@ Graphics* create_vulkan_graphics_xlib(void* display, unsigned long window, int w
 #endif
 
 //=============================================================================
+// Key Translation
+//=============================================================================
+
+static Key translate_keysym(KeySym keysym) {
+    // Letters
+    if (keysym >= XK_a && keysym <= XK_z) {
+        return static_cast<Key>('A' + (keysym - XK_a));
+    }
+    if (keysym >= XK_A && keysym <= XK_Z) {
+        return static_cast<Key>('A' + (keysym - XK_A));
+    }
+
+    // Numbers
+    if (keysym >= XK_0 && keysym <= XK_9) {
+        return static_cast<Key>('0' + (keysym - XK_0));
+    }
+
+    switch (keysym) {
+        // Function keys
+        case XK_F1: return Key::F1; case XK_F2: return Key::F2; case XK_F3: return Key::F3;
+        case XK_F4: return Key::F4; case XK_F5: return Key::F5; case XK_F6: return Key::F6;
+        case XK_F7: return Key::F7; case XK_F8: return Key::F8; case XK_F9: return Key::F9;
+        case XK_F10: return Key::F10; case XK_F11: return Key::F11; case XK_F12: return Key::F12;
+
+        // Navigation
+        case XK_Escape: return Key::Escape;
+        case XK_Tab: return Key::Tab;
+        case XK_Caps_Lock: return Key::CapsLock;
+        case XK_space: return Key::Space;
+        case XK_Return: return Key::Enter;
+        case XK_BackSpace: return Key::Backspace;
+        case XK_Delete: return Key::Delete;
+        case XK_Insert: return Key::Insert;
+        case XK_Home: return Key::Home;
+        case XK_End: return Key::End;
+        case XK_Page_Up: return Key::PageUp;
+        case XK_Page_Down: return Key::PageDown;
+        case XK_Left: return Key::Left;
+        case XK_Right: return Key::Right;
+        case XK_Up: return Key::Up;
+        case XK_Down: return Key::Down;
+
+        // Modifiers
+        case XK_Shift_L: return Key::LeftShift;
+        case XK_Shift_R: return Key::RightShift;
+        case XK_Control_L: return Key::LeftControl;
+        case XK_Control_R: return Key::RightControl;
+        case XK_Alt_L: return Key::LeftAlt;
+        case XK_Alt_R: return Key::RightAlt;
+        case XK_Super_L: return Key::LeftSuper;
+        case XK_Super_R: return Key::RightSuper;
+
+        // Punctuation
+        case XK_grave: case XK_asciitilde: return Key::Grave;
+        case XK_minus: case XK_underscore: return Key::Minus;
+        case XK_equal: case XK_plus: return Key::Equal;
+        case XK_bracketleft: case XK_braceleft: return Key::LeftBracket;
+        case XK_bracketright: case XK_braceright: return Key::RightBracket;
+        case XK_backslash: case XK_bar: return Key::Backslash;
+        case XK_semicolon: case XK_colon: return Key::Semicolon;
+        case XK_apostrophe: case XK_quotedbl: return Key::Apostrophe;
+        case XK_comma: case XK_less: return Key::Comma;
+        case XK_period: case XK_greater: return Key::Period;
+        case XK_slash: case XK_question: return Key::Slash;
+
+        // Numpad
+        case XK_KP_0: return Key::Numpad0; case XK_KP_1: return Key::Numpad1;
+        case XK_KP_2: return Key::Numpad2; case XK_KP_3: return Key::Numpad3;
+        case XK_KP_4: return Key::Numpad4; case XK_KP_5: return Key::Numpad5;
+        case XK_KP_6: return Key::Numpad6; case XK_KP_7: return Key::Numpad7;
+        case XK_KP_8: return Key::Numpad8; case XK_KP_9: return Key::Numpad9;
+        case XK_KP_Decimal: return Key::NumpadDecimal;
+        case XK_KP_Enter: return Key::NumpadEnter;
+        case XK_KP_Add: return Key::NumpadAdd;
+        case XK_KP_Subtract: return Key::NumpadSubtract;
+        case XK_KP_Multiply: return Key::NumpadMultiply;
+        case XK_KP_Divide: return Key::NumpadDivide;
+        case XK_Num_Lock: return Key::NumLock;
+
+        // Other
+        case XK_Print: return Key::PrintScreen;
+        case XK_Scroll_Lock: return Key::ScrollLock;
+        case XK_Pause: return Key::Pause;
+        case XK_Menu: return Key::Menu;
+
+        default: return Key::Unknown;
+    }
+}
+
+static KeyMod get_x11_modifiers(unsigned int state) {
+    KeyMod mods = KeyMod::None;
+    if (state & ShiftMask) mods = mods | KeyMod::Shift;
+    if (state & ControlMask) mods = mods | KeyMod::Control;
+    if (state & Mod1Mask) mods = mods | KeyMod::Alt;
+    if (state & Mod4Mask) mods = mods | KeyMod::Super;
+    if (state & LockMask) mods = mods | KeyMod::CapsLock;
+    if (state & Mod2Mask) mods = mods | KeyMod::NumLock;
+    return mods;
+}
+
+static MouseButton translate_x11_button(unsigned int button) {
+    switch (button) {
+        case Button1: return MouseButton::Left;
+        case Button2: return MouseButton::Middle;
+        case Button3: return MouseButton::Right;
+        case 8: return MouseButton::X1;  // Back button
+        case 9: return MouseButton::X2;  // Forward button
+        default: return MouseButton::Unknown;
+    }
+}
+
+static double get_event_timestamp() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) / 1e9;
+}
+
+//=============================================================================
+// Event Callbacks Storage
+//=============================================================================
+
+struct EventCallbacks {
+    WindowCloseCallback close_callback = nullptr;
+    void* close_user_data = nullptr;
+
+    WindowResizeCallback resize_callback = nullptr;
+    void* resize_user_data = nullptr;
+
+    WindowMoveCallback move_callback = nullptr;
+    void* move_user_data = nullptr;
+
+    WindowFocusCallback focus_callback = nullptr;
+    void* focus_user_data = nullptr;
+
+    WindowStateCallback state_callback = nullptr;
+    void* state_user_data = nullptr;
+
+    TouchCallback touch_callback = nullptr;
+    void* touch_user_data = nullptr;
+
+    DpiChangeCallback dpi_change_callback = nullptr;
+    void* dpi_change_user_data = nullptr;
+
+    DropFileCallback drop_file_callback = nullptr;
+    void* drop_file_user_data = nullptr;
+};
+
+//=============================================================================
 // Implementation Structure
 //=============================================================================
 
 struct Window::Impl {
     Display* display = nullptr;
     ::Window xwindow = 0;
+    Window* owner = nullptr;  // Back-pointer for event dispatch
     int screen = 0;
     Atom wm_delete_window = 0;
     Atom wm_protocols = 0;
@@ -71,6 +225,25 @@ struct Window::Impl {
     int windowed_y = 0;
     int windowed_width = 0;
     int windowed_height = 0;
+
+    // Event callbacks
+    EventCallbacks callbacks;
+
+    // Input state
+    bool mouse_in_window = false;
+    bool focused = true;
+
+    // Mouse input handler system
+    input::MouseEventDispatcher mouse_dispatcher;
+    input::DefaultMouseDevice mouse_device;
+
+    // Keyboard input handler system
+    input::KeyboardEventDispatcher keyboard_dispatcher;
+    input::DefaultKeyboardDevice keyboard_device;
+
+    // XIM for text input
+    XIM xim = nullptr;
+    XIC xic = nullptr;
 
 #ifdef WINDOW_HAS_OPENGL
     void* fb_config = nullptr;
@@ -156,7 +329,8 @@ Window* Window::create(const Config& config, Result* out_result) {
     XSetWindowAttributes attrs = {};
     attrs.event_mask = ExposureMask | KeyPressMask | KeyReleaseMask |
                        ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
-                       StructureNotifyMask | FocusChangeMask;
+                       StructureNotifyMask | FocusChangeMask |
+                       EnterWindowMask | LeaveWindowMask;
     attrs.colormap = colormap;
     attrs.background_pixel = BlackPixel(display, screen);
     attrs.border_pixel = 0;
@@ -188,6 +362,21 @@ Window* Window::create(const Config& config, Result* out_result) {
     }
 
     window->impl->xwindow = xwindow;
+    window->impl->owner = window;  // Set back-pointer for event dispatch
+
+    // Initialize mouse input system
+    window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
+    window->impl->mouse_device.set_window(window);
+
+    // Initialize XIM for text input
+    window->impl->xim = XOpenIM(display, nullptr, nullptr, nullptr);
+    if (window->impl->xim) {
+        window->impl->xic = XCreateIC(window->impl->xim,
+                                       XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+                                       XNClientWindow, xwindow,
+                                       XNFocusWindow, xwindow,
+                                       nullptr);
+    }
 
     // Set window title
     XStoreName(display, xwindow, config.title);
@@ -302,6 +491,12 @@ Window* Window::create(const Config& config, Result* out_result) {
 void Window::destroy() {
     if (impl) {
         delete impl->gfx;
+        if (impl->xic) {
+            XDestroyIC(impl->xic);
+        }
+        if (impl->xim) {
+            XCloseIM(impl->xim);
+        }
         if (impl->xwindow) {
             XDestroyWindow(impl->display, impl->xwindow);
         }
@@ -520,21 +715,60 @@ void Window::poll_events() {
         XEvent event;
         XNextEvent(impl->display, &event);
 
+        // Filter events for XIM
+        if (impl->xic && XFilterEvent(&event, impl->xwindow)) {
+            continue;
+        }
+
         switch (event.type) {
             case ClientMessage:
                 if ((Atom)event.xclient.data.l[0] == impl->wm_delete_window) {
                     impl->should_close_flag = true;
+                    if (impl->callbacks.close_callback) {
+                        WindowCloseEvent close_event;
+                        close_event.type = EventType::WindowClose;
+                        close_event.window = impl->owner;
+                        close_event.timestamp = get_event_timestamp();
+                        impl->callbacks.close_callback(close_event, impl->callbacks.close_user_data);
+                    }
                 }
                 break;
 
-            case ConfigureNotify:
-                if (event.xconfigure.width != impl->width || event.xconfigure.height != impl->height) {
+            case ConfigureNotify: {
+                bool size_changed = (event.xconfigure.width != impl->width ||
+                                     event.xconfigure.height != impl->height);
+                bool pos_changed = (event.xconfigure.x != impl->x || event.xconfigure.y != impl->y);
+
+                if (size_changed) {
                     impl->width = event.xconfigure.width;
                     impl->height = event.xconfigure.height;
+                    if (impl->callbacks.resize_callback) {
+                        WindowResizeEvent resize_event;
+                        resize_event.type = EventType::WindowResize;
+                        resize_event.window = impl->owner;
+                        resize_event.timestamp = get_event_timestamp();
+                        resize_event.width = impl->width;
+                        resize_event.height = impl->height;
+                        resize_event.minimized = false;
+                        impl->callbacks.resize_callback(resize_event, impl->callbacks.resize_user_data);
+                    }
                 }
-                impl->x = event.xconfigure.x;
-                impl->y = event.xconfigure.y;
+
+                if (pos_changed) {
+                    impl->x = event.xconfigure.x;
+                    impl->y = event.xconfigure.y;
+                    if (impl->callbacks.move_callback) {
+                        WindowMoveEvent move_event;
+                        move_event.type = EventType::WindowMove;
+                        move_event.window = impl->owner;
+                        move_event.timestamp = get_event_timestamp();
+                        move_event.x = impl->x;
+                        move_event.y = impl->y;
+                        impl->callbacks.move_callback(move_event, impl->callbacks.move_user_data);
+                    }
+                }
                 break;
+            }
 
             case MapNotify:
                 impl->visible = true;
@@ -542,6 +776,195 @@ void Window::poll_events() {
 
             case UnmapNotify:
                 impl->visible = false;
+                break;
+
+            case FocusIn:
+                impl->focused = true;
+                if (impl->callbacks.focus_callback) {
+                    WindowFocusEvent focus_event;
+                    focus_event.type = EventType::WindowFocus;
+                    focus_event.window = impl->owner;
+                    focus_event.timestamp = get_event_timestamp();
+                    focus_event.focused = true;
+                    impl->callbacks.focus_callback(focus_event, impl->callbacks.focus_user_data);
+                }
+                break;
+
+            case FocusOut:
+                impl->focused = false;
+                // Reset key states on focus loss
+                memset(impl->key_states, 0, sizeof(impl->key_states));
+                impl->mouse_device.reset();
+                if (impl->callbacks.focus_callback) {
+                    WindowFocusEvent focus_event;
+                    focus_event.type = EventType::WindowBlur;
+                    focus_event.window = impl->owner;
+                    focus_event.timestamp = get_event_timestamp();
+                    focus_event.focused = false;
+                    impl->callbacks.focus_callback(focus_event, impl->callbacks.focus_user_data);
+                }
+                break;
+
+            case KeyPress: {
+                KeySym keysym;
+                char text[32];
+                int len = 0;
+
+                if (impl->xic) {
+                    Status status;
+                    len = Xutf8LookupString(impl->xic, &event.xkey, text, sizeof(text) - 1, &keysym, &status);
+                } else {
+                    len = XLookupString(&event.xkey, text, sizeof(text) - 1, &keysym, nullptr);
+                }
+
+                Key key = translate_keysym(keysym);
+                if (key != Key::Unknown && static_cast<int>(key) < 512) {
+                    impl->key_states[static_cast<int>(key)] = true;
+                }
+
+                if (impl->callbacks.key_callback) {
+                    KeyEvent key_event;
+                    key_event.type = EventType::KeyDown;
+                    key_event.window = impl->owner;
+                    key_event.timestamp = get_event_timestamp();
+                    key_event.key = key;
+                    key_event.modifiers = get_x11_modifiers(event.xkey.state);
+                    key_event.scancode = event.xkey.keycode;
+                    key_event.repeat = false;
+                    impl->callbacks.key_callback(key_event, impl->callbacks.key_user_data);
+                }
+
+                // Character input
+                if (len > 0 && impl->callbacks.char_callback) {
+                    text[len] = '\0';
+                    // Decode UTF-8 to get codepoint
+                    unsigned char* p = (unsigned char*)text;
+                    uint32_t codepoint = 0;
+                    if (p[0] < 0x80) {
+                        codepoint = p[0];
+                    } else if ((p[0] & 0xE0) == 0xC0 && len >= 2) {
+                        codepoint = ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+                    } else if ((p[0] & 0xF0) == 0xE0 && len >= 3) {
+                        codepoint = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+                    } else if ((p[0] & 0xF8) == 0xF0 && len >= 4) {
+                        codepoint = ((p[0] & 0x07) << 18) | ((p[1] & 0x3F) << 12) |
+                                    ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+                    }
+
+                    if (codepoint >= 32 || codepoint == '\t' || codepoint == '\n' || codepoint == '\r') {
+                        CharEvent char_event;
+                        char_event.type = EventType::CharInput;
+                        char_event.window = impl->owner;
+                        char_event.timestamp = get_event_timestamp();
+                        char_event.codepoint = codepoint;
+                        char_event.modifiers = get_x11_modifiers(event.xkey.state);
+                        impl->callbacks.char_callback(char_event, impl->callbacks.char_user_data);
+                    }
+                }
+                break;
+            }
+
+            case KeyRelease: {
+                // Check for key repeat (X11 generates KeyRelease+KeyPress for repeats)
+                if (XPending(impl->display)) {
+                    XEvent next;
+                    XPeekEvent(impl->display, &next);
+                    if (next.type == KeyPress && next.xkey.time == event.xkey.time &&
+                        next.xkey.keycode == event.xkey.keycode) {
+                        // This is a repeat, skip the release
+                        XNextEvent(impl->display, &next);  // Consume the KeyPress
+
+                        KeySym keysym = XkbKeycodeToKeysym(impl->display, event.xkey.keycode, 0, 0);
+                        Key key = translate_keysym(keysym);
+
+                        if (impl->callbacks.key_callback) {
+                            KeyEvent key_event;
+                            key_event.type = EventType::KeyRepeat;
+                            key_event.window = impl->owner;
+                            key_event.timestamp = get_event_timestamp();
+                            key_event.key = key;
+                            key_event.modifiers = get_x11_modifiers(event.xkey.state);
+                            key_event.scancode = event.xkey.keycode;
+                            key_event.repeat = true;
+                            impl->callbacks.key_callback(key_event, impl->callbacks.key_user_data);
+                        }
+                        break;
+                    }
+                }
+
+                KeySym keysym = XkbKeycodeToKeysym(impl->display, event.xkey.keycode, 0, 0);
+                Key key = translate_keysym(keysym);
+
+                if (key != Key::Unknown && static_cast<int>(key) < 512) {
+                    impl->key_states[static_cast<int>(key)] = false;
+                }
+
+                if (impl->callbacks.key_callback) {
+                    KeyEvent key_event;
+                    key_event.type = EventType::KeyUp;
+                    key_event.window = impl->owner;
+                    key_event.timestamp = get_event_timestamp();
+                    key_event.key = key;
+                    key_event.modifiers = get_x11_modifiers(event.xkey.state);
+                    key_event.scancode = event.xkey.keycode;
+                    key_event.repeat = false;
+                    impl->callbacks.key_callback(key_event, impl->callbacks.key_user_data);
+                }
+                break;
+            }
+
+            case ButtonPress: {
+                unsigned int button = event.xbutton.button;
+                int x = event.xbutton.x;
+                int y = event.xbutton.y;
+                KeyMod modifiers = get_x11_modifiers(event.xbutton.state);
+                double timestamp = get_event_timestamp();
+
+                // Scroll wheel (buttons 4-7)
+                if (button >= 4 && button <= 7) {
+                    float dx = 0, dy = 0;
+                    switch (button) {
+                        case 4: dy = 1.0f; break;  // Up
+                        case 5: dy = -1.0f; break; // Down
+                        case 6: dx = -1.0f; break; // Left
+                        case 7: dx = 1.0f; break;  // Right
+                    }
+                    impl->mouse_device.inject_wheel(dx, dy, x, y, modifiers, timestamp);
+                    break;
+                }
+
+                MouseButton btn = translate_x11_button(button);
+                impl->mouse_device.inject_button_down(btn, x, y, 1, modifiers, timestamp);
+                break;
+            }
+
+            case ButtonRelease: {
+                unsigned int button = event.xbutton.button;
+                int x = event.xbutton.x;
+                int y = event.xbutton.y;
+
+                // Ignore scroll wheel releases
+                if (button >= 4 && button <= 7) break;
+
+                MouseButton btn = translate_x11_button(button);
+                impl->mouse_device.inject_button_up(btn, x, y, get_x11_modifiers(event.xbutton.state), get_event_timestamp());
+                break;
+            }
+
+            case MotionNotify: {
+                int x = event.xmotion.x;
+                int y = event.xmotion.y;
+                impl->mouse_device.inject_move(x, y, get_x11_modifiers(event.xmotion.state), get_event_timestamp());
+                break;
+            }
+
+            case EnterNotify:
+                impl->mouse_in_window = true;
+                impl->mouse_device.inject_move(event.xcrossing.x, event.xcrossing.y, KeyMod::None, get_event_timestamp());
+                break;
+
+            case LeaveNotify:
+                impl->mouse_in_window = false;
                 break;
 
             default:
@@ -560,6 +983,75 @@ void* Window::native_handle() const {
 
 void* Window::native_display() const {
     return impl ? impl->display : nullptr;
+}
+
+//=============================================================================
+// Event Callback Setters
+//=============================================================================
+
+void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.close_callback = callback; impl->callbacks.close_user_data = user_data; }
+}
+
+void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.resize_callback = callback; impl->callbacks.resize_user_data = user_data; }
+}
+
+void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.move_callback = callback; impl->callbacks.move_user_data = user_data; }
+}
+
+void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.focus_callback = callback; impl->callbacks.focus_user_data = user_data; }
+}
+
+void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.state_callback = callback; impl->callbacks.state_user_data = user_data; }
+}
+
+void Window::set_touch_callback(TouchCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.touch_callback = callback; impl->callbacks.touch_user_data = user_data; }
+}
+
+void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.dpi_change_callback = callback; impl->callbacks.dpi_change_user_data = user_data; }
+}
+
+void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.drop_file_callback = callback; impl->callbacks.drop_file_user_data = user_data; }
+}
+
+//=============================================================================
+// Input State Queries
+//=============================================================================
+
+bool Window::is_key_down(Key key) const {
+    if (!impl || key == Key::Unknown) return false;
+    return impl->keyboard_device.is_key_down(key);
+}
+
+bool Window::is_mouse_button_down(MouseButton button) const {
+    if (!impl) return false;
+    return impl->mouse_device.is_button_down(button);
+}
+
+void Window::get_mouse_position(int* x, int* y) const {
+    if (impl) {
+        impl->mouse_device.get_position(x, y);
+    } else {
+        if (x) *x = 0;
+        if (y) *y = 0;
+    }
+}
+
+KeyMod Window::get_current_modifiers() const {
+    if (!impl || !impl->display) return KeyMod::None;
+
+    ::Window root, child;
+    int root_x, root_y, win_x, win_y;
+    unsigned int mask;
+    XQueryPointer(impl->display, impl->xwindow, &root, &child, &root_x, &root_y, &win_x, &win_y, &mask);
+    return get_x11_modifiers(mask);
 }
 
 //=============================================================================
@@ -614,6 +1106,55 @@ Backend get_default_backend() {
 #else
     return Backend::Auto;
 #endif
+}
+
+// key_to_string, mouse_button_to_string, event_type_to_string
+// are implemented in input/input_keyboard.cpp
+
+//=============================================================================
+// Mouse Handler API
+//=============================================================================
+
+bool Window::add_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_mouse_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler_id);
+}
+
+input::MouseEventDispatcher* Window::get_mouse_dispatcher() {
+    return impl ? &impl->mouse_dispatcher : nullptr;
+}
+
+//=============================================================================
+// Keyboard Handler API
+//=============================================================================
+
+bool Window::add_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler_id);
+}
+
+input::KeyboardEventDispatcher* Window::get_keyboard_dispatcher() {
+    return impl ? &impl->keyboard_dispatcher : nullptr;
 }
 
 //=============================================================================

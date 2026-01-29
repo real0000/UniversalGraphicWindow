@@ -66,7 +66,7 @@ endif()
 message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
 
 # Add platform-independent source files
-list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp)
+list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input_keyboard.cpp input/input_mouse.cpp)
 
 # Add device enumeration files (platform-specific)
 if(WIN32)
@@ -217,6 +217,7 @@ add_library(window STATIC
 target_include_directories(window PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/api>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/input>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -287,6 +288,10 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         # Graphics config example
         add_executable(example_graphics_config examples/graphics_config.cpp)
         target_link_libraries(example_graphics_config PRIVATE window)
+
+        # Events example
+        add_executable(example_events examples/events.cpp)
+        target_link_libraries(example_events PRIVATE window)
     endif()
 
     # Metal example (macOS only)
@@ -311,6 +316,12 @@ install(TARGETS window
 
 install(FILES window.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(FILES
+    input/input_keyboard.hpp
+    input/input_mouse.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/input
 )
 
 install(EXPORT windowTargets

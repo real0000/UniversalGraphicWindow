@@ -97,6 +97,26 @@ enum class Backend {
     Metal
 };
 
+// Standard cursor types supported across platforms
+enum class CursorType : uint8_t {
+    Arrow = 0,          // Default arrow cursor
+    IBeam,              // Text input cursor (I-beam)
+    Crosshair,          // Precise selection crosshair
+    Hand,               // Pointing hand (for links)
+    ResizeH,            // Horizontal resize (left-right)
+    ResizeV,            // Vertical resize (up-down)
+    ResizeNESW,         // Diagonal resize (northeast-southwest)
+    ResizeNWSE,         // Diagonal resize (northwest-southeast)
+    ResizeAll,          // Move/resize in all directions
+    NotAllowed,         // Operation not allowed
+    Wait,               // Busy/wait cursor
+    WaitArrow,          // Busy but still interactive
+    Help,               // Help cursor (arrow with question mark)
+    Hidden,             // No cursor visible
+    Custom,             // Custom cursor (platform-specific)
+    Count               // Number of cursor types
+};
+
 // Window style flags (can be combined with |)
 enum class WindowStyle : uint32_t {
     None            = 0,
@@ -143,6 +163,252 @@ void window_style_to_string(WindowStyle style, char* buffer, size_t buffer_size)
 const char* window_style_flag_to_string(WindowStyle flag);
 
 //-----------------------------------------------------------------------------
+// Input Enumerations
+//-----------------------------------------------------------------------------
+
+// Mouse buttons
+enum class MouseButton : uint8_t {
+    Left = 0,
+    Right = 1,
+    Middle = 2,
+    X1 = 3,         // Extra button 1 (back)
+    X2 = 4,         // Extra button 2 (forward)
+    Unknown = 255
+};
+
+// Key codes (platform-independent virtual key codes)
+enum class Key : uint16_t {
+    Unknown = 0,
+
+    // Letters
+    A = 'A', B = 'B', C = 'C', D = 'D', E = 'E', F = 'F', G = 'G', H = 'H',
+    I = 'I', J = 'J', K = 'K', L = 'L', M = 'M', N = 'N', O = 'O', P = 'P',
+    Q = 'Q', R = 'R', S = 'S', T = 'T', U = 'U', V = 'V', W = 'W', X = 'X',
+    Y = 'Y', Z = 'Z',
+
+    // Numbers
+    Num0 = '0', Num1 = '1', Num2 = '2', Num3 = '3', Num4 = '4',
+    Num5 = '5', Num6 = '6', Num7 = '7', Num8 = '8', Num9 = '9',
+
+    // Function keys
+    F1 = 256, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    F13, F14, F15, F16, F17, F18, F19, F20, F21, F22, F23, F24,
+
+    // Navigation
+    Escape = 300, Tab, CapsLock, Shift, Control, Alt, Super,   // Super = Win/Cmd
+    Space, Enter, Backspace, Delete, Insert,
+    Home, End, PageUp, PageDown,
+    Left, Right, Up, Down,
+
+    // Modifiers (left/right variants)
+    LeftShift = 350, RightShift, LeftControl, RightControl,
+    LeftAlt, RightAlt, LeftSuper, RightSuper,
+
+    // Punctuation and symbols
+    Grave = 400,        // `~
+    Minus,              // -_
+    Equal,              // =+
+    LeftBracket,        // [{
+    RightBracket,       // ]}
+    Backslash,          // \|
+    Semicolon,          // ;:
+    Apostrophe,         // '"
+    Comma,              // ,<
+    Period,             // .>
+    Slash,              // /?
+
+    // Numpad
+    Numpad0 = 450, Numpad1, Numpad2, Numpad3, Numpad4,
+    Numpad5, Numpad6, Numpad7, Numpad8, Numpad9,
+    NumpadDecimal, NumpadEnter, NumpadAdd, NumpadSubtract,
+    NumpadMultiply, NumpadDivide, NumLock,
+
+    // Other
+    PrintScreen = 500, ScrollLock, Pause,
+    Menu,               // Context menu key
+};
+
+// Key modifiers (can be combined with |)
+enum class KeyMod : uint8_t {
+    None    = 0,
+    Shift   = 1 << 0,
+    Control = 1 << 1,
+    Alt     = 1 << 2,
+    Super   = 1 << 3,   // Win/Cmd key
+    CapsLock = 1 << 4,
+    NumLock = 1 << 5
+};
+
+inline KeyMod operator|(KeyMod a, KeyMod b) {
+    return static_cast<KeyMod>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+inline KeyMod operator&(KeyMod a, KeyMod b) {
+    return static_cast<KeyMod>(static_cast<uint8_t>(a) & static_cast<uint8_t>(b));
+}
+inline bool has_mod(KeyMod mods, KeyMod flag) {
+    return (static_cast<uint8_t>(mods) & static_cast<uint8_t>(flag)) != 0;
+}
+
+//-----------------------------------------------------------------------------
+// Event Types
+//-----------------------------------------------------------------------------
+
+enum class EventType : uint8_t {
+    None = 0,
+
+    // Window events
+    WindowClose,        // Window close requested
+    WindowResize,       // Window resized
+    WindowMove,         // Window moved
+    WindowFocus,        // Window gained focus
+    WindowBlur,         // Window lost focus
+    WindowMinimize,     // Window minimized
+    WindowMaximize,     // Window maximized
+    WindowRestore,      // Window restored from min/max
+
+    // Keyboard events
+    KeyDown,            // Key pressed
+    KeyUp,              // Key released
+    KeyRepeat,          // Key repeat (held down)
+    CharInput,          // Character input (for text input)
+
+    // Mouse events
+    MouseDown,          // Mouse button pressed
+    MouseMove,          // Mouse moved
+    MouseUp,            // Mouse button released
+    MouseWheel,         // Mouse wheel scrolled
+
+    // Touch events (mobile/touchscreen)
+    TouchDown,          // Touch started
+    TouchUp,            // Touch ended
+    TouchMove,          // Touch moved
+
+    // System events
+    DpiChange,          // DPI/scale factor changed
+    DropFile,           // File dropped onto window
+};
+
+//-----------------------------------------------------------------------------
+// Event Structures
+//-----------------------------------------------------------------------------
+
+class Window;  // Forward declaration
+
+// Base event structure
+struct Event {
+    EventType type = EventType::None;
+    Window* window = nullptr;       // Source window
+    double timestamp = 0.0;         // Event timestamp in seconds
+};
+
+// Window events
+struct WindowCloseEvent : Event {
+    // No additional data - just the close request
+};
+
+struct WindowResizeEvent : Event {
+    int width = 0;
+    int height = 0;
+    bool minimized = false;         // True if minimized (width/height may be 0)
+};
+
+struct WindowMoveEvent : Event {
+    int x = 0;
+    int y = 0;
+};
+
+struct WindowFocusEvent : Event {
+    bool focused = false;           // True for focus, false for blur
+};
+
+struct WindowStateEvent : Event {
+    bool minimized = false;
+    bool maximized = false;
+};
+
+// Keyboard events
+struct KeyEvent : Event {
+    Key key = Key::Unknown;
+    KeyMod modifiers = KeyMod::None;
+    int scancode = 0;               // Platform-specific scancode
+    bool repeat = false;            // True if this is a repeat event
+};
+
+struct CharEvent : Event {
+    uint32_t codepoint = 0;         // Unicode codepoint
+    KeyMod modifiers = KeyMod::None;
+};
+
+// Mouse events
+struct MouseMoveEvent : Event {
+    int x = 0;                      // Position relative to window
+    int y = 0;
+    int dx = 0;                     // Delta from last position
+    int dy = 0;
+    KeyMod modifiers = KeyMod::None;
+};
+
+struct MouseButtonEvent : Event {
+    MouseButton button = MouseButton::Unknown;
+    int x = 0;
+    int y = 0;
+    int clicks = 1;                 // 1 = single, 2 = double click, etc.
+    KeyMod modifiers = KeyMod::None;
+};
+
+struct MouseWheelEvent : Event {
+    float dx = 0.0f;                // Horizontal scroll
+    float dy = 0.0f;                // Vertical scroll (positive = up/away)
+    int x = 0;                      // Mouse position
+    int y = 0;
+    KeyMod modifiers = KeyMod::None;
+};
+
+// Touch events
+struct TouchEvent : Event {
+    int touch_id = 0;               // Unique ID for this touch point
+    float x = 0.0f;                 // Position (0-1 normalized or pixels)
+    float y = 0.0f;
+    float pressure = 1.0f;          // Touch pressure (0-1)
+};
+
+// System events
+struct DpiChangeEvent : Event {
+    float scale = 1.0f;             // New DPI scale factor
+    int dpi = 96;                   // New DPI value
+};
+
+struct DropFileEvent : Event {
+    const char* const* paths = nullptr;  // Array of file paths
+    int count = 0;                  // Number of files
+};
+
+//-----------------------------------------------------------------------------
+// Event Callback Types
+//-----------------------------------------------------------------------------
+
+// Generic event callback
+typedef void (*EventCallback)(const Event& event, void* user_data);
+
+// Typed callbacks for specific events
+typedef void (*WindowCloseCallback)(const WindowCloseEvent& event, void* user_data);
+typedef void (*WindowResizeCallback)(const WindowResizeEvent& event, void* user_data);
+typedef void (*WindowMoveCallback)(const WindowMoveEvent& event, void* user_data);
+typedef void (*WindowFocusCallback)(const WindowFocusEvent& event, void* user_data);
+typedef void (*WindowStateCallback)(const WindowStateEvent& event, void* user_data);
+
+typedef void (*KeyCallback)(const KeyEvent& event, void* user_data);
+typedef void (*CharCallback)(const CharEvent& event, void* user_data);
+
+typedef void (*MouseButtonCallback)(const MouseButtonEvent& event, void* user_data);
+typedef void (*MouseMoveCallback)(const MouseMoveEvent& event, void* user_data);
+typedef void (*MouseWheelCallback)(const MouseWheelEvent& event, void* user_data);
+
+typedef void (*TouchCallback)(const TouchEvent& event, void* user_data);
+typedef void (*DpiChangeCallback)(const DpiChangeEvent& event, void* user_data);
+typedef void (*DropFileCallback)(const DropFileEvent& event, void* user_data);
+
+//-----------------------------------------------------------------------------
 // Constants
 //-----------------------------------------------------------------------------
 
@@ -156,6 +422,13 @@ static const int MAX_DISPLAY_MODES = 256;
 //-----------------------------------------------------------------------------
 
 class Graphics;
+
+namespace input {
+    class IMouseHandler;
+    class MouseEventDispatcher;
+    class IKeyboardHandler;
+    class KeyboardEventDispatcher;
+} // namespace input
 
 //-----------------------------------------------------------------------------
 // Structures
@@ -430,6 +703,58 @@ public:
     void set_should_close(bool close);
     void poll_events();
 
+    //-------------------------------------------------------------------------
+    // Event Callbacks
+    //-------------------------------------------------------------------------
+    // Set callbacks for specific event types. Pass nullptr to remove callback.
+    // user_data is passed to the callback function.
+
+    // Window events
+    void set_close_callback(WindowCloseCallback callback, void* user_data = nullptr);
+    void set_resize_callback(WindowResizeCallback callback, void* user_data = nullptr);
+    void set_move_callback(WindowMoveCallback callback, void* user_data = nullptr);
+    void set_focus_callback(WindowFocusCallback callback, void* user_data = nullptr);
+    void set_state_callback(WindowStateCallback callback, void* user_data = nullptr);
+
+    // Touch events
+    void set_touch_callback(TouchCallback callback, void* user_data = nullptr);
+
+    // System events
+    void set_dpi_change_callback(DpiChangeCallback callback, void* user_data = nullptr);
+    void set_drop_file_callback(DropFileCallback callback, void* user_data = nullptr);
+
+    //-------------------------------------------------------------------------
+    // Input State Queries
+    //-------------------------------------------------------------------------
+    // Query current input state (useful for game-style input)
+
+    bool is_key_down(Key key) const;
+    bool is_mouse_button_down(MouseButton button) const;
+    void get_mouse_position(int* x, int* y) const;
+    KeyMod get_current_modifiers() const;
+
+    //-------------------------------------------------------------------------
+    // Mouse Handler API
+    //-------------------------------------------------------------------------
+    // Add/remove mouse event handlers. Handlers are called in priority order.
+    // Returns true on success, false on failure (limit reached or already registered).
+
+    bool add_mouse_handler(input::IMouseHandler* handler);
+    bool remove_mouse_handler(input::IMouseHandler* handler);
+    bool remove_mouse_handler(const char* handler_id);
+    input::MouseEventDispatcher* get_mouse_dispatcher();
+
+    //-------------------------------------------------------------------------
+    // Keyboard Handler API
+    //-------------------------------------------------------------------------
+    // Add/remove keyboard event handlers. Handlers are called in priority order.
+    // Returns true on success, false on failure (limit reached or already registered).
+
+    bool add_keyboard_handler(input::IKeyboardHandler* handler);
+    bool remove_keyboard_handler(input::IKeyboardHandler* handler);
+    bool remove_keyboard_handler(const char* handler_id);
+    input::KeyboardEventDispatcher* get_keyboard_dispatcher();
+
     // Graphics
     Graphics* graphics() const;
 
@@ -457,6 +782,15 @@ const char* result_to_string(Result result);
 const char* backend_to_string(Backend backend);
 bool is_backend_supported(Backend backend);
 Backend get_default_backend();
+
+// Cursor utilities
+const char* cursor_type_to_string(CursorType type);
+CursorType string_to_cursor_type(const char* str);
+
+// Input utilities
+const char* key_to_string(Key key);
+const char* mouse_button_to_string(MouseButton button);
+const char* event_type_to_string(EventType type);
 
 //-----------------------------------------------------------------------------
 // Device and Display Enumeration

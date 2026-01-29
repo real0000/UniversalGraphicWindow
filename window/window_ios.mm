@@ -4,12 +4,15 @@
  */
 
 #include "window.hpp"
+#include "input/input_mouse.hpp"
+#include "input/input_keyboard.hpp"
 
 #if defined(WINDOW_PLATFORM_IOS)
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <string>
+#include <mach/mach_time.h>
 
 //=============================================================================
 // Backend Configuration (use CMake-defined macros)
@@ -25,6 +28,49 @@
 #endif
 
 namespace window {
+
+//=============================================================================
+// Utility
+//=============================================================================
+
+static double get_event_timestamp() {
+    static mach_timebase_info_data_t timebase = {};
+    if (timebase.denom == 0) {
+        mach_timebase_info(&timebase);
+    }
+    uint64_t time = mach_absolute_time();
+    return static_cast<double>(time * timebase.numer / timebase.denom) / 1e9;
+}
+
+//=============================================================================
+// Event Callbacks Storage
+//=============================================================================
+
+struct EventCallbacks {
+    WindowCloseCallback close_callback = nullptr;
+    void* close_user_data = nullptr;
+
+    WindowResizeCallback resize_callback = nullptr;
+    void* resize_user_data = nullptr;
+
+    WindowMoveCallback move_callback = nullptr;
+    void* move_user_data = nullptr;
+
+    WindowFocusCallback focus_callback = nullptr;
+    void* focus_user_data = nullptr;
+
+    WindowStateCallback state_callback = nullptr;
+    void* state_user_data = nullptr;
+
+    TouchCallback touch_callback = nullptr;
+    void* touch_user_data = nullptr;
+
+    DpiChangeCallback dpi_change_callback = nullptr;
+    void* dpi_change_user_data = nullptr;
+
+    DropFileCallback drop_file_callback = nullptr;
+    void* drop_file_user_data = nullptr;
+};
 
 //=============================================================================
 // External Graphics Creation Functions (from api_*.cpp)
@@ -69,6 +115,7 @@ struct Window::Impl {
     UIWindow* ui_window = nil;
     WindowViewController* view_controller = nil;
     WindowView* view = nil;
+    Window* owner = nullptr;  // Back-pointer for event dispatch
     bool should_close_flag = false;
     bool visible = true;
     int width = 0;
@@ -76,6 +123,21 @@ struct Window::Impl {
     std::string title;
     Graphics* gfx = nullptr;
     WindowStyle style = WindowStyle::Fullscreen; // iOS is always fullscreen
+
+    // Event callbacks
+    EventCallbacks callbacks;
+
+    // Touch state (for simulated mouse on single touch)
+    float touch_x = 0;
+    float touch_y = 0;
+
+    // Mouse input handler system
+    input::MouseEventDispatcher mouse_dispatcher;
+    input::DefaultMouseDevice mouse_device;
+
+    // Keyboard input handler system
+    input::KeyboardEventDispatcher keyboard_dispatcher;
+    input::DefaultKeyboardDevice keyboard_device;
 };
 
 } // namespace window
@@ -101,6 +163,8 @@ struct Window::Impl {
     if (self) {
         _impl = impl;
         self.contentScaleFactor = [UIScreen mainScreen].scale;
+        self.multipleTouchEnabled = YES;
+        self.userInteractionEnabled = YES;
     }
     return self;
 }
@@ -111,9 +175,105 @@ struct Window::Impl {
     if (_impl) {
         CGRect bounds = self.bounds;
         CGFloat scale = self.contentScaleFactor;
-        _impl->width = static_cast<int>(bounds.size.width * scale);
-        _impl->height = static_cast<int>(bounds.size.height * scale);
+        int newWidth = static_cast<int>(bounds.size.width * scale);
+        int newHeight = static_cast<int>(bounds.size.height * scale);
+
+        if (newWidth != _impl->width || newHeight != _impl->height) {
+            _impl->width = newWidth;
+            _impl->height = newHeight;
+
+            if (_impl->callbacks.resize_callback) {
+                window::WindowResizeEvent resizeEvent;
+                resizeEvent.type = window::EventType::WindowResize;
+                resizeEvent.window = _impl->owner;
+                resizeEvent.timestamp = window::get_event_timestamp();
+                resizeEvent.width = _impl->width;
+                resizeEvent.height = _impl->height;
+                resizeEvent.minimized = false;
+                _impl->callbacks.resize_callback(resizeEvent, _impl->callbacks.resize_user_data);
+            }
+        }
     }
+}
+
+// Touch events
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!_impl) return;
+
+    CGFloat scale = self.contentScaleFactor;
+
+    for (UITouch* touch in touches) {
+        CGPoint pos = [touch locationInView:self];
+
+        if (_impl->callbacks.touch_callback) {
+            window::TouchEvent touchEvent;
+            touchEvent.type = window::EventType::TouchDown;
+            touchEvent.window = _impl->owner;
+            touchEvent.timestamp = window::get_event_timestamp();
+            touchEvent.touch_id = static_cast<int>(reinterpret_cast<intptr_t>((__bridge void*)touch) & 0xFFFFFFFF);
+            touchEvent.x = static_cast<float>(pos.x * scale);
+            touchEvent.y = static_cast<float>(pos.y * scale);
+            touchEvent.pressure = static_cast<float>(touch.force / touch.maximumPossibleForce);
+            if (touchEvent.pressure == 0 || isnan(touchEvent.pressure)) touchEvent.pressure = 1.0f;
+            _impl->callbacks.touch_callback(touchEvent, _impl->callbacks.touch_user_data);
+        }
+
+        // Store first touch position for simulated mouse
+        _impl->touch_x = pos.x * scale;
+        _impl->touch_y = pos.y * scale;
+    }
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!_impl) return;
+
+    CGFloat scale = self.contentScaleFactor;
+
+    for (UITouch* touch in touches) {
+        CGPoint pos = [touch locationInView:self];
+
+        if (_impl->callbacks.touch_callback) {
+            window::TouchEvent touchEvent;
+            touchEvent.type = window::EventType::TouchMove;
+            touchEvent.window = _impl->owner;
+            touchEvent.timestamp = window::get_event_timestamp();
+            touchEvent.touch_id = static_cast<int>(reinterpret_cast<intptr_t>((__bridge void*)touch) & 0xFFFFFFFF);
+            touchEvent.x = static_cast<float>(pos.x * scale);
+            touchEvent.y = static_cast<float>(pos.y * scale);
+            touchEvent.pressure = static_cast<float>(touch.force / touch.maximumPossibleForce);
+            if (touchEvent.pressure == 0 || isnan(touchEvent.pressure)) touchEvent.pressure = 1.0f;
+            _impl->callbacks.touch_callback(touchEvent, _impl->callbacks.touch_user_data);
+        }
+
+        _impl->touch_x = pos.x * scale;
+        _impl->touch_y = pos.y * scale;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (!_impl) return;
+
+    CGFloat scale = self.contentScaleFactor;
+
+    for (UITouch* touch in touches) {
+        CGPoint pos = [touch locationInView:self];
+
+        if (_impl->callbacks.touch_callback) {
+            window::TouchEvent touchEvent;
+            touchEvent.type = window::EventType::TouchUp;
+            touchEvent.window = _impl->owner;
+            touchEvent.timestamp = window::get_event_timestamp();
+            touchEvent.touch_id = static_cast<int>(reinterpret_cast<intptr_t>((__bridge void*)touch) & 0xFFFFFFFF);
+            touchEvent.x = static_cast<float>(pos.x * scale);
+            touchEvent.y = static_cast<float>(pos.y * scale);
+            touchEvent.pressure = 0.0f;
+            _impl->callbacks.touch_callback(touchEvent, _impl->callbacks.touch_user_data);
+        }
+    }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self touchesEnded:touches withEvent:event];
 }
 
 @end
@@ -159,9 +319,14 @@ Window* Window::create(const Config& config, Result* out_result) {
     @autoreleasepool {
         Window* window = new Window();
         window->impl = new Window::Impl();
+        window->impl->owner = window;  // Set back-pointer for event dispatch
         window->impl->width = config.width;
         window->impl->height = config.height;
         window->impl->title = config.title;
+
+        // Initialize mouse input system
+        window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
+        window->impl->mouse_device.set_window(window);
 
         CGRect frame = [[UIScreen mainScreen] bounds];
         window->impl->ui_window = [[UIWindow alloc] initWithFrame:frame];
@@ -371,6 +536,77 @@ void* Window::native_display() const {
 }
 
 //=============================================================================
+// Event Callback Setters
+//=============================================================================
+
+void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.close_callback = callback; impl->callbacks.close_user_data = user_data; }
+}
+
+void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.resize_callback = callback; impl->callbacks.resize_user_data = user_data; }
+}
+
+void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.move_callback = callback; impl->callbacks.move_user_data = user_data; }
+}
+
+void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.focus_callback = callback; impl->callbacks.focus_user_data = user_data; }
+}
+
+void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.state_callback = callback; impl->callbacks.state_user_data = user_data; }
+}
+
+void Window::set_touch_callback(TouchCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.touch_callback = callback; impl->callbacks.touch_user_data = user_data; }
+}
+
+void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.dpi_change_callback = callback; impl->callbacks.dpi_change_user_data = user_data; }
+}
+
+void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
+    if (impl) { impl->callbacks.drop_file_callback = callback; impl->callbacks.drop_file_user_data = user_data; }
+}
+
+//=============================================================================
+// Input State Queries
+//=============================================================================
+
+bool Window::is_key_down(Key key) const {
+    if (!impl || key == Key::Unknown) return false;
+    return impl->keyboard_device.is_key_down(key);
+}
+
+bool Window::is_mouse_button_down(MouseButton button) const {
+    if (!impl) return false;
+    return impl->mouse_device.is_button_down(button);
+}
+
+void Window::get_mouse_position(int* x, int* y) const {
+    if (impl) {
+        // Return last touch position as simulated mouse, or mouse_device position
+        impl->mouse_device.get_position(x, y);
+        // Fallback to touch position if mouse position is 0
+        int mx = 0, my = 0;
+        impl->mouse_device.get_position(&mx, &my);
+        if (mx == 0 && my == 0) {
+            if (x) *x = static_cast<int>(impl->touch_x);
+            if (y) *y = static_cast<int>(impl->touch_y);
+        }
+    } else {
+        if (x) *x = 0;
+        if (y) *y = 0;
+    }
+}
+
+KeyMod Window::get_current_modifiers() const {
+    return KeyMod::None;
+}
+
+//=============================================================================
 // Utility Functions
 //=============================================================================
 
@@ -422,6 +658,55 @@ Backend get_default_backend() {
 #else
     return Backend::Auto;
 #endif
+}
+
+// key_to_string, mouse_button_to_string, event_type_to_string
+// are implemented in input/input_keyboard.cpp
+
+//=============================================================================
+// Mouse Handler API
+//=============================================================================
+
+bool Window::add_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_mouse_handler(input::IMouseHandler* handler) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_mouse_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->mouse_dispatcher.remove_handler(handler_id);
+}
+
+input::MouseEventDispatcher* Window::get_mouse_dispatcher() {
+    return impl ? &impl->mouse_dispatcher : nullptr;
+}
+
+//=============================================================================
+// Keyboard Handler API
+//=============================================================================
+
+bool Window::add_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.add_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(input::IKeyboardHandler* handler) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler);
+}
+
+bool Window::remove_keyboard_handler(const char* handler_id) {
+    if (!impl) return false;
+    return impl->keyboard_dispatcher.remove_handler(handler_id);
+}
+
+input::KeyboardEventDispatcher* Window::get_keyboard_dispatcher() {
+    return impl ? &impl->keyboard_dispatcher : nullptr;
 }
 
 //=============================================================================
