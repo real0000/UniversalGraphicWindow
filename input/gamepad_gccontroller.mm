@@ -155,6 +155,90 @@ float GamepadManager::get_deadzone() const {
     return 0.1f;
 }
 
+//=============================================================================
+// Force Feedback / Vibration - GCController Implementation (Stub)
+//=============================================================================
+
+bool GamepadManager::get_force_feedback_caps(int index, ForceFeedbackCaps* caps) const {
+    if (!caps) return false;
+    *caps = ForceFeedbackCaps();
+
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    if (!impl_->gamepads[index].connected) {
+        return false;
+    }
+
+    // TODO: Check GCController.haptics for haptic support
+    // Modern MFi and DualSense/DualShock controllers support haptics
+    caps->supported = false;
+    return true;
+}
+
+bool GamepadManager::supports_force_feedback(int index) const {
+    // TODO: Implement GCController haptics check
+    (void)index;
+    return false;
+}
+
+bool GamepadManager::set_vibration(int index, float left_motor, float right_motor) {
+    // TODO: Implement using GCController.haptics
+    // Use CHHapticEngine for advanced haptics
+    (void)index;
+    (void)left_motor;
+    (void)right_motor;
+    return false;
+}
+
+bool GamepadManager::set_trigger_vibration(int index, float left_trigger, float right_trigger) {
+    // TODO: DualSense adaptive triggers via GCController
+    (void)index;
+    (void)left_trigger;
+    (void)right_trigger;
+    return false;
+}
+
+bool GamepadManager::stop_vibration(int index) {
+    (void)index;
+    return false;
+}
+
+ForceFeedbackHandle GamepadManager::play_effect(int index, const ForceFeedbackEffect& effect) {
+    (void)index;
+    (void)effect;
+    return INVALID_FF_HANDLE;
+}
+
+bool GamepadManager::stop_effect(int index, ForceFeedbackHandle handle) {
+    (void)index;
+    (void)handle;
+    return false;
+}
+
+bool GamepadManager::update_effect(int index, ForceFeedbackHandle handle, const ForceFeedbackEffect& effect) {
+    (void)index;
+    (void)handle;
+    (void)effect;
+    return false;
+}
+
+bool GamepadManager::stop_all_effects(int index) {
+    (void)index;
+    return false;
+}
+
+bool GamepadManager::pause_effects(int index) {
+    (void)index;
+    return false;
+}
+
+bool GamepadManager::resume_effects(int index) {
+    (void)index;
+    return false;
+}
+
 } // namespace input
 } // namespace window
 

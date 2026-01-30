@@ -332,6 +332,142 @@ float GamepadManager::get_deadzone() const {
     return 0.1f;
 }
 
+//=============================================================================
+// Force Feedback / Vibration - XInput Implementation
+//=============================================================================
+
+bool GamepadManager::get_force_feedback_caps(int index, ForceFeedbackCaps* caps) const {
+    if (!caps) return false;
+
+    // Initialize to defaults
+    *caps = ForceFeedbackCaps();
+
+    if (!impl_ || index < 0 || index >= XINPUT_MAX_CONTROLLERS) {
+        return false;
+    }
+
+    if (!impl_->gamepads[index].connected) {
+        return false;
+    }
+
+    // XInput always supports basic rumble
+    caps->supported = true;
+    caps->has_rumble = true;
+    caps->has_left_motor = true;
+    caps->has_right_motor = true;
+    caps->has_trigger_rumble = false;  // Only Xbox One+ via Windows.Gaming.Input
+    caps->has_advanced_effects = false; // XInput only supports simple rumble
+    caps->supported_effects = (1 << static_cast<int>(ForceFeedbackType::Rumble));
+    caps->max_simultaneous_effects = 1;
+
+    return true;
+}
+
+bool GamepadManager::supports_force_feedback(int index) const {
+    if (!impl_ || index < 0 || index >= XINPUT_MAX_CONTROLLERS) {
+        return false;
+    }
+    // XInput controllers always support vibration
+    return impl_->gamepads[index].connected;
+}
+
+bool GamepadManager::set_vibration(int index, float left_motor, float right_motor) {
+    if (!impl_ || index < 0 || index >= XINPUT_MAX_CONTROLLERS) {
+        return false;
+    }
+
+    if (!impl_->gamepads[index].connected) {
+        return false;
+    }
+
+    // Clamp values to 0.0-1.0
+    if (left_motor < 0.0f) left_motor = 0.0f;
+    if (left_motor > 1.0f) left_motor = 1.0f;
+    if (right_motor < 0.0f) right_motor = 0.0f;
+    if (right_motor > 1.0f) right_motor = 1.0f;
+
+    // Convert to XInput range (0-65535)
+    XINPUT_VIBRATION vibration;
+    vibration.wLeftMotorSpeed = static_cast<WORD>(left_motor * 65535.0f);
+    vibration.wRightMotorSpeed = static_cast<WORD>(right_motor * 65535.0f);
+
+    DWORD result = XInputSetState(static_cast<DWORD>(index), &vibration);
+    return (result == ERROR_SUCCESS);
+}
+
+bool GamepadManager::set_trigger_vibration(int index, float left_trigger, float right_trigger) {
+    // XInput does not support trigger rumble
+    // This would require Windows.Gaming.Input (Xbox One controllers)
+    (void)index;
+    (void)left_trigger;
+    (void)right_trigger;
+    return false;
+}
+
+bool GamepadManager::stop_vibration(int index) {
+    return set_vibration(index, 0.0f, 0.0f);
+}
+
+ForceFeedbackHandle GamepadManager::play_effect(int index, const ForceFeedbackEffect& effect) {
+    if (!impl_ || index < 0 || index >= XINPUT_MAX_CONTROLLERS) {
+        return INVALID_FF_HANDLE;
+    }
+
+    if (!impl_->gamepads[index].connected) {
+        return INVALID_FF_HANDLE;
+    }
+
+    // XInput only supports Rumble type
+    if (effect.type != ForceFeedbackType::Rumble) {
+        return INVALID_FF_HANDLE;
+    }
+
+    // Apply the effect
+    float left = effect.left_motor * effect.gain;
+    float right = effect.right_motor * effect.gain;
+
+    if (set_vibration(index, left, right)) {
+        // XInput doesn't have effect handles, return a simple indicator
+        // In a more complete implementation, we'd track timed effects
+        return 0;
+    }
+
+    return INVALID_FF_HANDLE;
+}
+
+bool GamepadManager::stop_effect(int index, ForceFeedbackHandle handle) {
+    (void)handle; // XInput doesn't use handles
+    return stop_vibration(index);
+}
+
+bool GamepadManager::update_effect(int index, ForceFeedbackHandle handle, const ForceFeedbackEffect& effect) {
+    (void)handle; // XInput doesn't use handles
+
+    if (effect.type != ForceFeedbackType::Rumble) {
+        return false;
+    }
+
+    float left = effect.left_motor * effect.gain;
+    float right = effect.right_motor * effect.gain;
+
+    return set_vibration(index, left, right);
+}
+
+bool GamepadManager::stop_all_effects(int index) {
+    return stop_vibration(index);
+}
+
+bool GamepadManager::pause_effects(int index) {
+    // XInput doesn't support pause, just stop
+    return stop_vibration(index);
+}
+
+bool GamepadManager::resume_effects(int index) {
+    // XInput doesn't support resume
+    (void)index;
+    return false;
+}
+
 } // namespace input
 } // namespace window
 

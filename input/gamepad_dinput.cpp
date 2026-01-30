@@ -44,6 +44,15 @@ namespace input {
 // DirectInput Device Info
 //=============================================================================
 
+// Force feedback effect tracking
+struct FFEffect {
+    IDirectInputEffect* effect;
+    ForceFeedbackType type;
+    bool active;
+
+    FFEffect() : effect(nullptr), type(ForceFeedbackType::None), active(false) {}
+};
+
 struct DInputDevice {
     IDirectInputDevice8* device;
     GUID instance_guid;
@@ -55,12 +64,31 @@ struct DInputDevice {
     bool connected;
     bool acquired;
 
+    // Force feedback
+    bool ff_supported;
+    uint32_t ff_supported_effects;
+    FFEffect ff_effects[MAX_FORCE_FEEDBACK_EFFECTS];
+    int ff_effect_count;
+
     DInputDevice() : device(nullptr), num_buttons(0), num_axes(0),
-                     connected(false), acquired(false) {
+                     connected(false), acquired(false),
+                     ff_supported(false), ff_supported_effects(0), ff_effect_count(0) {
         memset(&instance_guid, 0, sizeof(GUID));
         memset(&state, 0, sizeof(DIJOYSTATE2));
         memset(&prev_state, 0, sizeof(DIJOYSTATE2));
         name[0] = '\0';
+    }
+
+    void release_effects() {
+        for (int i = 0; i < MAX_FORCE_FEEDBACK_EFFECTS; i++) {
+            if (ff_effects[i].effect) {
+                ff_effects[i].effect->Stop();
+                ff_effects[i].effect->Release();
+                ff_effects[i].effect = nullptr;
+            }
+            ff_effects[i].active = false;
+        }
+        ff_effect_count = 0;
     }
 };
 
@@ -120,6 +148,7 @@ struct GamepadManager::Impl {
         // Release all devices
         for (int i = 0; i < MAX_GAMEPADS; i++) {
             if (devices[i].device) {
+                devices[i].release_effects();
                 devices[i].device->Unacquire();
                 devices[i].device->Release();
                 devices[i].device = nullptr;
@@ -135,6 +164,67 @@ struct GamepadManager::Impl {
         }
 
         device_count = 0;
+    }
+
+    // Callback for enumerating supported force feedback effects
+    static BOOL CALLBACK enum_effects_callback(const DIEFFECTINFO* info, void* context) {
+        DInputDevice* dev = static_cast<DInputDevice*>(context);
+
+        // Map DirectInput effect GUIDs to our types
+        if (info->guid == GUID_ConstantForce) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Constant));
+        } else if (info->guid == GUID_RampForce) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Ramp));
+        } else if (info->guid == GUID_Square || info->guid == GUID_Sine ||
+                   info->guid == GUID_Triangle || info->guid == GUID_SawtoothUp ||
+                   info->guid == GUID_SawtoothDown) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Periodic));
+        } else if (info->guid == GUID_Spring) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Spring));
+        } else if (info->guid == GUID_Damper) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Damper));
+        } else if (info->guid == GUID_Inertia) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Inertia));
+        } else if (info->guid == GUID_Friction) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Friction));
+        } else if (info->guid == GUID_CustomForce) {
+            dev->ff_supported_effects |= (1 << static_cast<int>(ForceFeedbackType::Custom));
+        }
+
+        return DIENUM_CONTINUE;
+    }
+
+    void setup_force_feedback(int device_idx) {
+        DInputDevice& dev = devices[device_idx];
+
+        if (!dev.device) return;
+
+        // Get device capabilities
+        DIDEVCAPS caps;
+        caps.dwSize = sizeof(DIDEVCAPS);
+        HRESULT hr = dev.device->GetCapabilities(&caps);
+        if (FAILED(hr)) return;
+
+        // Check if device supports force feedback
+        if (!(caps.dwFlags & DIDC_FORCEFEEDBACK)) {
+            dev.ff_supported = false;
+            return;
+        }
+
+        dev.ff_supported = true;
+
+        // Disable auto-center spring for better force feedback control
+        DIPROPDWORD dipdw;
+        dipdw.diph.dwSize = sizeof(DIPROPDWORD);
+        dipdw.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+        dipdw.diph.dwObj = 0;
+        dipdw.diph.dwHow = DIPH_DEVICE;
+        dipdw.dwData = DIPROPAUTOCENTER_OFF;
+        dev.device->SetProperty(DIPROP_AUTOCENTER, &dipdw.diph);
+
+        // Enumerate supported effects
+        dev.ff_supported_effects = (1 << static_cast<int>(ForceFeedbackType::Rumble)); // All FF devices support rumble
+        dev.device->EnumEffects(enum_effects_callback, &dev, DIEFT_ALL);
     }
 
     double get_timestamp() {
@@ -251,6 +341,9 @@ struct GamepadManager::Impl {
         gamepads[idx].connected = true;
 
         device_count++;
+
+        // Setup force feedback after device is fully initialized
+        setup_force_feedback(idx);
 
         // Dispatch connection event
         double timestamp = get_timestamp();
@@ -486,15 +579,152 @@ struct GamepadManager::Impl {
         // Reset state
         gs.reset();
 
-        // Release device
+        // Release effects and device
         if (dev.device) {
+            dev.release_effects();
             dev.device->Unacquire();
             dev.device->Release();
             dev.device = nullptr;
         }
+        dev.ff_supported = false;
+        dev.ff_supported_effects = 0;
 
         // Request re-enumeration
         needs_enumeration = true;
+    }
+
+    //=========================================================================
+    // Force Feedback Helper Methods
+    //=========================================================================
+
+    ForceFeedbackHandle create_constant_effect(int device_idx, const ForceFeedbackEffect& effect) {
+        DInputDevice& dev = devices[device_idx];
+        if (!dev.ff_supported || !dev.device) return INVALID_FF_HANDLE;
+
+        // Find free slot
+        int slot = -1;
+        for (int i = 0; i < MAX_FORCE_FEEDBACK_EFFECTS; i++) {
+            if (!dev.ff_effects[i].effect) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) return INVALID_FF_HANDLE;
+
+        // Convert direction from degrees to DirectInput format
+        LONG direction = static_cast<LONG>(effect.direction * 100); // Hundredths of degrees
+
+        // Setup constant force effect
+        DICONSTANTFORCE cf;
+        cf.lMagnitude = static_cast<LONG>(effect.magnitude * effect.gain * 10000.0f);
+
+        DIENVELOPE envelope;
+        envelope.dwSize = sizeof(DIENVELOPE);
+        envelope.dwAttackLevel = static_cast<DWORD>(effect.attack_level * 10000.0f);
+        envelope.dwAttackTime = effect.attack_time_ms * 1000;
+        envelope.dwFadeLevel = static_cast<DWORD>(effect.fade_level * 10000.0f);
+        envelope.dwFadeTime = effect.fade_time_ms * 1000;
+
+        DWORD axes[2] = { DIJOFS_X, DIJOFS_Y };
+        LONG directions[2] = { direction, 0 };
+
+        DIEFFECT eff;
+        ZeroMemory(&eff, sizeof(eff));
+        eff.dwSize = sizeof(DIEFFECT);
+        eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
+        eff.dwDuration = effect.duration_ms > 0 ? effect.duration_ms * 1000 : INFINITE;
+        eff.dwStartDelay = effect.start_delay_ms * 1000;
+        eff.dwGain = static_cast<DWORD>(effect.gain * 10000.0f);
+        eff.dwTriggerButton = DIEB_NOTRIGGER;
+        eff.cAxes = 2;
+        eff.rgdwAxes = axes;
+        eff.rglDirection = directions;
+        eff.lpEnvelope = (effect.attack_time_ms > 0 || effect.fade_time_ms > 0) ? &envelope : nullptr;
+        eff.cbTypeSpecificParams = sizeof(DICONSTANTFORCE);
+        eff.lpvTypeSpecificParams = &cf;
+
+        IDirectInputEffect* diEffect = nullptr;
+        HRESULT hr = dev.device->CreateEffect(GUID_ConstantForce, &eff, &diEffect, nullptr);
+        if (FAILED(hr) || !diEffect) return INVALID_FF_HANDLE;
+
+        dev.ff_effects[slot].effect = diEffect;
+        dev.ff_effects[slot].type = ForceFeedbackType::Constant;
+        dev.ff_effects[slot].active = false;
+        dev.ff_effect_count++;
+
+        return slot;
+    }
+
+    ForceFeedbackHandle create_periodic_effect(int device_idx, const ForceFeedbackEffect& effect) {
+        DInputDevice& dev = devices[device_idx];
+        if (!dev.ff_supported || !dev.device) return INVALID_FF_HANDLE;
+
+        int slot = -1;
+        for (int i = 0; i < MAX_FORCE_FEEDBACK_EFFECTS; i++) {
+            if (!dev.ff_effects[i].effect) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) return INVALID_FF_HANDLE;
+
+        // Map waveform to DirectInput GUID
+        GUID effectGuid;
+        switch (effect.waveform) {
+            case ForceFeedbackWaveform::Square: effectGuid = GUID_Square; break;
+            case ForceFeedbackWaveform::Triangle: effectGuid = GUID_Triangle; break;
+            case ForceFeedbackWaveform::SawtoothUp: effectGuid = GUID_SawtoothUp; break;
+            case ForceFeedbackWaveform::SawtoothDown: effectGuid = GUID_SawtoothDown; break;
+            default: effectGuid = GUID_Sine; break;
+        }
+
+        DIPERIODIC periodic;
+        periodic.dwMagnitude = static_cast<DWORD>(effect.magnitude * effect.gain * 10000.0f);
+        periodic.lOffset = static_cast<LONG>(effect.offset * 10000.0f);
+        periodic.dwPhase = static_cast<DWORD>(effect.phase * 36000.0f); // Hundredths of degrees
+        periodic.dwPeriod = static_cast<DWORD>(effect.period_ms * 1000.0f);
+
+        DWORD axes[2] = { DIJOFS_X, DIJOFS_Y };
+        LONG directions[2] = { static_cast<LONG>(effect.direction * 100), 0 };
+
+        DIEFFECT eff;
+        ZeroMemory(&eff, sizeof(eff));
+        eff.dwSize = sizeof(DIEFFECT);
+        eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
+        eff.dwDuration = effect.duration_ms > 0 ? effect.duration_ms * 1000 : INFINITE;
+        eff.dwStartDelay = effect.start_delay_ms * 1000;
+        eff.dwGain = static_cast<DWORD>(effect.gain * 10000.0f);
+        eff.dwTriggerButton = DIEB_NOTRIGGER;
+        eff.cAxes = 2;
+        eff.rgdwAxes = axes;
+        eff.rglDirection = directions;
+        eff.lpEnvelope = nullptr;
+        eff.cbTypeSpecificParams = sizeof(DIPERIODIC);
+        eff.lpvTypeSpecificParams = &periodic;
+
+        IDirectInputEffect* diEffect = nullptr;
+        HRESULT hr = dev.device->CreateEffect(effectGuid, &eff, &diEffect, nullptr);
+        if (FAILED(hr) || !diEffect) return INVALID_FF_HANDLE;
+
+        dev.ff_effects[slot].effect = diEffect;
+        dev.ff_effects[slot].type = ForceFeedbackType::Periodic;
+        dev.ff_effects[slot].active = false;
+        dev.ff_effect_count++;
+
+        return slot;
+    }
+
+    bool start_effect(int device_idx, int slot) {
+        DInputDevice& dev = devices[device_idx];
+        if (slot < 0 || slot >= MAX_FORCE_FEEDBACK_EFFECTS) return false;
+        if (!dev.ff_effects[slot].effect) return false;
+
+        HRESULT hr = dev.ff_effects[slot].effect->Start(1, 0);
+        if (SUCCEEDED(hr)) {
+            dev.ff_effects[slot].active = true;
+            return true;
+        }
+        return false;
     }
 };
 
@@ -621,6 +851,281 @@ float GamepadManager::get_deadzone() const {
         return impl_->deadzone;
     }
     return 0.1f;
+}
+
+//=============================================================================
+// Force Feedback / Vibration - DirectInput Implementation
+//=============================================================================
+
+bool GamepadManager::get_force_feedback_caps(int index, ForceFeedbackCaps* caps) const {
+    if (!caps) return false;
+
+    *caps = ForceFeedbackCaps();
+
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    const DInputDevice& dev = impl_->devices[index];
+    if (!dev.connected) {
+        return false;
+    }
+
+    caps->supported = dev.ff_supported;
+    if (!dev.ff_supported) {
+        return true;
+    }
+
+    caps->has_rumble = true; // All FF devices support rumble-like effects
+    caps->has_left_motor = true;
+    caps->has_right_motor = true;
+    caps->has_trigger_rumble = false;
+    caps->has_advanced_effects = (dev.ff_supported_effects != 0);
+    caps->supported_effects = dev.ff_supported_effects;
+    caps->max_simultaneous_effects = MAX_FORCE_FEEDBACK_EFFECTS;
+
+    return true;
+}
+
+bool GamepadManager::supports_force_feedback(int index) const {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+    return impl_->devices[index].ff_supported;
+}
+
+bool GamepadManager::set_vibration(int index, float left_motor, float right_motor) {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    DInputDevice& dev = impl_->devices[index];
+    if (!dev.connected || !dev.ff_supported || !dev.device) {
+        return false;
+    }
+
+    // Clamp values
+    if (left_motor < 0.0f) left_motor = 0.0f;
+    if (left_motor > 1.0f) left_motor = 1.0f;
+    if (right_motor < 0.0f) right_motor = 0.0f;
+    if (right_motor > 1.0f) right_motor = 1.0f;
+
+    // Stop any existing rumble effect in slot 0 (reserved for simple vibration)
+    if (dev.ff_effects[0].effect) {
+        dev.ff_effects[0].effect->Stop();
+        dev.ff_effects[0].effect->Release();
+        dev.ff_effects[0].effect = nullptr;
+        dev.ff_effects[0].active = false;
+    }
+
+    // If both motors are 0, just stop
+    if (left_motor < 0.001f && right_motor < 0.001f) {
+        return true;
+    }
+
+    // Create a periodic effect to simulate rumble
+    // Left motor = low frequency (slower), right motor = high frequency (faster)
+    float combined = (left_motor + right_motor) / 2.0f;
+
+    DIPERIODIC periodic;
+    periodic.dwMagnitude = static_cast<DWORD>(combined * 10000.0f);
+    periodic.lOffset = 0;
+    periodic.dwPhase = 0;
+    // Lower frequency for left motor emphasis, higher for right
+    float freq_factor = (left_motor > right_motor) ? 0.5f : 1.5f;
+    periodic.dwPeriod = static_cast<DWORD>(20000.0f / freq_factor); // ~50-150 Hz
+
+    DWORD axes[1] = { DIJOFS_X };
+    LONG directions[1] = { 0 };
+
+    DIEFFECT eff;
+    ZeroMemory(&eff, sizeof(eff));
+    eff.dwSize = sizeof(DIEFFECT);
+    eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS;
+    eff.dwDuration = INFINITE;
+    eff.dwGain = 10000;
+    eff.dwTriggerButton = DIEB_NOTRIGGER;
+    eff.cAxes = 1;
+    eff.rgdwAxes = axes;
+    eff.rglDirection = directions;
+    eff.lpEnvelope = nullptr;
+    eff.cbTypeSpecificParams = sizeof(DIPERIODIC);
+    eff.lpvTypeSpecificParams = &periodic;
+
+    IDirectInputEffect* diEffect = nullptr;
+    HRESULT hr = dev.device->CreateEffect(GUID_Sine, &eff, &diEffect, nullptr);
+    if (FAILED(hr) || !diEffect) {
+        // Try constant force as fallback
+        DICONSTANTFORCE cf;
+        cf.lMagnitude = static_cast<LONG>(combined * 10000.0f);
+
+        eff.cbTypeSpecificParams = sizeof(DICONSTANTFORCE);
+        eff.lpvTypeSpecificParams = &cf;
+
+        hr = dev.device->CreateEffect(GUID_ConstantForce, &eff, &diEffect, nullptr);
+        if (FAILED(hr) || !diEffect) {
+            return false;
+        }
+    }
+
+    dev.ff_effects[0].effect = diEffect;
+    dev.ff_effects[0].type = ForceFeedbackType::Rumble;
+    dev.ff_effects[0].active = true;
+
+    hr = diEffect->Start(1, 0);
+    return SUCCEEDED(hr);
+}
+
+bool GamepadManager::set_trigger_vibration(int index, float left_trigger, float right_trigger) {
+    // DirectInput doesn't support trigger-specific vibration
+    (void)index;
+    (void)left_trigger;
+    (void)right_trigger;
+    return false;
+}
+
+bool GamepadManager::stop_vibration(int index) {
+    return set_vibration(index, 0.0f, 0.0f);
+}
+
+ForceFeedbackHandle GamepadManager::play_effect(int index, const ForceFeedbackEffect& effect) {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return INVALID_FF_HANDLE;
+    }
+
+    DInputDevice& dev = impl_->devices[index];
+    if (!dev.connected || !dev.ff_supported) {
+        return INVALID_FF_HANDLE;
+    }
+
+    ForceFeedbackHandle handle = INVALID_FF_HANDLE;
+
+    switch (effect.type) {
+        case ForceFeedbackType::Rumble: {
+            // Use set_vibration for rumble
+            if (set_vibration(index, effect.left_motor, effect.right_motor)) {
+                handle = 0; // Rumble uses slot 0
+            }
+            break;
+        }
+        case ForceFeedbackType::Constant: {
+            handle = impl_->create_constant_effect(index, effect);
+            if (handle != INVALID_FF_HANDLE) {
+                impl_->start_effect(index, handle);
+            }
+            break;
+        }
+        case ForceFeedbackType::Periodic: {
+            handle = impl_->create_periodic_effect(index, effect);
+            if (handle != INVALID_FF_HANDLE) {
+                impl_->start_effect(index, handle);
+            }
+            break;
+        }
+        default:
+            // Other effect types not implemented yet
+            break;
+    }
+
+    return handle;
+}
+
+bool GamepadManager::stop_effect(int index, ForceFeedbackHandle handle) {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    DInputDevice& dev = impl_->devices[index];
+    if (handle < 0 || handle >= MAX_FORCE_FEEDBACK_EFFECTS) {
+        return false;
+    }
+
+    if (dev.ff_effects[handle].effect) {
+        dev.ff_effects[handle].effect->Stop();
+        dev.ff_effects[handle].active = false;
+        return true;
+    }
+
+    return false;
+}
+
+bool GamepadManager::update_effect(int index, ForceFeedbackHandle handle, const ForceFeedbackEffect& effect) {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    DInputDevice& dev = impl_->devices[index];
+    if (handle < 0 || handle >= MAX_FORCE_FEEDBACK_EFFECTS) {
+        return false;
+    }
+
+    if (!dev.ff_effects[handle].effect) {
+        return false;
+    }
+
+    // For rumble, just call set_vibration
+    if (effect.type == ForceFeedbackType::Rumble) {
+        return set_vibration(index, effect.left_motor, effect.right_motor);
+    }
+
+    // For other effects, we'd need to rebuild the DIEFFECT structure
+    // For now, stop and recreate
+    stop_effect(index, handle);
+
+    // Release old effect
+    dev.ff_effects[handle].effect->Release();
+    dev.ff_effects[handle].effect = nullptr;
+    dev.ff_effect_count--;
+
+    // Create new effect
+    ForceFeedbackHandle new_handle = play_effect(index, effect);
+    return (new_handle != INVALID_FF_HANDLE);
+}
+
+bool GamepadManager::stop_all_effects(int index) {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    DInputDevice& dev = impl_->devices[index];
+    if (!dev.device) return false;
+
+    // Stop all effects
+    for (int i = 0; i < MAX_FORCE_FEEDBACK_EFFECTS; i++) {
+        if (dev.ff_effects[i].effect) {
+            dev.ff_effects[i].effect->Stop();
+            dev.ff_effects[i].active = false;
+        }
+    }
+
+    // Also send stop to device
+    dev.device->SendForceFeedbackCommand(DISFFC_STOPALL);
+
+    return true;
+}
+
+bool GamepadManager::pause_effects(int index) {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    DInputDevice& dev = impl_->devices[index];
+    if (!dev.device) return false;
+
+    HRESULT hr = dev.device->SendForceFeedbackCommand(DISFFC_PAUSE);
+    return SUCCEEDED(hr);
+}
+
+bool GamepadManager::resume_effects(int index) {
+    if (!impl_ || index < 0 || index >= MAX_GAMEPADS) {
+        return false;
+    }
+
+    DInputDevice& dev = impl_->devices[index];
+    if (!dev.device) return false;
+
+    HRESULT hr = dev.device->SendForceFeedbackCommand(DISFFC_CONTINUE);
+    return SUCCEEDED(hr);
 }
 
 } // namespace input

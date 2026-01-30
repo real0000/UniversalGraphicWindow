@@ -3,9 +3,12 @@
  *
  * Demonstrates how to use the GamepadManager for game controller input.
  * Shows both event-driven and polling-based input handling.
+ * Also demonstrates force feedback (vibration) support.
  *
  * Connect an Xbox controller (or compatible gamepad) and run this example.
- * Press buttons and move sticks to see events. Press Start+Back to exit.
+ * Press buttons and move sticks to see events.
+ * Press A to test vibration, B to stop vibration.
+ * Press Start+Back to exit.
  */
 
 #include "window.hpp"
@@ -31,6 +34,8 @@ using namespace window::input;
 
 class ExampleGamepadHandler : public IGamepadHandler {
 public:
+    GamepadManager* gamepad_mgr = nullptr;
+
     const char* get_handler_id() const override {
         return "example_handler";
     }
@@ -52,6 +57,30 @@ public:
                 start_pressed_ = true;
             } else if (event.button == GamepadButton::Back) {
                 back_pressed_ = true;
+            }
+
+            // Test vibration with A button
+            if (event.button == GamepadButton::A && gamepad_mgr) {
+                printf("  -> Testing vibration (left=0.5, right=1.0)\n");
+                gamepad_mgr->set_vibration(event.gamepad_index, 0.5f, 1.0f);
+            }
+
+            // Stop vibration with B button
+            if (event.button == GamepadButton::B && gamepad_mgr) {
+                printf("  -> Stopping vibration\n");
+                gamepad_mgr->stop_vibration(event.gamepad_index);
+            }
+
+            // Test stronger vibration with X button
+            if (event.button == GamepadButton::X && gamepad_mgr) {
+                printf("  -> Testing strong vibration (left=1.0, right=1.0)\n");
+                gamepad_mgr->set_vibration(event.gamepad_index, 1.0f, 1.0f);
+            }
+
+            // Test light vibration with Y button
+            if (event.button == GamepadButton::Y && gamepad_mgr) {
+                printf("  -> Testing light vibration (left=0.2, right=0.2)\n");
+                gamepad_mgr->set_vibration(event.gamepad_index, 0.2f, 0.2f);
             }
         } else {
             if (event.button == GamepadButton::Start) {
@@ -85,6 +114,23 @@ public:
             printf("Gamepad %d connected: %s\n",
                    event.gamepad_index,
                    event.name ? event.name : "Unknown");
+
+            // Query force feedback capabilities
+            if (gamepad_mgr) {
+                ForceFeedbackCaps caps;
+                if (gamepad_mgr->get_force_feedback_caps(event.gamepad_index, &caps)) {
+                    printf("  Force feedback: %s\n", caps.supported ? "Yes" : "No");
+                    if (caps.supported) {
+                        printf("    Left motor: %s, Right motor: %s\n",
+                               caps.has_left_motor ? "Yes" : "No",
+                               caps.has_right_motor ? "Yes" : "No");
+                        printf("    Trigger rumble: %s\n",
+                               caps.has_trigger_rumble ? "Yes" : "No");
+                        printf("    Advanced effects: %s\n",
+                               caps.has_advanced_effects ? "Yes" : "No");
+                    }
+                }
+            }
         } else {
             printf("Gamepad %d disconnected\n", event.gamepad_index);
         }
@@ -105,7 +151,13 @@ private:
 int main() {
     printf("=== Gamepad Input Example ===\n");
     printf("Connect a gamepad to see input events.\n");
-    printf("Press Start + Back (Select) simultaneously to exit.\n");
+    printf("\n");
+    printf("Controls:\n");
+    printf("  A      - Test medium vibration\n");
+    printf("  B      - Stop vibration\n");
+    printf("  X      - Test strong vibration\n");
+    printf("  Y      - Test light vibration\n");
+    printf("  Start + Back - Exit\n");
     printf("\n");
 
     // Create the gamepad manager
@@ -117,6 +169,7 @@ int main() {
 
     // Create and register our event handler
     ExampleGamepadHandler handler;
+    handler.gamepad_mgr = gamepad;  // Give handler access for vibration control
     gamepad->add_handler(&handler);
 
     // Set deadzone (default is 0.1)
@@ -154,6 +207,13 @@ int main() {
     }
 
     printf("\nExiting...\n");
+
+    // Stop any vibration before exiting
+    for (int i = 0; i < 8; i++) {
+        if (gamepad->is_connected(i)) {
+            gamepad->stop_vibration(i);
+        }
+    }
 
     // Clean up
     gamepad->remove_handler(&handler);

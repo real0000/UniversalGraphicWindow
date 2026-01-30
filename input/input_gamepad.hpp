@@ -35,6 +35,7 @@ static const int MAX_GAMEPAD_AXES = 6;
 static const int MAX_GAMEPADS = 8;
 static const int MAX_GAMEPAD_HANDLERS = 16;
 static const int MAX_GAMEPAD_NAME_LENGTH = 64;
+static const int MAX_FORCE_FEEDBACK_EFFECTS = 8;
 
 //=============================================================================
 // Gamepad Button Enumeration
@@ -75,6 +76,95 @@ enum class GamepadAxis : uint8_t {
     Count,
     Unknown = 255
 };
+
+//=============================================================================
+// Force Feedback / Vibration
+//=============================================================================
+
+// Force feedback effect types (for advanced DirectInput-style effects)
+enum class ForceFeedbackType : uint8_t {
+    None = 0,
+    Rumble,             // Basic dual-motor rumble (XInput style)
+    Constant,           // Constant force in a direction
+    Periodic,           // Periodic wave (sine, square, etc.)
+    Ramp,               // Force that changes linearly over time
+    Spring,             // Position-based resistance
+    Damper,             // Velocity-based resistance
+    Inertia,            // Acceleration-based resistance
+    Friction,           // Movement resistance
+    Custom,             // Custom/raw effect
+    Count
+};
+
+// Periodic effect waveforms
+enum class ForceFeedbackWaveform : uint8_t {
+    Sine = 0,
+    Square,
+    Triangle,
+    SawtoothUp,
+    SawtoothDown,
+    Count
+};
+
+// Force feedback capabilities for a gamepad
+struct ForceFeedbackCaps {
+    bool supported = false;             // Has any force feedback capability
+    bool has_rumble = false;            // Has basic rumble motors
+    bool has_left_motor = false;        // Has left (low frequency) motor
+    bool has_right_motor = false;       // Has right (high frequency) motor
+    bool has_trigger_rumble = false;    // Has trigger rumble (Xbox One+)
+    bool has_advanced_effects = false;  // Has DirectInput-style effects
+    uint32_t supported_effects = 0;     // Bitmask of ForceFeedbackType (1 << type)
+    int max_simultaneous_effects = 0;   // Max effects that can play at once
+};
+
+// Parameters for a force feedback effect
+struct ForceFeedbackEffect {
+    ForceFeedbackType type = ForceFeedbackType::Rumble;
+
+    // Duration in milliseconds (0 = infinite until stopped)
+    uint32_t duration_ms = 0;
+
+    // Start delay in milliseconds
+    uint32_t start_delay_ms = 0;
+
+    // Gain/intensity (0.0 to 1.0)
+    float gain = 1.0f;
+
+    // For Rumble type:
+    float left_motor = 0.0f;        // Low frequency motor (0.0 to 1.0)
+    float right_motor = 0.0f;       // High frequency motor (0.0 to 1.0)
+    float left_trigger = 0.0f;      // Left trigger motor (0.0 to 1.0, Xbox One+)
+    float right_trigger = 0.0f;     // Right trigger motor (0.0 to 1.0, Xbox One+)
+
+    // For Constant/Ramp types:
+    float magnitude = 0.0f;         // Force magnitude (-1.0 to 1.0)
+    float end_magnitude = 0.0f;     // End magnitude for Ramp
+    int direction = 0;              // Direction in degrees (0-359, 0=up/forward)
+
+    // For Periodic type:
+    ForceFeedbackWaveform waveform = ForceFeedbackWaveform::Sine;
+    float period_ms = 100.0f;       // Wave period in milliseconds
+    float phase = 0.0f;             // Starting phase (0.0 to 1.0)
+    float offset = 0.0f;            // DC offset (-1.0 to 1.0)
+
+    // For condition effects (Spring, Damper, Inertia, Friction):
+    float positive_coefficient = 0.0f;  // Coefficient for positive displacement
+    float negative_coefficient = 0.0f;  // Coefficient for negative displacement
+    float positive_saturation = 1.0f;   // Maximum force in positive direction
+    float negative_saturation = 1.0f;   // Maximum force in negative direction
+    float dead_band = 0.0f;             // Center dead zone size
+
+    // Envelope (attack/fade)
+    uint32_t attack_time_ms = 0;    // Attack time in ms
+    float attack_level = 0.0f;      // Attack level (0.0 to 1.0)
+    uint32_t fade_time_ms = 0;      // Fade time in ms
+    float fade_level = 0.0f;        // Fade level (0.0 to 1.0)
+};
+
+// Handle for a playing effect (used to stop/modify specific effects)
+typedef int ForceFeedbackHandle;
+static const ForceFeedbackHandle INVALID_FF_HANDLE = -1;
 
 //=============================================================================
 // Gamepad Event Types (add to EventType in window.hpp conceptually)
@@ -240,6 +330,47 @@ public:
     // Configuration
     void set_deadzone(float deadzone);
     float get_deadzone() const;
+
+    //-------------------------------------------------------------------------
+    // Force Feedback / Vibration
+    //-------------------------------------------------------------------------
+
+    // Query force feedback capabilities for a gamepad
+    bool get_force_feedback_caps(int index, ForceFeedbackCaps* caps) const;
+
+    // Check if force feedback is supported
+    bool supports_force_feedback(int index) const;
+
+    // Simple vibration API (most common use case)
+    // left_motor: Low frequency rumble (0.0 to 1.0)
+    // right_motor: High frequency rumble (0.0 to 1.0)
+    // Returns true on success
+    bool set_vibration(int index, float left_motor, float right_motor);
+
+    // Trigger vibration (Xbox One controllers and later)
+    // Returns true on success, false if not supported
+    bool set_trigger_vibration(int index, float left_trigger, float right_trigger);
+
+    // Stop all vibration on a gamepad
+    bool stop_vibration(int index);
+
+    // Advanced force feedback API
+    // Play an effect and get a handle to control it
+    // Returns INVALID_FF_HANDLE on failure
+    ForceFeedbackHandle play_effect(int index, const ForceFeedbackEffect& effect);
+
+    // Stop a specific effect
+    bool stop_effect(int index, ForceFeedbackHandle handle);
+
+    // Modify a playing effect
+    bool update_effect(int index, ForceFeedbackHandle handle, const ForceFeedbackEffect& effect);
+
+    // Stop all effects on a gamepad
+    bool stop_all_effects(int index);
+
+    // Pause/resume all effects on a gamepad
+    bool pause_effects(int index);
+    bool resume_effects(int index);
 
     // Platform-specific implementation
     struct Impl;

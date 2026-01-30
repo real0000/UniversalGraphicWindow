@@ -69,7 +69,7 @@ endif()
 message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
 
 # Add platform-independent source files
-list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input_keyboard.cpp input/input_mouse.cpp input/input_gamepad.cpp)
+list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input_keyboard.cpp input/input_mouse.cpp input/input_gamepad.cpp input/input_wheel.cpp)
 
 # Add device enumeration files (platform-specific)
 if(WIN32)
@@ -123,6 +123,28 @@ elseif(UNIX)
         list(APPEND WINDOW_LIBS ${UDEV_LIB})
     endif()
     message(STATUS "Gamepad support: evdev")
+endif()
+
+# Add platform-specific steering wheel implementations
+if(WIN32)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+        # DirectInput for steering wheels (required for force feedback)
+        list(APPEND WINDOW_SOURCES input/wheel_dinput.cpp)
+        # dinput8 and dxguid may already be linked from gamepad, add if not using DINPUT
+        if(NOT WINDOW_ENABLE_DINPUT)
+            list(APPEND WINDOW_LIBS dinput8 dxguid)
+        endif()
+        message(STATUS "Steering wheel support: DirectInput")
+    endif()
+elseif(APPLE)
+    list(APPEND WINDOW_SOURCES input/wheel_gccontroller.mm)
+    message(STATUS "Steering wheel support: GCController (stub)")
+elseif(ANDROID)
+    list(APPEND WINDOW_SOURCES input/wheel_android.cpp)
+    message(STATUS "Steering wheel support: Android (stub)")
+elseif(UNIX)
+    list(APPEND WINDOW_SOURCES input/wheel_evdev.cpp)
+    message(STATUS "Steering wheel support: evdev (stub)")
 endif()
 
 #=============================================================================
@@ -338,6 +360,10 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         # Gamepad example
         add_executable(example_gamepad examples/gamepad.cpp)
         target_link_libraries(example_gamepad PRIVATE window)
+
+        # Steering wheel example
+        add_executable(example_wheel examples/wheel.cpp)
+        target_link_libraries(example_wheel PRIVATE window)
     endif()
 
     # Metal example (macOS only)
@@ -368,6 +394,7 @@ install(FILES
     input/input_keyboard.hpp
     input/input_mouse.hpp
     input/input_gamepad.hpp
+    input/input_wheel.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/input
 )
 
