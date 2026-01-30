@@ -21,6 +21,7 @@
 #define WINDOW_HPP
 
 #include <cstdint>
+#include <functional>
 
 //=============================================================================
 // Platform Detection (Internal)
@@ -384,29 +385,29 @@ struct DropFileEvent : Event {
 };
 
 //-----------------------------------------------------------------------------
-// Event Callback Types
+// Event Callback Types (using std::function for flexibility)
 //-----------------------------------------------------------------------------
 
 // Generic event callback
-typedef void (*EventCallback)(const Event& event, void* user_data);
+using EventCallback = std::function<void(const Event& event)>;
 
 // Typed callbacks for specific events
-typedef void (*WindowCloseCallback)(const WindowCloseEvent& event, void* user_data);
-typedef void (*WindowResizeCallback)(const WindowResizeEvent& event, void* user_data);
-typedef void (*WindowMoveCallback)(const WindowMoveEvent& event, void* user_data);
-typedef void (*WindowFocusCallback)(const WindowFocusEvent& event, void* user_data);
-typedef void (*WindowStateCallback)(const WindowStateEvent& event, void* user_data);
+using WindowCloseCallback = std::function<void(const WindowCloseEvent& event)>;
+using WindowResizeCallback = std::function<void(const WindowResizeEvent& event)>;
+using WindowMoveCallback = std::function<void(const WindowMoveEvent& event)>;
+using WindowFocusCallback = std::function<void(const WindowFocusEvent& event)>;
+using WindowStateCallback = std::function<void(const WindowStateEvent& event)>;
 
-typedef void (*KeyCallback)(const KeyEvent& event, void* user_data);
-typedef void (*CharCallback)(const CharEvent& event, void* user_data);
+using KeyCallback = std::function<void(const KeyEvent& event)>;
+using CharCallback = std::function<void(const CharEvent& event)>;
 
-typedef void (*MouseButtonCallback)(const MouseButtonEvent& event, void* user_data);
-typedef void (*MouseMoveCallback)(const MouseMoveEvent& event, void* user_data);
-typedef void (*MouseWheelCallback)(const MouseWheelEvent& event, void* user_data);
+using MouseButtonCallback = std::function<void(const MouseButtonEvent& event)>;
+using MouseMoveCallback = std::function<void(const MouseMoveEvent& event)>;
+using MouseWheelCallback = std::function<void(const MouseWheelEvent& event)>;
 
-typedef void (*TouchCallback)(const TouchEvent& event, void* user_data);
-typedef void (*DpiChangeCallback)(const DpiChangeEvent& event, void* user_data);
-typedef void (*DropFileCallback)(const DropFileEvent& event, void* user_data);
+using TouchCallback = std::function<void(const TouchEvent& event)>;
+using DpiChangeCallback = std::function<void(const DpiChangeEvent& event)>;
+using DropFileCallback = std::function<void(const DropFileEvent& event)>;
 
 //-----------------------------------------------------------------------------
 // Constants
@@ -706,22 +707,22 @@ public:
     //-------------------------------------------------------------------------
     // Event Callbacks
     //-------------------------------------------------------------------------
-    // Set callbacks for specific event types. Pass nullptr to remove callback.
-    // user_data is passed to the callback function.
+    // Set callbacks for specific event types. Pass empty std::function to remove callback.
+    // Use lambda captures for context instead of user_data.
 
     // Window events
-    void set_close_callback(WindowCloseCallback callback, void* user_data = nullptr);
-    void set_resize_callback(WindowResizeCallback callback, void* user_data = nullptr);
-    void set_move_callback(WindowMoveCallback callback, void* user_data = nullptr);
-    void set_focus_callback(WindowFocusCallback callback, void* user_data = nullptr);
-    void set_state_callback(WindowStateCallback callback, void* user_data = nullptr);
+    void set_close_callback(WindowCloseCallback callback);
+    void set_resize_callback(WindowResizeCallback callback);
+    void set_move_callback(WindowMoveCallback callback);
+    void set_focus_callback(WindowFocusCallback callback);
+    void set_state_callback(WindowStateCallback callback);
 
     // Touch events
-    void set_touch_callback(TouchCallback callback, void* user_data = nullptr);
+    void set_touch_callback(TouchCallback callback);
 
     // System events
-    void set_dpi_change_callback(DpiChangeCallback callback, void* user_data = nullptr);
-    void set_drop_file_callback(DropFileCallback callback, void* user_data = nullptr);
+    void set_dpi_change_callback(DpiChangeCallback callback);
+    void set_drop_file_callback(DropFileCallback callback);
 
     //-------------------------------------------------------------------------
     // Input State Queries

@@ -140,29 +140,14 @@ static double get_event_timestamp() {
 //=============================================================================
 
 struct EventCallbacks {
-    WindowCloseCallback close_callback = nullptr;
-    void* close_user_data = nullptr;
-
-    WindowResizeCallback resize_callback = nullptr;
-    void* resize_user_data = nullptr;
-
-    WindowMoveCallback move_callback = nullptr;
-    void* move_user_data = nullptr;
-
-    WindowFocusCallback focus_callback = nullptr;
-    void* focus_user_data = nullptr;
-
-    WindowStateCallback state_callback = nullptr;
-    void* state_user_data = nullptr;
-
-    TouchCallback touch_callback = nullptr;
-    void* touch_user_data = nullptr;
-
-    DpiChangeCallback dpi_change_callback = nullptr;
-    void* dpi_change_user_data = nullptr;
-
-    DropFileCallback drop_file_callback = nullptr;
-    void* drop_file_user_data = nullptr;
+    WindowCloseCallback close_callback;
+    WindowResizeCallback resize_callback;
+    WindowMoveCallback move_callback;
+    WindowFocusCallback focus_callback;
+    WindowStateCallback state_callback;
+    TouchCallback touch_callback;
+    DpiChangeCallback dpi_change_callback;
+    DropFileCallback drop_file_callback;
 };
 
 //=============================================================================
@@ -284,7 +269,7 @@ Window* Window::create(const Config& config, Result* out_result) {
                 event.type = EventType::WindowClose;
                 event.window = g_uwp_window->impl->owner;
                 event.timestamp = get_event_timestamp();
-                g_uwp_window->impl->callbacks.close_callback(event, g_uwp_window->impl->callbacks.close_user_data);
+                g_uwp_window->impl->callbacks.close_callback(event);
             }
         }
     });
@@ -302,7 +287,7 @@ Window* Window::create(const Config& config, Result* out_result) {
                 event.width = g_uwp_window->impl->width;
                 event.height = g_uwp_window->impl->height;
                 event.minimized = false;
-                g_uwp_window->impl->callbacks.resize_callback(event, g_uwp_window->impl->callbacks.resize_user_data);
+                g_uwp_window->impl->callbacks.resize_callback(event);
             }
         }
     });
@@ -330,7 +315,7 @@ Window* Window::create(const Config& config, Result* out_result) {
                 event.window = g_uwp_window->impl->owner;
                 event.timestamp = get_event_timestamp();
                 event.focused = focused;
-                g_uwp_window->impl->callbacks.focus_callback(event, g_uwp_window->impl->callbacks.focus_user_data);
+                g_uwp_window->impl->callbacks.focus_callback(event);
             }
         }
     });
@@ -723,36 +708,36 @@ void* Window::native_display() const {
 // Event Callback Setters
 //=============================================================================
 
-void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.close_callback = callback; impl->callbacks.close_user_data = user_data; }
+void Window::set_close_callback(WindowCloseCallback callback) {
+    if (impl) { impl->callbacks.close_callback = callback; }
 }
 
-void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.resize_callback = callback; impl->callbacks.resize_user_data = user_data; }
+void Window::set_resize_callback(WindowResizeCallback callback) {
+    if (impl) { impl->callbacks.resize_callback = callback; }
 }
 
-void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.move_callback = callback; impl->callbacks.move_user_data = user_data; }
+void Window::set_move_callback(WindowMoveCallback callback) {
+    if (impl) { impl->callbacks.move_callback = callback; }
 }
 
-void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.focus_callback = callback; impl->callbacks.focus_user_data = user_data; }
+void Window::set_focus_callback(WindowFocusCallback callback) {
+    if (impl) { impl->callbacks.focus_callback = callback; }
 }
 
-void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.state_callback = callback; impl->callbacks.state_user_data = user_data; }
+void Window::set_state_callback(WindowStateCallback callback) {
+    if (impl) { impl->callbacks.state_callback = callback; }
 }
 
-void Window::set_touch_callback(TouchCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.touch_callback = callback; impl->callbacks.touch_user_data = user_data; }
+void Window::set_touch_callback(TouchCallback callback) {
+    if (impl) { impl->callbacks.touch_callback = callback; }
 }
 
-void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.dpi_change_callback = callback; impl->callbacks.dpi_change_user_data = user_data; }
+void Window::set_dpi_change_callback(DpiChangeCallback callback) {
+    if (impl) { impl->callbacks.dpi_change_callback = callback; }
 }
 
-void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.drop_file_callback = callback; impl->callbacks.drop_file_user_data = user_data; }
+void Window::set_drop_file_callback(DropFileCallback callback) {
+    if (impl) { impl->callbacks.drop_file_callback = callback; }
 }
 
 //=============================================================================

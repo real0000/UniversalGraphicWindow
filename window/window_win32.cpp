@@ -195,31 +195,16 @@ static MouseButton translate_mouse_button(UINT msg, WPARAM wparam) {
 // Window Implementation
 //=============================================================================
 
-// Callback storage structure
+// Callback storage structure (using std::function)
 struct EventCallbacks {
-    WindowCloseCallback close_callback = nullptr;
-    void* close_user_data = nullptr;
-
-    WindowResizeCallback resize_callback = nullptr;
-    void* resize_user_data = nullptr;
-
-    WindowMoveCallback move_callback = nullptr;
-    void* move_user_data = nullptr;
-
-    WindowFocusCallback focus_callback = nullptr;
-    void* focus_user_data = nullptr;
-
-    WindowStateCallback state_callback = nullptr;
-    void* state_user_data = nullptr;
-
-    TouchCallback touch_callback = nullptr;
-    void* touch_user_data = nullptr;
-
-    DpiChangeCallback dpi_change_callback = nullptr;
-    void* dpi_change_user_data = nullptr;
-
-    DropFileCallback drop_file_callback = nullptr;
-    void* drop_file_user_data = nullptr;
+    WindowCloseCallback close_callback;
+    WindowResizeCallback resize_callback;
+    WindowMoveCallback move_callback;
+    WindowFocusCallback focus_callback;
+    WindowStateCallback state_callback;
+    TouchCallback touch_callback;
+    DpiChangeCallback dpi_change_callback;
+    DropFileCallback drop_file_callback;
 };
 
 struct Window::Impl {
@@ -327,7 +312,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     event.type = EventType::WindowClose;
                     event.window = impl->owner;
                     event.timestamp = get_event_timestamp();
-                    impl->callbacks.close_callback(event, impl->callbacks.close_user_data);
+                    impl->callbacks.close_callback(event);
                 }
             }
             return 0;
@@ -354,7 +339,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     event.width = new_width;
                     event.height = new_height;
                     event.minimized = minimized;
-                    impl->callbacks.resize_callback(event, impl->callbacks.resize_user_data);
+                    impl->callbacks.resize_callback(event);
                 }
 
                 if (impl->callbacks.state_callback && (wparam == SIZE_MINIMIZED || wparam == SIZE_MAXIMIZED || wparam == SIZE_RESTORED)) {
@@ -365,7 +350,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     event.timestamp = get_event_timestamp();
                     event.minimized = minimized;
                     event.maximized = maximized;
-                    impl->callbacks.state_callback(event, impl->callbacks.state_user_data);
+                    impl->callbacks.state_callback(event);
                 }
             }
             return 0;
@@ -382,7 +367,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     event.timestamp = get_event_timestamp();
                     event.x = impl->x;
                     event.y = impl->y;
-                    impl->callbacks.move_callback(event, impl->callbacks.move_user_data);
+                    impl->callbacks.move_callback(event);
                 }
             }
             return 0;
@@ -396,7 +381,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     event.window = impl->owner;
                     event.timestamp = get_event_timestamp();
                     event.focused = true;
-                    impl->callbacks.focus_callback(event, impl->callbacks.focus_user_data);
+                    impl->callbacks.focus_callback(event);
                 }
             }
             return 0;
@@ -414,7 +399,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     event.window = impl->owner;
                     event.timestamp = get_event_timestamp();
                     event.focused = false;
-                    impl->callbacks.focus_callback(event, impl->callbacks.focus_user_data);
+                    impl->callbacks.focus_callback(event);
                 }
             }
             return 0;
@@ -535,7 +520,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                 event.timestamp = get_event_timestamp();
                 event.dpi = dpi;
                 event.scale = static_cast<float>(dpi) / 96.0f;
-                impl->callbacks.dpi_change_callback(event, impl->callbacks.dpi_change_user_data);
+                impl->callbacks.dpi_change_callback(event);
 
                 // Optionally resize window to suggested rect
                 RECT* suggested = reinterpret_cast<RECT*>(lparam);
@@ -569,7 +554,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     event.timestamp = get_event_timestamp();
                     event.paths = paths;
                     event.count = static_cast<int>(count);
-                    impl->callbacks.drop_file_callback(event, impl->callbacks.drop_file_user_data);
+                    impl->callbacks.drop_file_callback(event);
 
                     for (UINT i = 0; i < count; i++) {
                         delete[] paths[i];
@@ -938,59 +923,51 @@ void* Window::native_display() const { return nullptr; }
 // Event Callback Setters
 //=============================================================================
 
-void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
+void Window::set_close_callback(WindowCloseCallback callback) {
     if (impl) {
         impl->callbacks.close_callback = callback;
-        impl->callbacks.close_user_data = user_data;
     }
 }
 
-void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
+void Window::set_resize_callback(WindowResizeCallback callback) {
     if (impl) {
         impl->callbacks.resize_callback = callback;
-        impl->callbacks.resize_user_data = user_data;
     }
 }
 
-void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
+void Window::set_move_callback(WindowMoveCallback callback) {
     if (impl) {
         impl->callbacks.move_callback = callback;
-        impl->callbacks.move_user_data = user_data;
     }
 }
 
-void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
+void Window::set_focus_callback(WindowFocusCallback callback) {
     if (impl) {
         impl->callbacks.focus_callback = callback;
-        impl->callbacks.focus_user_data = user_data;
     }
 }
 
-void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
+void Window::set_state_callback(WindowStateCallback callback) {
     if (impl) {
         impl->callbacks.state_callback = callback;
-        impl->callbacks.state_user_data = user_data;
     }
 }
 
-void Window::set_touch_callback(TouchCallback callback, void* user_data) {
+void Window::set_touch_callback(TouchCallback callback) {
     if (impl) {
         impl->callbacks.touch_callback = callback;
-        impl->callbacks.touch_user_data = user_data;
     }
 }
 
-void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
+void Window::set_dpi_change_callback(DpiChangeCallback callback) {
     if (impl) {
         impl->callbacks.dpi_change_callback = callback;
-        impl->callbacks.dpi_change_user_data = user_data;
     }
 }
 
-void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
+void Window::set_drop_file_callback(DropFileCallback callback) {
     if (impl) {
         impl->callbacks.drop_file_callback = callback;
-        impl->callbacks.drop_file_user_data = user_data;
     }
 }
 

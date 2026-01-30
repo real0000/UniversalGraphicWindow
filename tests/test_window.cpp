@@ -588,7 +588,7 @@ TEST(event_type_to_string) {
     ASSERT_STREQ(event_type_to_string(EventType::KeyUp), "KeyUp");
     ASSERT_STREQ(event_type_to_string(EventType::MouseMove), "MouseMove");
     ASSERT_STREQ(event_type_to_string(EventType::MouseDown), "MouseDown");
-    ASSERT_STREQ(event_type_to_string(EventType::MouseScroll), "MouseScroll");
+    ASSERT_STREQ(event_type_to_string(EventType::MouseWheel), "MouseWheel");
     ASSERT_STREQ(event_type_to_string(EventType::DropFile), "DropFile");
 }
 
@@ -612,8 +612,8 @@ TEST(event_structs_defaults) {
     ASSERT(mouse_event.y == 0);
     ASSERT(mouse_event.clicks == 1);
 
-    // MouseScrollEvent
-    MouseScrollEvent scroll_event;
+    // MouseWheelEvent
+    MouseWheelEvent scroll_event;
     ASSERT(scroll_event.dx == 0.0f);
     ASSERT(scroll_event.dy == 0.0f);
 

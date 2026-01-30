@@ -174,29 +174,14 @@ static double get_event_timestamp() {
 //=============================================================================
 
 struct EventCallbacks {
-    WindowCloseCallback close_callback = nullptr;
-    void* close_user_data = nullptr;
-
-    WindowResizeCallback resize_callback = nullptr;
-    void* resize_user_data = nullptr;
-
-    WindowMoveCallback move_callback = nullptr;
-    void* move_user_data = nullptr;
-
-    WindowFocusCallback focus_callback = nullptr;
-    void* focus_user_data = nullptr;
-
-    WindowStateCallback state_callback = nullptr;
-    void* state_user_data = nullptr;
-
-    TouchCallback touch_callback = nullptr;
-    void* touch_user_data = nullptr;
-
-    DpiChangeCallback dpi_change_callback = nullptr;
-    void* dpi_change_user_data = nullptr;
-
-    DropFileCallback drop_file_callback = nullptr;
-    void* drop_file_user_data = nullptr;
+    WindowCloseCallback close_callback;
+    WindowResizeCallback resize_callback;
+    WindowMoveCallback move_callback;
+    WindowFocusCallback focus_callback;
+    WindowStateCallback state_callback;
+    TouchCallback touch_callback;
+    DpiChangeCallback dpi_change_callback;
+    DropFileCallback drop_file_callback;
 };
 
 //=============================================================================
@@ -729,7 +714,7 @@ void Window::poll_events() {
                         close_event.type = EventType::WindowClose;
                         close_event.window = impl->owner;
                         close_event.timestamp = get_event_timestamp();
-                        impl->callbacks.close_callback(close_event, impl->callbacks.close_user_data);
+                        impl->callbacks.close_callback(close_event);
                     }
                 }
                 break;
@@ -750,7 +735,7 @@ void Window::poll_events() {
                         resize_event.width = impl->width;
                         resize_event.height = impl->height;
                         resize_event.minimized = false;
-                        impl->callbacks.resize_callback(resize_event, impl->callbacks.resize_user_data);
+                        impl->callbacks.resize_callback(resize_event);
                     }
                 }
 
@@ -764,7 +749,7 @@ void Window::poll_events() {
                         move_event.timestamp = get_event_timestamp();
                         move_event.x = impl->x;
                         move_event.y = impl->y;
-                        impl->callbacks.move_callback(move_event, impl->callbacks.move_user_data);
+                        impl->callbacks.move_callback(move_event);
                     }
                 }
                 break;
@@ -786,7 +771,7 @@ void Window::poll_events() {
                     focus_event.window = impl->owner;
                     focus_event.timestamp = get_event_timestamp();
                     focus_event.focused = true;
-                    impl->callbacks.focus_callback(focus_event, impl->callbacks.focus_user_data);
+                    impl->callbacks.focus_callback(focus_event);
                 }
                 break;
 
@@ -801,7 +786,7 @@ void Window::poll_events() {
                     focus_event.window = impl->owner;
                     focus_event.timestamp = get_event_timestamp();
                     focus_event.focused = false;
-                    impl->callbacks.focus_callback(focus_event, impl->callbacks.focus_user_data);
+                    impl->callbacks.focus_callback(focus_event);
                 }
                 break;
 
@@ -989,36 +974,36 @@ void* Window::native_display() const {
 // Event Callback Setters
 //=============================================================================
 
-void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.close_callback = callback; impl->callbacks.close_user_data = user_data; }
+void Window::set_close_callback(WindowCloseCallback callback) {
+    if (impl) { impl->callbacks.close_callback = callback; }
 }
 
-void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.resize_callback = callback; impl->callbacks.resize_user_data = user_data; }
+void Window::set_resize_callback(WindowResizeCallback callback) {
+    if (impl) { impl->callbacks.resize_callback = callback; }
 }
 
-void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.move_callback = callback; impl->callbacks.move_user_data = user_data; }
+void Window::set_move_callback(WindowMoveCallback callback) {
+    if (impl) { impl->callbacks.move_callback = callback; }
 }
 
-void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.focus_callback = callback; impl->callbacks.focus_user_data = user_data; }
+void Window::set_focus_callback(WindowFocusCallback callback) {
+    if (impl) { impl->callbacks.focus_callback = callback; }
 }
 
-void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.state_callback = callback; impl->callbacks.state_user_data = user_data; }
+void Window::set_state_callback(WindowStateCallback callback) {
+    if (impl) { impl->callbacks.state_callback = callback; }
 }
 
-void Window::set_touch_callback(TouchCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.touch_callback = callback; impl->callbacks.touch_user_data = user_data; }
+void Window::set_touch_callback(TouchCallback callback) {
+    if (impl) { impl->callbacks.touch_callback = callback; }
 }
 
-void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.dpi_change_callback = callback; impl->callbacks.dpi_change_user_data = user_data; }
+void Window::set_dpi_change_callback(DpiChangeCallback callback) {
+    if (impl) { impl->callbacks.dpi_change_callback = callback; }
 }
 
-void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.drop_file_callback = callback; impl->callbacks.drop_file_user_data = user_data; }
+void Window::set_drop_file_callback(DropFileCallback callback) {
+    if (impl) { impl->callbacks.drop_file_callback = callback; }
 }
 
 //=============================================================================

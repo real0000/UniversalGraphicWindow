@@ -146,29 +146,14 @@ static double get_event_timestamp() {
 //=============================================================================
 
 struct EventCallbacks {
-    WindowCloseCallback close_callback = nullptr;
-    void* close_user_data = nullptr;
-
-    WindowResizeCallback resize_callback = nullptr;
-    void* resize_user_data = nullptr;
-
-    WindowMoveCallback move_callback = nullptr;
-    void* move_user_data = nullptr;
-
-    WindowFocusCallback focus_callback = nullptr;
-    void* focus_user_data = nullptr;
-
-    WindowStateCallback state_callback = nullptr;
-    void* state_user_data = nullptr;
-
-    TouchCallback touch_callback = nullptr;
-    void* touch_user_data = nullptr;
-
-    DpiChangeCallback dpi_change_callback = nullptr;
-    void* dpi_change_user_data = nullptr;
-
-    DropFileCallback drop_file_callback = nullptr;
-    void* drop_file_user_data = nullptr;
+    WindowCloseCallback close_callback;
+    WindowResizeCallback resize_callback;
+    WindowMoveCallback move_callback;
+    WindowFocusCallback focus_callback;
+    WindowStateCallback state_callback;
+    TouchCallback touch_callback;
+    DpiChangeCallback dpi_change_callback;
+    DropFileCallback drop_file_callback;
 };
 
 //=============================================================================
@@ -553,7 +538,7 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
             closeEvent.type = window::EventType::WindowClose;
             closeEvent.window = _impl->owner;
             closeEvent.timestamp = window::get_event_timestamp();
-            _impl->callbacks.close_callback(closeEvent, _impl->callbacks.close_user_data);
+            _impl->callbacks.close_callback(closeEvent);
         }
     }
     return NO;
@@ -575,7 +560,7 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
             resizeEvent.width = _impl->width;
             resizeEvent.height = _impl->height;
             resizeEvent.minimized = false;
-            _impl->callbacks.resize_callback(resizeEvent, _impl->callbacks.resize_user_data);
+            _impl->callbacks.resize_callback(resizeEvent);
         }
     }
 }
@@ -594,7 +579,7 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
             moveEvent.timestamp = window::get_event_timestamp();
             moveEvent.x = _impl->x;
             moveEvent.y = _impl->y;
-            _impl->callbacks.move_callback(moveEvent, _impl->callbacks.move_user_data);
+            _impl->callbacks.move_callback(moveEvent);
         }
     }
 }
@@ -610,7 +595,7 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
             stateEvent.timestamp = window::get_event_timestamp();
             stateEvent.minimized = true;
             stateEvent.maximized = false;
-            _impl->callbacks.state_callback(stateEvent, _impl->callbacks.state_user_data);
+            _impl->callbacks.state_callback(stateEvent);
         }
     }
 }
@@ -626,7 +611,7 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
             stateEvent.timestamp = window::get_event_timestamp();
             stateEvent.minimized = false;
             stateEvent.maximized = false;
-            _impl->callbacks.state_callback(stateEvent, _impl->callbacks.state_user_data);
+            _impl->callbacks.state_callback(stateEvent);
         }
     }
 }
@@ -641,7 +626,7 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
             focusEvent.window = _impl->owner;
             focusEvent.timestamp = window::get_event_timestamp();
             focusEvent.focused = true;
-            _impl->callbacks.focus_callback(focusEvent, _impl->callbacks.focus_user_data);
+            _impl->callbacks.focus_callback(focusEvent);
         }
     }
 }
@@ -659,7 +644,7 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
             focusEvent.window = _impl->owner;
             focusEvent.timestamp = window::get_event_timestamp();
             focusEvent.focused = false;
-            _impl->callbacks.focus_callback(focusEvent, _impl->callbacks.focus_user_data);
+            _impl->callbacks.focus_callback(focusEvent);
         }
     }
 }
@@ -1041,36 +1026,36 @@ void* Window::native_display() const {
 // Event Callback Setters
 //=============================================================================
 
-void Window::set_close_callback(WindowCloseCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.close_callback = callback; impl->callbacks.close_user_data = user_data; }
+void Window::set_close_callback(WindowCloseCallback callback) {
+    if (impl) { impl->callbacks.close_callback = callback; }
 }
 
-void Window::set_resize_callback(WindowResizeCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.resize_callback = callback; impl->callbacks.resize_user_data = user_data; }
+void Window::set_resize_callback(WindowResizeCallback callback) {
+    if (impl) { impl->callbacks.resize_callback = callback; }
 }
 
-void Window::set_move_callback(WindowMoveCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.move_callback = callback; impl->callbacks.move_user_data = user_data; }
+void Window::set_move_callback(WindowMoveCallback callback) {
+    if (impl) { impl->callbacks.move_callback = callback; }
 }
 
-void Window::set_focus_callback(WindowFocusCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.focus_callback = callback; impl->callbacks.focus_user_data = user_data; }
+void Window::set_focus_callback(WindowFocusCallback callback) {
+    if (impl) { impl->callbacks.focus_callback = callback; }
 }
 
-void Window::set_state_callback(WindowStateCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.state_callback = callback; impl->callbacks.state_user_data = user_data; }
+void Window::set_state_callback(WindowStateCallback callback) {
+    if (impl) { impl->callbacks.state_callback = callback; }
 }
 
-void Window::set_touch_callback(TouchCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.touch_callback = callback; impl->callbacks.touch_user_data = user_data; }
+void Window::set_touch_callback(TouchCallback callback) {
+    if (impl) { impl->callbacks.touch_callback = callback; }
 }
 
-void Window::set_dpi_change_callback(DpiChangeCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.dpi_change_callback = callback; impl->callbacks.dpi_change_user_data = user_data; }
+void Window::set_dpi_change_callback(DpiChangeCallback callback) {
+    if (impl) { impl->callbacks.dpi_change_callback = callback; }
 }
 
-void Window::set_drop_file_callback(DropFileCallback callback, void* user_data) {
-    if (impl) { impl->callbacks.drop_file_callback = callback; impl->callbacks.drop_file_user_data = user_data; }
+void Window::set_drop_file_callback(DropFileCallback callback) {
+    if (impl) { impl->callbacks.drop_file_callback = callback; }
 }
 
 //=============================================================================
