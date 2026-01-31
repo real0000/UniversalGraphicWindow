@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(window VERSION 1.0.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 #=============================================================================
@@ -150,6 +150,16 @@ endif()
 #=============================================================================
 # Find Dependencies
 #=============================================================================
+
+# Boost (for INI parser via property_tree) - optional
+find_package(Boost QUIET)
+if(Boost_FOUND)
+    message(STATUS "Boost found: ${Boost_VERSION} - using Boost.PropertyTree for INI parsing")
+    list(APPEND WINDOW_LIBS Boost::boost)
+    list(APPEND WINDOW_DEFINES WINDOW_USE_BOOST_INI)
+else()
+    message(STATUS "Boost not found - using built-in INI parser")
+endif()
 
 # OpenGL
 if(WINDOW_ENABLE_OPENGL)
