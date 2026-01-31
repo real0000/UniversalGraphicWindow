@@ -269,13 +269,15 @@ Window* Window::create(const Config& config, Result* out_result) {
 
     int screen = DefaultScreen(display);
 
+    const WindowConfigEntry& win_cfg = config.windows[0];
+
     Window* window = new Window();
     window->impl = new Window::Impl();
     window->impl->display = display;
     window->impl->screen = screen;
-    window->impl->width = config.width;
-    window->impl->height = config.height;
-    window->impl->title = config.title;
+    window->impl->width = win_cfg.width;
+    window->impl->height = win_cfg.height;
+    window->impl->title = win_cfg.title;
 
     Visual* visual = DefaultVisual(display, screen);
     int depth = DefaultDepth(display, screen);
@@ -322,14 +324,14 @@ Window* Window::create(const Config& config, Result* out_result) {
 
     unsigned long attr_mask = CWBackPixel | CWEventMask | CWColormap | CWBorderPixel;
 
-    int pos_x = config.x >= 0 ? config.x : 0;
-    int pos_y = config.y >= 0 ? config.y : 0;
+    int pos_x = win_cfg.x >= 0 ? win_cfg.x : 0;
+    int pos_y = win_cfg.y >= 0 ? win_cfg.y : 0;
 
     ::Window xwindow = XCreateWindow(
         display,
         RootWindow(display, screen),
         pos_x, pos_y,
-        config.width, config.height,
+        win_cfg.width, win_cfg.height,
         0,
         depth,
         InputOutput,
@@ -364,13 +366,13 @@ Window* Window::create(const Config& config, Result* out_result) {
     }
 
     // Set window title
-    XStoreName(display, xwindow, config.title);
+    XStoreName(display, xwindow, win_cfg.title);
 
     // Set _NET_WM_NAME for UTF-8 support
     Atom net_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
     Atom utf8_string = XInternAtom(display, "UTF8_STRING", False);
     XChangeProperty(display, xwindow, net_wm_name, utf8_string, 8, PropModeReplace,
-                    (unsigned char*)config.title, strlen(config.title));
+                    (unsigned char*)win_cfg.title, strlen(win_cfg.title));
 
     // Handle window close
     window->impl->wm_protocols = XInternAtom(display, "WM_PROTOCOLS", False);
@@ -378,8 +380,8 @@ Window* Window::create(const Config& config, Result* out_result) {
     XSetWMProtocols(display, xwindow, &window->impl->wm_delete_window, 1);
 
     // Combine config.style with legacy config.resizable flag
-    WindowStyle effective_style = config.style;
-    if (!config.resizable) {
+    WindowStyle effective_style = win_cfg.style;
+    if (!win_cfg.resizable) {
         effective_style = effective_style & ~WindowStyle::Resizable;
     }
 
@@ -389,8 +391,8 @@ Window* Window::create(const Config& config, Result* out_result) {
     if (!has_style(effective_style, WindowStyle::Resizable)) {
         XSizeHints* hints = XAllocSizeHints();
         hints->flags = PMinSize | PMaxSize;
-        hints->min_width = hints->max_width = config.width;
-        hints->min_height = hints->max_height = config.height;
+        hints->min_width = hints->max_width = win_cfg.width;
+        hints->min_height = hints->max_height = win_cfg.height;
         XSetWMNormalHints(display, xwindow, hints);
         XFree(hints);
     }
@@ -411,17 +413,17 @@ Window* Window::create(const Config& config, Result* out_result) {
     }
 
     // Center window if position not specified
-    if (config.x < 0 || config.y < 0) {
+    if (win_cfg.x < 0 || win_cfg.y < 0) {
         int screen_width = DisplayWidth(display, screen);
         int screen_height = DisplayHeight(display, screen);
-        int new_x = (screen_width - config.width) / 2;
-        int new_y = (screen_height - config.height) / 2;
+        int new_x = (screen_width - win_cfg.width) / 2;
+        int new_y = (screen_height - win_cfg.height) / 2;
         XMoveWindow(display, xwindow, new_x, new_y);
         window->impl->x = new_x;
         window->impl->y = new_y;
     } else {
-        window->impl->x = config.x;
-        window->impl->y = config.y;
+        window->impl->x = win_cfg.x;
+        window->impl->y = win_cfg.y;
     }
 
     // Create graphics backend based on config.backend
@@ -434,7 +436,7 @@ Window* Window::create(const Config& config, Result* out_result) {
 #endif
 #ifdef WINDOW_HAS_VULKAN
         case Backend::Vulkan:
-            gfx = create_vulkan_graphics_xlib(display, xwindow, config.width, config.height, config);
+            gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
             break;
 #endif
         default:
@@ -446,7 +448,7 @@ Window* Window::create(const Config& config, Result* out_result) {
     if (!gfx && config.backend != Backend::Auto) {
 #ifdef WINDOW_HAS_VULKAN
         if (requested != Backend::Vulkan) {
-            gfx = create_vulkan_graphics_xlib(display, xwindow, config.width, config.height, config);
+            gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
         }
 #endif
     }
@@ -462,7 +464,7 @@ Window* Window::create(const Config& config, Result* out_result) {
 
     window->impl->gfx = gfx;
 
-    if (config.visible) {
+    if (win_cfg.visible) {
         XMapWindow(display, xwindow);
         window->impl->visible = true;
     }
@@ -1166,14 +1168,12 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
     // Convert ExternalWindowConfig to Config for backend creation
     Config internal_config;
-    internal_config.width = config.width;
-    internal_config.height = config.height;
+    internal_config.windows[0].width = config.width;
+    internal_config.windows[0].height = config.height;
     internal_config.vsync = config.vsync;
     internal_config.samples = config.samples;
-    internal_config.red_bits = config.red_bits;
-    internal_config.green_bits = config.green_bits;
-    internal_config.blue_bits = config.blue_bits;
-    internal_config.alpha_bits = config.alpha_bits;
+    // Derive color_bits from individual color channel bits
+    internal_config.color_bits = config.red_bits + config.green_bits + config.blue_bits + config.alpha_bits;
     internal_config.depth_bits = config.depth_bits;
     internal_config.stencil_bits = config.stencil_bits;
     internal_config.back_buffers = config.back_buffers;

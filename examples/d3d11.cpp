@@ -10,15 +10,16 @@
 #include <dxgi1_2.h>
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 
 int main() {
     window::Config config;
-    config.title = "Direct3D 11 Example";
-    config.width = 800;
-    config.height = 600;
+    strncpy(config.windows[0].title, "Direct3D 11 Example", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].width = 800;
+    config.windows[0].height = 600;
     config.backend = window::Backend::D3D11;
 
     window::Result result;

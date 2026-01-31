@@ -302,12 +302,14 @@ Window* Window::create(const Config& config, Result* out_result) {
     };
 
     @autoreleasepool {
+        const WindowConfigEntry& win_cfg = config.windows[0];
+
         Window* window = new Window();
         window->impl = new Window::Impl();
         window->impl->owner = window;  // Set back-pointer for event dispatch
-        window->impl->width = config.width;
-        window->impl->height = config.height;
-        window->impl->title = config.title;
+        window->impl->width = win_cfg.width;
+        window->impl->height = win_cfg.height;
+        window->impl->title = win_cfg.title;
 
         // Initialize mouse input system
         window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
@@ -377,7 +379,7 @@ Window* Window::create(const Config& config, Result* out_result) {
 
         window->impl->gfx = gfx;
 
-        if (config.visible) {
+        if (win_cfg.visible) {
             [window->impl->ui_window makeKeyAndVisible];
         }
 
@@ -713,14 +715,12 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
     // Convert ExternalWindowConfig to Config for backend creation
     Config internal_config;
-    internal_config.width = config.width;
-    internal_config.height = config.height;
+    internal_config.windows[0].width = config.width;
+    internal_config.windows[0].height = config.height;
     internal_config.vsync = config.vsync;
     internal_config.samples = config.samples;
-    internal_config.red_bits = config.red_bits;
-    internal_config.green_bits = config.green_bits;
-    internal_config.blue_bits = config.blue_bits;
-    internal_config.alpha_bits = config.alpha_bits;
+    // Derive color_bits from individual color channel bits
+    internal_config.color_bits = config.red_bits + config.green_bits + config.blue_bits + config.alpha_bits;
     internal_config.depth_bits = config.depth_bits;
     internal_config.stencil_bits = config.stencil_bits;
     internal_config.back_buffers = config.back_buffers;

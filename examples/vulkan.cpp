@@ -4,6 +4,7 @@
 
 #include "window.hpp"
 #include <cstdio>
+#include <cstring>
 
 #if defined(WINDOW_PLATFORM_WIN32) || defined(WINDOW_PLATFORM_X11) || defined(WINDOW_PLATFORM_WAYLAND) || defined(WINDOW_PLATFORM_MACOS)
 
@@ -12,9 +13,9 @@
 int main() {
     // Create window with Vulkan backend
     window::Config config;
-    config.title = "Vulkan Example";
-    config.width = 800;
-    config.height = 600;
+    strncpy(config.windows[0].title, "Vulkan Example", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].width = 800;
+    config.windows[0].height = 600;
     config.backend = window::Backend::Vulkan;
 
     window::Result result;

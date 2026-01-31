@@ -114,19 +114,15 @@ TEST(get_default_backend) {
 TEST(config_defaults) {
     window::Config config;
 
-    ASSERT_STREQ(config.title, "Window");
-    ASSERT_EQ(config.width, 800);
-    ASSERT_EQ(config.height, 600);
-    ASSERT_EQ(config.x, -1);
-    ASSERT_EQ(config.y, -1);
-    ASSERT(config.resizable == true);
-    ASSERT(config.visible == true);
+    ASSERT_STREQ(config.windows[0].title, "Window");
+    ASSERT_EQ(config.windows[0].width, 800);
+    ASSERT_EQ(config.windows[0].height, 600);
+    ASSERT_EQ(config.windows[0].x, -1);
+    ASSERT_EQ(config.windows[0].y, -1);
+    ASSERT(config.windows[0].visible == true);
     ASSERT(config.vsync == true);
     ASSERT_EQ(config.samples, 1);
-    ASSERT_EQ(config.red_bits, 8);
-    ASSERT_EQ(config.green_bits, 8);
-    ASSERT_EQ(config.blue_bits, 8);
-    ASSERT_EQ(config.alpha_bits, 8);
+    ASSERT_EQ(config.color_bits, 32);
     ASSERT_EQ(config.depth_bits, 24);
     ASSERT_EQ(config.stencil_bits, 8);
     ASSERT_EQ(config.back_buffers, 2);
@@ -136,24 +132,22 @@ TEST(config_defaults) {
 
 TEST(config_custom) {
     window::Config config;
-    config.title = "Custom Title";
-    config.width = 1920;
-    config.height = 1080;
-    config.x = 100;
-    config.y = 200;
-    config.resizable = false;
-    config.visible = false;
+    strncpy(config.windows[0].title, "Custom Title", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].width = 1920;
+    config.windows[0].height = 1080;
+    config.windows[0].x = 100;
+    config.windows[0].y = 200;
+    config.windows[0].visible = false;
     config.vsync = false;
     config.samples = 4;
     config.backend = window::Backend::OpenGL;
 
-    ASSERT_STREQ(config.title, "Custom Title");
-    ASSERT_EQ(config.width, 1920);
-    ASSERT_EQ(config.height, 1080);
-    ASSERT_EQ(config.x, 100);
-    ASSERT_EQ(config.y, 200);
-    ASSERT(config.resizable == false);
-    ASSERT(config.visible == false);
+    ASSERT_STREQ(config.windows[0].title, "Custom Title");
+    ASSERT_EQ(config.windows[0].width, 1920);
+    ASSERT_EQ(config.windows[0].height, 1080);
+    ASSERT_EQ(config.windows[0].x, 100);
+    ASSERT_EQ(config.windows[0].y, 200);
+    ASSERT(config.windows[0].visible == false);
     ASSERT(config.vsync == false);
     ASSERT_EQ(config.samples, 4);
     ASSERT(config.backend == window::Backend::OpenGL);
@@ -332,7 +326,7 @@ TEST(config_style_default) {
     window::Config config;
 
     // Default style should be Default
-    ASSERT(config.style == window::WindowStyle::Default);
+    ASSERT(config.windows[0].style == window::WindowStyle::Default);
 }
 
 //=============================================================================
@@ -342,17 +336,18 @@ TEST(config_style_default) {
 TEST(graphics_config_defaults) {
     window::GraphicsConfig config;
 
-    ASSERT_STREQ(config.title, "Window");
-    ASSERT_EQ(config.window_x, -1);
-    ASSERT_EQ(config.window_y, -1);
-    ASSERT_EQ(config.window_width, 800);
-    ASSERT_EQ(config.window_height, 600);
-    ASSERT(config.style == window::WindowStyle::Default);
-    ASSERT_EQ(config.monitor_index, 0);
-    ASSERT(config.fullscreen == false);
-    ASSERT_EQ(config.fullscreen_width, 0);
-    ASSERT_EQ(config.fullscreen_height, 0);
-    ASSERT_EQ(config.refresh_rate, 0);
+    // Window defaults
+    ASSERT_STREQ(config.windows[0].title, "Window");
+    ASSERT_EQ(config.windows[0].x, -1);
+    ASSERT_EQ(config.windows[0].y, -1);
+    ASSERT_EQ(config.windows[0].width, 800);
+    ASSERT_EQ(config.windows[0].height, 600);
+    ASSERT(config.windows[0].style == window::WindowStyle::Default);
+    ASSERT_EQ(config.windows[0].monitor_index, 0);
+    ASSERT(config.windows[0].fullscreen == false);
+    ASSERT_EQ(config.window_count, 1);
+
+    // Graphics defaults
     ASSERT(config.backend == window::Backend::Auto);
     ASSERT_EQ(config.device_index, -1);
     ASSERT(config.vsync == true);
@@ -363,29 +358,31 @@ TEST(graphics_config_defaults) {
     ASSERT_EQ(config.stencil_bits, 8);
 }
 
-TEST(graphics_config_to_config) {
-    window::GraphicsConfig gfx_config;
-    gfx_config.window_width = 1920;
-    gfx_config.window_height = 1080;
-    gfx_config.vsync = false;
-    gfx_config.samples = 4;
-    gfx_config.backend = window::Backend::OpenGL;
+TEST(graphics_config_alias) {
+    // GraphicsConfig is now an alias for Config
+    window::GraphicsConfig config;
+    config.windows[0].width = 1920;
+    config.windows[0].height = 1080;
+    config.vsync = false;
+    config.samples = 4;
+    config.backend = window::Backend::OpenGL;
 
-    window::Config config = gfx_config.to_config();
+    // Config and GraphicsConfig should be the same type
+    window::Config& config_ref = config;
 
-    ASSERT_EQ(config.width, 1920);
-    ASSERT_EQ(config.height, 1080);
-    ASSERT(config.vsync == false);
-    ASSERT_EQ(config.samples, 4);
-    ASSERT(config.backend == window::Backend::OpenGL);
+    ASSERT_EQ(config_ref.windows[0].width, 1920);
+    ASSERT_EQ(config_ref.windows[0].height, 1080);
+    ASSERT(config_ref.vsync == false);
+    ASSERT_EQ(config_ref.samples, 4);
+    ASSERT(config_ref.backend == window::Backend::OpenGL);
 }
 
 TEST(graphics_config_validate) {
     window::GraphicsConfig config;
 
     // Set some invalid values
-    config.window_width = -1;
-    config.window_height = 0;
+    config.windows[0].width = -1;
+    config.windows[0].height = 0;
     config.samples = 7;  // Not power of 2
     config.back_buffers = 10;
     config.color_bits = 48;
@@ -396,8 +393,8 @@ TEST(graphics_config_validate) {
     bool all_valid = config.validate();
 
     ASSERT(all_valid == false);  // Should return false since we had invalid values
-    ASSERT_EQ(config.window_width, 800);
-    ASSERT_EQ(config.window_height, 600);
+    ASSERT_EQ(config.windows[0].width, 800);
+    ASSERT_EQ(config.windows[0].height, 600);
     ASSERT_EQ(config.samples, 1);
     ASSERT_EQ(config.back_buffers, 2);
     ASSERT_EQ(config.color_bits, 32);
@@ -408,14 +405,13 @@ TEST(graphics_config_validate) {
 TEST(graphics_config_save_load) {
     // Create a config
     window::GraphicsConfig save_config;
-    strncpy(save_config.title, "Test Window", window::MAX_DEVICE_NAME_LENGTH - 1);
-    save_config.window_width = 1280;
-    save_config.window_height = 720;
+    strncpy(save_config.windows[0].title, "Test Window", window::MAX_DEVICE_NAME_LENGTH - 1);
+    save_config.windows[0].width = 1280;
+    save_config.windows[0].height = 720;
     save_config.vsync = false;
     save_config.samples = 4;
     save_config.backend = window::Backend::D3D11;
-    save_config.fullscreen = true;
-    save_config.refresh_rate = 60;
+    save_config.windows[0].fullscreen = true;
 
     // Save to temp file
     const char* temp_file = "test_config.ini";
@@ -428,14 +424,13 @@ TEST(graphics_config_save_load) {
     ASSERT(load_result == true);
 
     // Verify values match
-    ASSERT_STREQ(load_config.title, "Test Window");
-    ASSERT_EQ(load_config.window_width, 1280);
-    ASSERT_EQ(load_config.window_height, 720);
+    ASSERT_STREQ(load_config.windows[0].title, "Test Window");
+    ASSERT_EQ(load_config.windows[0].width, 1280);
+    ASSERT_EQ(load_config.windows[0].height, 720);
     ASSERT(load_config.vsync == false);
     ASSERT_EQ(load_config.samples, 4);
     ASSERT(load_config.backend == window::Backend::D3D11);
-    ASSERT(load_config.fullscreen == true);
-    ASSERT_EQ(load_config.refresh_rate, 60);
+    ASSERT(load_config.windows[0].fullscreen == true);
 
     // Cleanup
     remove(temp_file);
@@ -659,7 +654,7 @@ int main() {
 
     // GraphicsConfig tests
     RUN_TEST(graphics_config_defaults);
-    RUN_TEST(graphics_config_to_config);
+    RUN_TEST(graphics_config_alias);
     RUN_TEST(graphics_config_validate);
     RUN_TEST(graphics_config_save_load);
     RUN_TEST(graphics_config_load_nonexistent);

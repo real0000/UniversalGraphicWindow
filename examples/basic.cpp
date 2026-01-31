@@ -4,13 +4,14 @@
 
 #include "window.hpp"
 #include <cstdio>
+#include <cstring>
 
 int main() {
     // Simple configuration
     window::Config config;
-    config.title = "Window Example";
-    config.width = 800;
-    config.height = 600;
+    strncpy(config.windows[0].title, "Window Example", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].width = 800;
+    config.windows[0].height = 600;
     config.vsync = true;
 
     // Graphics backend selection - choose one:

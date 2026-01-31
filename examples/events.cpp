@@ -7,6 +7,7 @@
 #include "input/input_keyboard.hpp"
 #include "input/input_mouse.hpp"
 #include <cstdio>
+#include <cstring>
 
 using namespace window;
 using namespace window::input;
@@ -104,9 +105,9 @@ int main() {
     printf("Try: clicking, scrolling, typing, resizing, dragging files\n\n");
 
     Config config;
-    config.title = "Event Handling Example";
-    config.width = 800;
-    config.height = 600;
+    strncpy(config.windows[0].title, "Event Handling Example", MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].width = 800;
+    config.windows[0].height = 600;
 
     Result result;
     Window* window = Window::create(config, &result);

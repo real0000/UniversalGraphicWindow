@@ -594,10 +594,13 @@ Window* Window::create(const Config& config, Result* out_result) {
         class_registered = true;
     }
 
-    // Combine config.style with legacy config.resizable flag
-    WindowStyle effective_style = config.style;
-    if (!config.resizable) {
-        effective_style = effective_style & ~WindowStyle::Resizable;
+    // Get window settings from first window entry
+    const WindowConfigEntry& win_cfg = config.windows[0];
+
+    // Determine effective style
+    WindowStyle effective_style = win_cfg.style;
+    if (win_cfg.fullscreen) {
+        effective_style = effective_style | WindowStyle::Fullscreen;
     }
 
     DWORD style = style_to_win32_style(effective_style);
@@ -613,17 +616,17 @@ Window* Window::create(const Config& config, Result* out_result) {
         win_width = GetSystemMetrics(SM_CXSCREEN);
         win_height = GetSystemMetrics(SM_CYSCREEN);
     } else {
-        RECT rect = { 0, 0, config.width, config.height };
+        RECT rect = { 0, 0, win_cfg.width, win_cfg.height };
         AdjustWindowRectEx(&rect, style, FALSE, ex_style);
         win_width = rect.right - rect.left;
         win_height = rect.bottom - rect.top;
-        pos_x = config.x >= 0 ? config.x : CW_USEDEFAULT;
-        pos_y = config.y >= 0 ? config.y : CW_USEDEFAULT;
+        pos_x = win_cfg.x >= 0 ? win_cfg.x : CW_USEDEFAULT;
+        pos_y = win_cfg.y >= 0 ? win_cfg.y : CW_USEDEFAULT;
     }
 
-    int title_len = MultiByteToWideChar(CP_UTF8, 0, config.title, -1, nullptr, 0);
+    int title_len = MultiByteToWideChar(CP_UTF8, 0, win_cfg.title, -1, nullptr, 0);
     wchar_t* title_wide = new wchar_t[title_len];
-    MultiByteToWideChar(CP_UTF8, 0, config.title, -1, title_wide, title_len);
+    MultiByteToWideChar(CP_UTF8, 0, win_cfg.title, -1, title_wide, title_len);
 
     HWND hwnd = CreateWindowExW(ex_style, CLASS_NAME, title_wide, style, pos_x, pos_y, win_width, win_height,
                                  nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -638,9 +641,9 @@ Window* Window::create(const Config& config, Result* out_result) {
     window->impl = new Window::Impl();
     window->impl->hwnd = hwnd;
     window->impl->owner = window;  // Set back-pointer for event dispatch
-    window->impl->width = config.width;
-    window->impl->height = config.height;
-    window->impl->title = config.title;
+    window->impl->width = win_cfg.width;
+    window->impl->height = win_cfg.height;
+    window->impl->title = win_cfg.title;
     window->impl->style = effective_style;
     window->impl->is_fullscreen = has_style(effective_style, WindowStyle::Fullscreen);
 
@@ -686,7 +689,7 @@ Window* Window::create(const Config& config, Result* out_result) {
 #endif
 #ifdef WINDOW_HAS_VULKAN
         case Backend::Vulkan:
-            gfx = create_vulkan_graphics_win32(hwnd, config.width, config.height, config);
+            gfx = create_vulkan_graphics_win32(hwnd, win_cfg.width, win_cfg.height, config);
             break;
 #endif
         default:
@@ -735,7 +738,7 @@ Window* Window::create(const Config& config, Result* out_result) {
     window->impl->keyboard_device.set_window(window);
     window->impl->keyboard_device.set_dispatcher(&window->impl->keyboard_dispatcher);
 
-    if (config.visible) {
+    if (win_cfg.visible) {
         ShowWindow(hwnd, SW_SHOW);
         window->impl->visible = true;
     }
@@ -1130,14 +1133,11 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
     // Convert ExternalWindowConfig to Config for backend creation
     Config internal_config;
-    internal_config.width = config.width;
-    internal_config.height = config.height;
+    internal_config.windows[0].width = config.width;
+    internal_config.windows[0].height = config.height;
     internal_config.vsync = config.vsync;
     internal_config.samples = config.samples;
-    internal_config.red_bits = config.red_bits;
-    internal_config.green_bits = config.green_bits;
-    internal_config.blue_bits = config.blue_bits;
-    internal_config.alpha_bits = config.alpha_bits;
+    internal_config.color_bits = config.red_bits + config.green_bits + config.blue_bits + config.alpha_bits;
     internal_config.depth_bits = config.depth_bits;
     internal_config.stencil_bits = config.stencil_bits;
     internal_config.back_buffers = config.back_buffers;
@@ -1207,10 +1207,8 @@ Window* Window::create_from_config(const char* config_filepath, Result* out_resu
         gfx_config = GraphicsConfig{};
     }
 
-    // Convert to Config and create window
-    Config config = gfx_config.to_config();
-
-    return Window::create(config, out_result);
+    // Create window from config
+    return Window::create(gfx_config, out_result);
 }
 
 } // namespace window

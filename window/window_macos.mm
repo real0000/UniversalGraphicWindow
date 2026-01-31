@@ -682,16 +682,18 @@ Window* Window::create(const Config& config, Result* out_result) {
             [appMenuItem setSubmenu:appMenu];
         }
 
+        const WindowConfigEntry& win_cfg = config.windows[0];
+
         Window* window = new Window();
         window->impl = new Window::Impl();
         window->impl->owner = window;  // Set back-pointer for event dispatch
-        window->impl->width = config.width;
-        window->impl->height = config.height;
-        window->impl->title = config.title;
+        window->impl->width = win_cfg.width;
+        window->impl->height = win_cfg.height;
+        window->impl->title = win_cfg.title;
 
         // Combine config.style with legacy config.resizable flag
-        WindowStyle effective_style = config.style;
-        if (!config.resizable) {
+        WindowStyle effective_style = win_cfg.style;
+        if (!win_cfg.resizable) {
             effective_style = effective_style & ~WindowStyle::Resizable;
         }
         window->impl->style = effective_style;
@@ -703,7 +705,7 @@ Window* Window::create(const Config& config, Result* out_result) {
         if (has_style(effective_style, WindowStyle::Fullscreen)) {
             frame = [[NSScreen mainScreen] frame];
         } else {
-            frame = NSMakeRect(0, 0, config.width, config.height);
+            frame = NSMakeRect(0, 0, win_cfg.width, win_cfg.height);
         }
 
         NSWindow* nsWindow = [[NSWindow alloc]
@@ -717,7 +719,7 @@ Window* Window::create(const Config& config, Result* out_result) {
             [nsWindow setLevel:NSFloatingWindowLevel];
         }
 
-        [nsWindow setTitle:[NSString stringWithUTF8String:config.title]];
+        [nsWindow setTitle:[NSString stringWithUTF8String:win_cfg.title]];
 
         // Create content view
         WindowView* view = [[WindowView alloc] initWithFrame:frame];
@@ -738,10 +740,10 @@ Window* Window::create(const Config& config, Result* out_result) {
         window->impl->mouse_device.set_window(window);
 
         // Set position
-        if (config.x >= 0 && config.y >= 0) {
-            [nsWindow setFrameOrigin:NSMakePoint(config.x, config.y)];
-            window->impl->x = config.x;
-            window->impl->y = config.y;
+        if (win_cfg.x >= 0 && win_cfg.y >= 0) {
+            [nsWindow setFrameOrigin:NSMakePoint(win_cfg.x, win_cfg.y)];
+            window->impl->x = win_cfg.x;
+            window->impl->y = win_cfg.y;
         } else {
             [nsWindow center];
             NSRect windowFrame = [nsWindow frame];
@@ -751,8 +753,8 @@ Window* Window::create(const Config& config, Result* out_result) {
 
         // Update actual size with retina scale
         CGFloat scale = [nsWindow backingScaleFactor];
-        window->impl->width = static_cast<int>(config.width * scale);
-        window->impl->height = static_cast<int>(config.height * scale);
+        window->impl->width = static_cast<int>(win_cfg.width * scale);
+        window->impl->height = static_cast<int>(win_cfg.height * scale);
 
         // Create graphics backend based on config.backend
         Graphics* gfx = nullptr;
@@ -805,7 +807,7 @@ Window* Window::create(const Config& config, Result* out_result) {
 
         window->impl->gfx = gfx;
 
-        if (config.visible) {
+        if (win_cfg.visible) {
             [nsWindow makeKeyAndOrderFront:nil];
             [NSApp activateIgnoringOtherApps:YES];
             window->impl->visible = true;
@@ -1212,14 +1214,12 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
     // Convert ExternalWindowConfig to Config for backend creation
     Config internal_config;
-    internal_config.width = config.width;
-    internal_config.height = config.height;
+    internal_config.windows[0].width = config.width;
+    internal_config.windows[0].height = config.height;
     internal_config.vsync = config.vsync;
     internal_config.samples = config.samples;
-    internal_config.red_bits = config.red_bits;
-    internal_config.green_bits = config.green_bits;
-    internal_config.blue_bits = config.blue_bits;
-    internal_config.alpha_bits = config.alpha_bits;
+    // Derive color_bits from individual color channel bits
+    internal_config.color_bits = config.red_bits + config.green_bits + config.blue_bits + config.alpha_bits;
     internal_config.depth_bits = config.depth_bits;
     internal_config.stencil_bits = config.stencil_bits;
     internal_config.back_buffers = config.back_buffers;

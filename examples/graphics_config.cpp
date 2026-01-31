@@ -6,6 +6,7 @@
  *   - Enumerating monitors and display modes
  *   - Saving/loading graphics configuration
  *   - Creating a window from a config file
+ *   - Creating multiple windows from a config
  */
 
 #include "window.hpp"
@@ -72,10 +73,10 @@ void demo_config_save_load() {
 
     // Create a custom config
     window::GraphicsConfig config;
-    strncpy(config.title, "My Game", window::MAX_DEVICE_NAME_LENGTH - 1);
-    config.window_width = 1280;
-    config.window_height = 720;
-    config.fullscreen = false;
+    strncpy(config.windows[0].title, "My Game", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].width = 1280;
+    config.windows[0].height = 720;
+    config.windows[0].fullscreen = false;
     config.vsync = true;
     config.samples = 4;
     config.backend = window::Backend::Auto;
@@ -93,12 +94,13 @@ void demo_config_save_load() {
     window::GraphicsConfig loaded_config;
     if (window::GraphicsConfig::load(config_file, &loaded_config)) {
         printf("Configuration loaded successfully:\n");
-        printf("  Title: %s\n", loaded_config.title);
-        printf("  Resolution: %dx%d\n", loaded_config.window_width, loaded_config.window_height);
-        printf("  Fullscreen: %s\n", loaded_config.fullscreen ? "true" : "false");
+        printf("  Title: %s\n", loaded_config.windows[0].title);
+        printf("  Resolution: %dx%d\n", loaded_config.windows[0].width, loaded_config.windows[0].height);
+        printf("  Fullscreen: %s\n", loaded_config.windows[0].fullscreen ? "true" : "false");
         printf("  VSync: %s\n", loaded_config.vsync ? "true" : "false");
         printf("  MSAA: %dx\n", loaded_config.samples);
         printf("  Backend: %s\n", window::backend_to_string(loaded_config.backend));
+        printf("  Window count: %d\n", loaded_config.window_count);
     } else {
         printf("Failed to load configuration!\n");
     }
@@ -138,6 +140,75 @@ void demo_window_from_config() {
     printf("\nWindow closed after %d frames.\n", frames);
 }
 
+void demo_multi_window() {
+    printf("=== Multi-Window Demo ===\n\n");
+
+    // Create a config with multiple windows
+    window::GraphicsConfig config;
+    config.backend = window::Backend::Auto;
+    config.vsync = true;
+    config.samples = 1;
+
+    // First window (already exists by default)
+    strncpy(config.windows[0].name, "main", window::MAX_WINDOW_NAME_LENGTH - 1);
+    strncpy(config.windows[0].title, "Main Window", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].x = 100;
+    config.windows[0].y = 100;
+    config.windows[0].width = 800;
+    config.windows[0].height = 600;
+
+    // Add second window
+    window::WindowConfigEntry secondary;
+    strncpy(secondary.name, "secondary", window::MAX_WINDOW_NAME_LENGTH - 1);
+    strncpy(secondary.title, "Secondary Window", window::MAX_DEVICE_NAME_LENGTH - 1);
+    secondary.x = 950;
+    secondary.y = 100;
+    secondary.width = 640;
+    secondary.height = 480;
+    config.add_window(secondary);
+
+    // Save the multi-window config
+    config.save("multi_window_config.ini");
+    printf("Saved multi-window configuration.\n");
+
+    // Create windows
+    window::Result result;
+    std::vector<window::Window*> windows = window::create_windows(config, &result);
+
+    if (windows.empty()) {
+        printf("Failed to create windows: %s\n", window::result_to_string(result));
+        return;
+    }
+
+    printf("Created %zu windows:\n", windows.size());
+    for (size_t i = 0; i < windows.size(); i++) {
+        printf("  [%zu] %s (%dx%d)\n", i, windows[i]->get_title(),
+               windows[i]->get_width(), windows[i]->get_height());
+    }
+
+    // Run for a few frames
+    int frames = 0;
+    bool any_open = true;
+    while (any_open && frames < 120) {
+        any_open = false;
+        for (window::Window* w : windows) {
+            w->poll_events();
+            if (!w->should_close()) {
+                any_open = true;
+                w->graphics()->present();
+            }
+        }
+        frames++;
+    }
+
+    // Cleanup
+    for (window::Window* w : windows) {
+        w->destroy();
+    }
+
+    printf("\nWindows closed after %d frames.\n", frames);
+}
+
 int main() {
     printf("Graphics Configuration Example\n");
     printf("==============================\n\n");
@@ -146,6 +217,7 @@ int main() {
     print_monitors();
     demo_config_save_load();
     demo_window_from_config();
+    demo_multi_window();
 
     printf("\nDone.\n");
     return 0;

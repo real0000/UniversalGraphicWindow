@@ -5,6 +5,7 @@
 #include "window.hpp"
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 
 #if defined(_WIN32)
     #ifndef WIN32_LEAN_AND_MEAN
@@ -21,9 +22,9 @@
 
 int main() {
     window::Config config;
-    config.title = "OpenGL Example";
-    config.width = 800;
-    config.height = 600;
+    strncpy(config.windows[0].title, "OpenGL Example", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].width = 800;
+    config.windows[0].height = 600;
     config.backend = window::Backend::OpenGL;
 
     window::Result result;

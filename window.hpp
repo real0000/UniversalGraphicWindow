@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 //=============================================================================
 // Platform Detection (Internal)
@@ -435,35 +436,6 @@ namespace input {
 // Structures
 //-----------------------------------------------------------------------------
 
-struct Config {
-    const char* title = "Window";
-    int width = 800;
-    int height = 600;
-    int x = -1;             // -1 = centered/default
-    int y = -1;             // -1 = centered/default
-    bool resizable = true;  // Deprecated: use style instead. Kept for backward compatibility.
-    bool visible = true;
-    bool vsync = true;
-    int samples = 1;        // MSAA samples (1 = disabled)
-    // Window style flags (default: titled, bordered, with all buttons, resizable)
-    WindowStyle style = WindowStyle::Default;
-    // Back buffer settings
-    int red_bits = 8;
-    int green_bits = 8;
-    int blue_bits = 8;
-    int alpha_bits = 8;
-    int depth_bits = 24;
-    int stencil_bits = 8;
-    int back_buffers = 2;   // Swap chain buffer count (2 = double buffering, 3 = triple buffering)
-    // Graphics backend selection
-    // Auto = platform default, or specify OpenGL/Vulkan/D3D11/D3D12/Metal
-    Backend backend = Backend::Auto;
-    // Shared context - for resource sharing between windows
-    // OpenGL: shares textures, buffers, shaders
-    // D3D11/D3D12/Vulkan/Metal: shares device (creates new swapchain)
-    Graphics* shared_graphics = nullptr;
-};
-
 //-----------------------------------------------------------------------------
 // Graphics Device and Display Mode Enumeration
 //-----------------------------------------------------------------------------
@@ -518,26 +490,30 @@ struct MonitorEnumeration {
 };
 
 //-----------------------------------------------------------------------------
-// Graphics Configuration (saveable/loadable)
+// Configuration (saveable/loadable, supports multi-window)
 //-----------------------------------------------------------------------------
 
-struct GraphicsConfig {
-    // Window settings
+static const int MAX_CONFIG_WINDOWS = 16;
+static const int MAX_WINDOW_NAME_LENGTH = 64;
+
+// Individual window configuration within Config
+struct WindowConfigEntry {
+    char name[MAX_WINDOW_NAME_LENGTH] = "main";     // Unique identifier
     char title[MAX_DEVICE_NAME_LENGTH] = "Window";
-    int window_x = -1;              // -1 = centered
-    int window_y = -1;              // -1 = centered
-    int window_width = 800;
-    int window_height = 600;
-    WindowStyle style = WindowStyle::Default;
-
-    // Display settings
-    int monitor_index = 0;          // Which monitor to use (-1 = primary)
+    int x = -1;                     // -1 = centered
+    int y = -1;                     // -1 = centered
+    int width = 800;
+    int height = 600;
+    int monitor_index = 0;          // Which monitor to use
     bool fullscreen = false;
-    int fullscreen_width = 0;       // 0 = use desktop resolution
-    int fullscreen_height = 0;
-    int refresh_rate = 0;           // 0 = highest available
+    WindowStyle style = WindowStyle::Default;
+    bool visible = true;
+};
 
-    // Graphics device settings
+struct Config {
+    //-------------------------------------------------------------------------
+    // Graphics device settings (shared across all windows)
+    //-------------------------------------------------------------------------
     Backend backend = Backend::Auto;
     int device_index = -1;          // -1 = default device
     char device_name[MAX_DEVICE_NAME_LENGTH] = {};  // For validation
@@ -552,23 +528,45 @@ struct GraphicsConfig {
     int depth_bits = 24;            // 0, 16, 24, or 32
     int stencil_bits = 8;           // 0 or 8
 
+    //-------------------------------------------------------------------------
+    // Window configurations
+    //-------------------------------------------------------------------------
+    WindowConfigEntry windows[MAX_CONFIG_WINDOWS];
+    int window_count = 1;           // At least 1 window
+
+    //-------------------------------------------------------------------------
+    // Shared context (for multi-window resource sharing)
+    //-------------------------------------------------------------------------
+    // OpenGL: shares textures, buffers, shaders
+    // D3D11/D3D12/Vulkan/Metal: shares device (creates new swapchain)
+    Graphics* shared_graphics = nullptr;
+
+    //-------------------------------------------------------------------------
+    // Methods
+    //-------------------------------------------------------------------------
+
     // Save configuration to file
-    // Returns true on success, false on failure
     bool save(const char* filepath) const;
 
     // Load configuration from file
-    // Returns true on success, false on failure (file not found, parse error, etc.)
-    // If validation fails (e.g., device no longer exists), affected fields are reset to defaults
-    static bool load(const char* filepath, GraphicsConfig* out_config);
+    static bool load(const char* filepath, Config* out_config);
 
     // Validate configuration against current system
-    // Returns true if all settings are valid, false if any were adjusted
-    // Invalid settings are reset to safe defaults
     bool validate();
 
-    // Convert to Config struct for window creation
-    Config to_config() const;
+    // Find window by name (returns nullptr if not found)
+    WindowConfigEntry* find_window(const char* name);
+    const WindowConfigEntry* find_window(const char* name) const;
+
+    // Add a window configuration (returns false if MAX_CONFIG_WINDOWS reached or name exists)
+    bool add_window(const WindowConfigEntry& entry);
+
+    // Remove a window by name (returns false if not found)
+    bool remove_window(const char* name);
 };
+
+// Backward compatibility typedef
+using GraphicsConfig = Config;
 
 //-----------------------------------------------------------------------------
 // External Window Configuration
@@ -811,6 +809,20 @@ bool find_display_mode(const MonitorInfo& monitor, int width, int height, int re
 
 // Get the primary monitor info
 bool get_primary_monitor(MonitorInfo* out_monitor);
+
+//-----------------------------------------------------------------------------
+// Multi-Window Creation
+//-----------------------------------------------------------------------------
+
+// Create multiple windows from a GraphicsConfig
+// Returns a vector of Window pointers (first window owns the graphics context, others share it)
+// If creation fails, returns empty vector and sets out_result
+// The caller is responsible for destroying all windows (destroy first window last)
+std::vector<Window*> create_windows(const GraphicsConfig& config, Result* out_result = nullptr);
+
+// Create multiple windows from a config file
+// Returns a vector of Window pointers
+std::vector<Window*> create_windows_from_config(const char* filepath, Result* out_result = nullptr);
 
 } // namespace window
 

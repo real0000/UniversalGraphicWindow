@@ -27,11 +27,11 @@ namespace window {
 // Format Conversion
 //=============================================================================
 
-static DXGI_FORMAT get_dxgi_format(int r, int g, int b, int a) {
-    if (r == 8 && g == 8 && b == 8 && a == 8) return DXGI_FORMAT_R8G8B8A8_UNORM;
-    if (r == 10 && g == 10 && b == 10 && a == 2) return DXGI_FORMAT_R10G10B10A2_UNORM;
-    if (r == 16 && g == 16 && b == 16 && a == 16) return DXGI_FORMAT_R16G16B16A16_FLOAT;
-    return DXGI_FORMAT_R8G8B8A8_UNORM;
+static DXGI_FORMAT get_dxgi_format(int color_bits) {
+    // color_bits: 16 = R5G6B5, 24 = R8G8B8, 32 = R8G8B8A8
+    if (color_bits >= 32) return DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (color_bits >= 24) return DXGI_FORMAT_R8G8B8A8_UNORM;  // No 24-bit in DXGI
+    return DXGI_FORMAT_B5G6R5_UNORM;  // 16-bit
 }
 
 //=============================================================================
@@ -159,10 +159,11 @@ Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
     ID3D12CommandQueue* command_queue;
     device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&command_queue));
 
+    const WindowConfigEntry& win_cfg = config.windows[0];
     DXGI_SWAP_CHAIN_DESC1 sd = {};
-    sd.Width = config.width;
-    sd.Height = config.height;
-    sd.Format = get_dxgi_format(config.red_bits, config.green_bits, config.blue_bits, config.alpha_bits);
+    sd.Width = win_cfg.width;
+    sd.Height = win_cfg.height;
+    sd.Format = get_dxgi_format(config.color_bits);
     sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = config.back_buffers;
@@ -254,7 +255,7 @@ Graphics* create_d3d12_graphics_corewindow(void* core_window, int width, int hei
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = width;
     sd.Height = height;
-    sd.Format = get_dxgi_format(config.red_bits, config.green_bits, config.blue_bits, config.alpha_bits);
+    sd.Format = get_dxgi_format(config.color_bits);
     sd.Stereo = FALSE;
     sd.SampleDesc.Count = 1;
     sd.SampleDesc.Quality = 0;

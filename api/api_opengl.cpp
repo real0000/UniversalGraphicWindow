@@ -159,15 +159,23 @@ Graphics* create_opengl_graphics_hwnd(void* hwnd_ptr, const Config& config) {
     HWND hwnd = static_cast<HWND>(hwnd_ptr);
     HDC hdc = GetDC(hwnd);
 
+    // Derive color channel bits from color_bits
+    int red_bits = 8, green_bits = 8, blue_bits = 8, alpha_bits = 8;
+    if (config.color_bits == 16) {
+        red_bits = 5; green_bits = 6; blue_bits = 5; alpha_bits = 0;
+    } else if (config.color_bits == 24) {
+        red_bits = 8; green_bits = 8; blue_bits = 8; alpha_bits = 0;
+    }
+
     int pixel_attribs[] = {
         WGL_DRAW_TO_WINDOW_ARB, GL_TRUE,
         WGL_SUPPORT_OPENGL_ARB, GL_TRUE,
         WGL_DOUBLE_BUFFER_ARB, GL_TRUE,
         WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
-        WGL_RED_BITS_ARB, config.red_bits,
-        WGL_GREEN_BITS_ARB, config.green_bits,
-        WGL_BLUE_BITS_ARB, config.blue_bits,
-        WGL_ALPHA_BITS_ARB, config.alpha_bits,
+        WGL_RED_BITS_ARB, red_bits,
+        WGL_GREEN_BITS_ARB, green_bits,
+        WGL_BLUE_BITS_ARB, blue_bits,
+        WGL_ALPHA_BITS_ARB, alpha_bits,
         WGL_DEPTH_BITS_ARB, config.depth_bits,
         WGL_STENCIL_BITS_ARB, config.stencil_bits,
         WGL_SAMPLE_BUFFERS_ARB, config.samples > 1 ? 1 : 0,
