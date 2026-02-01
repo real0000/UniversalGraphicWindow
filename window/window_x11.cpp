@@ -203,6 +203,7 @@ struct Window::Impl {
     int y = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    bool owns_graphics = true;  // Whether this window owns its graphics context
     WindowStyle style = WindowStyle::Default;
     bool is_fullscreen = false;
     // For fullscreen toggle restoration
@@ -256,7 +257,7 @@ static void send_wm_state_event(Display* display, ::Window window, bool add, Ato
 // Window Implementation
 //=============================================================================
 
-Window* Window::create(const Config& config, Result* out_result) {
+Window* create_window_impl(const Config& config, Result* out_result) {
     auto set_result = [&](Result r) {
         if (out_result) *out_result = r;
     };
@@ -426,43 +427,48 @@ Window* Window::create(const Config& config, Result* out_result) {
         window->impl->y = win_cfg.y;
     }
 
-    // Create graphics backend based on config.backend
-    Graphics* gfx = nullptr;
-    switch (requested) {
-#ifdef WINDOW_HAS_OPENGL
-        case Backend::OpenGL:
-            gfx = create_opengl_graphics_x11(display, xwindow, window->impl->fb_config, config);
-            break;
-#endif
-#ifdef WINDOW_HAS_VULKAN
-        case Backend::Vulkan:
-            gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
-            break;
-#endif
-        default:
-            break;
-    }
-
-    // Fallback to Vulkan if requested backend failed (OpenGL fallback not possible
-    // because window must be created with GLX-compatible visual)
-    if (!gfx && config.backend != Backend::Auto) {
-#ifdef WINDOW_HAS_VULKAN
-        if (requested != Backend::Vulkan) {
-            gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
-        }
-#endif
-    }
+    // Use shared graphics if provided, otherwise create new one
+    Graphics* gfx = config.shared_graphics;
 
     if (!gfx) {
-        XDestroyWindow(display, xwindow);
-        XCloseDisplay(display);
-        delete window->impl;
-        delete window;
-        set_result(Result::ErrorGraphicsInit);
-        return nullptr;
+        // Create graphics backend based on config.backend
+        switch (requested) {
+#ifdef WINDOW_HAS_OPENGL
+            case Backend::OpenGL:
+                gfx = create_opengl_graphics_x11(display, xwindow, window->impl->fb_config, config);
+                break;
+#endif
+#ifdef WINDOW_HAS_VULKAN
+            case Backend::Vulkan:
+                gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
+                break;
+#endif
+            default:
+                break;
+        }
+
+        // Fallback to Vulkan if requested backend failed (OpenGL fallback not possible
+        // because window must be created with GLX-compatible visual)
+        if (!gfx && config.backend != Backend::Auto) {
+#ifdef WINDOW_HAS_VULKAN
+            if (requested != Backend::Vulkan) {
+                gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
+            }
+#endif
+        }
+
+        if (!gfx) {
+            XDestroyWindow(display, xwindow);
+            XCloseDisplay(display);
+            delete window->impl;
+            delete window;
+            set_result(Result::ErrorGraphicsInit);
+            return nullptr;
+        }
     }
 
     window->impl->gfx = gfx;
+    window->impl->owns_graphics = (config.shared_graphics == nullptr);
 
     if (win_cfg.visible) {
         XMapWindow(display, xwindow);
@@ -477,7 +483,9 @@ Window* Window::create(const Config& config, Result* out_result) {
 
 void Window::destroy() {
     if (impl) {
-        delete impl->gfx;
+        if (impl->owns_graphics && impl->gfx) {
+            impl->gfx->destroy();
+        }
         if (impl->xic) {
             XDestroyIC(impl->xic);
         }

@@ -144,10 +144,10 @@ height = 600
 
 ```cpp
 // Create multiple windows with shared graphics context
-std::vector<Window*> windows = create_windows(config, &result);
+std::vector<Window*> windows = Window::create(config, &result);
 
 // Or load from config file
-std::vector<Window*> windows = create_windows_from_config("config.ini", &result);
+std::vector<Window*> windows = Window::create_from_config("config.ini", &result);
 ```
 
 ### Platform Detection

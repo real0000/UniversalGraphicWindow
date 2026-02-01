@@ -1021,7 +1021,7 @@ static void wayland_context_unref() {
 // Window Implementation (Subsurface-based)
 //=============================================================================
 
-Window* Window::create(const Config& config, Result* out_result) {
+Window* create_window_impl(const Config& config, Result* out_result) {
     auto set_result = [&](Result r) {
         if (out_result) *out_result = r;
     };

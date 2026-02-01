@@ -23,12 +23,14 @@ int main() {
     // config.backend = window::Backend::Metal;   // Force Metal (Apple only)
 
     window::Result result;
-    window::Window* win = window::Window::create(config, &result);
+    auto windows = window::Window::create(config, &result);
 
-    if (result != window::Result::Success) {
+    if (result != window::Result::Success || windows.empty()) {
         printf("Failed to create window: %s\n", window::result_to_string(result));
         return 1;
     }
+
+    window::Window* win = windows[0];
 
     // Get graphics context - works the same regardless of backend
     window::Graphics* gfx = win->graphics();

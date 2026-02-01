@@ -110,13 +110,14 @@ int main() {
     config.windows[0].height = 600;
 
     Result result;
-    Window* window = Window::create(config, &result);
+    auto windows = Window::create(config, &result);
 
-    if (!window) {
+    if (windows.empty()) {
         printf("Failed to create window: %s\n", result_to_string(result));
         return 1;
     }
 
+    Window* window = windows[0];
     printf("Window created with %s backend\n\n", window->graphics()->get_backend_name());
 
     // Create and register handlers

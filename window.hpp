@@ -29,7 +29,11 @@
 // These may already be defined by the build system (CMake), so check first
 //=============================================================================
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+    #ifndef WINDOW_PLATFORM_WASM
+    #define WINDOW_PLATFORM_WASM
+    #endif
+#elif defined(_WIN32)
     #if defined(WINAPI_FAMILY) && (WINAPI_FAMILY == WINAPI_FAMILY_APP)
         #ifndef WINDOW_PLATFORM_UWP
         #define WINDOW_PLATFORM_UWP
@@ -660,12 +664,12 @@ protected:
 class Window {
 public:
     // Creation/destruction
-    static Window* create(const Config& config, Result* out_result = nullptr);
+    static std::vector<Window*> create(const Config& config, Result* out_result = nullptr);
 
     // Create window from a saved configuration file
     // If the config file doesn't exist or is invalid, uses defaults
     // If specific settings (like device) are no longer valid, they are adjusted
-    static Window* create_from_config(const char* config_filepath, Result* out_result = nullptr);
+    static std::vector<Window*> create_from_config(const char* config_filepath, Result* out_result = nullptr);
 
     void destroy();
 
@@ -771,6 +775,9 @@ private:
     Window& operator=(const Window&) = delete;
 
     Impl* impl = nullptr;
+
+    // Friend function for internal window creation (implemented per-platform)
+    friend Window* create_window_impl(const Config& config, Result* out_result);
 };
 
 //-----------------------------------------------------------------------------
@@ -811,18 +818,12 @@ bool find_display_mode(const MonitorInfo& monitor, int width, int height, int re
 bool get_primary_monitor(MonitorInfo* out_monitor);
 
 //-----------------------------------------------------------------------------
-// Multi-Window Creation
+// Internal Window Creation
 //-----------------------------------------------------------------------------
 
-// Create multiple windows from a GraphicsConfig
-// Returns a vector of Window pointers (first window owns the graphics context, others share it)
-// If creation fails, returns empty vector and sets out_result
-// The caller is responsible for destroying all windows (destroy first window last)
-std::vector<Window*> create_windows(const GraphicsConfig& config, Result* out_result = nullptr);
-
-// Create multiple windows from a config file
-// Returns a vector of Window pointers
-std::vector<Window*> create_windows_from_config(const char* filepath, Result* out_result = nullptr);
+// Internal function to create a single window - called by Window::create()
+// Do not call directly; use Window::create() instead
+Window* create_window_impl(const Config& config, Result* out_result = nullptr);
 
 } // namespace window
 

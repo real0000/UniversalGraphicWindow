@@ -205,6 +205,7 @@ struct Window::Impl {
     float dpi = 96.0f;
     std::string title;
     Graphics* gfx = nullptr;
+    bool owns_graphics = true;  // Whether this window owns its graphics context
     WindowStyle style = WindowStyle::Default;
     bool is_fullscreen = false;
 
@@ -226,7 +227,7 @@ struct Window::Impl {
 // Global window instance for UWP
 static Window* g_uwp_window = nullptr;
 
-Window* Window::create(const Config& config, Result* out_result) {
+Window* create_window_impl(const Config& config, Result* out_result) {
     auto set_result = [&](Result r) {
         if (out_result) *out_result = r;
     };
@@ -245,6 +246,7 @@ Window* Window::create(const Config& config, Result* out_result) {
     window->impl->owner = window;  // Set back-pointer for event dispatch
     window->impl->core_window = core_window;
     window->impl->title = win_cfg.title;
+    window->impl->owns_graphics = (config.shared_graphics == nullptr);
 
     // Initialize mouse input system
     window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
@@ -458,43 +460,18 @@ Window* Window::create(const Config& config, Result* out_result) {
         }
     });
 
-    // Create graphics backend based on config.backend
+    // Use shared graphics if provided, otherwise create new one
     void* core_window_abi = winrt::get_abi(core_window);
-    Graphics* gfx = nullptr;
-    Backend requested = config.backend;
-    if (requested == Backend::Auto) {
-        requested = get_default_backend();
-    }
+    Graphics* gfx = config.shared_graphics;
 
-    switch (requested) {
-#ifdef WINDOW_HAS_D3D11
-        case Backend::D3D11:
-            gfx = create_d3d11_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
-            break;
-#endif
-#ifdef WINDOW_HAS_D3D12
-        case Backend::D3D12:
-            gfx = create_d3d12_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
-            break;
-#endif
-#ifdef WINDOW_HAS_OPENGL
-        case Backend::OpenGL:
-            gfx = create_opengl_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
-            break;
-#endif
-#ifdef WINDOW_HAS_VULKAN
-        case Backend::Vulkan:
-            gfx = create_vulkan_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
-            break;
-#endif
-        default:
-            break;
-    }
+    if (!gfx) {
+        // Create graphics backend based on config.backend
+        Backend requested = config.backend;
+        if (requested == Backend::Auto) {
+            requested = get_default_backend();
+        }
 
-    // Fallback to default if requested backend failed or not supported
-    if (!gfx && config.backend != Backend::Auto) {
-        Backend fallback = get_default_backend();
-        switch (fallback) {
+        switch (requested) {
 #ifdef WINDOW_HAS_D3D11
             case Backend::D3D11:
                 gfx = create_d3d11_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
@@ -518,14 +495,43 @@ Window* Window::create(const Config& config, Result* out_result) {
             default:
                 break;
         }
-    }
 
-    if (!gfx) {
-        delete window->impl;
-        delete window;
-        g_uwp_window = nullptr;
-        set_result(Result::ErrorGraphicsInit);
-        return nullptr;
+        // Fallback to default if requested backend failed or not supported
+        if (!gfx && config.backend != Backend::Auto) {
+            Backend fallback = get_default_backend();
+            switch (fallback) {
+#ifdef WINDOW_HAS_D3D11
+                case Backend::D3D11:
+                    gfx = create_d3d11_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
+                    break;
+#endif
+#ifdef WINDOW_HAS_D3D12
+                case Backend::D3D12:
+                    gfx = create_d3d12_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
+                    break;
+#endif
+#ifdef WINDOW_HAS_OPENGL
+                case Backend::OpenGL:
+                    gfx = create_opengl_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
+                    break;
+#endif
+#ifdef WINDOW_HAS_VULKAN
+                case Backend::Vulkan:
+                    gfx = create_vulkan_graphics_corewindow(core_window_abi, window->impl->width, window->impl->height, config);
+                    break;
+#endif
+                default:
+                    break;
+            }
+        }
+
+        if (!gfx) {
+            delete window->impl;
+            delete window;
+            g_uwp_window = nullptr;
+            set_result(Result::ErrorGraphicsInit);
+            return nullptr;
+        }
     }
 
     window->impl->gfx = gfx;
@@ -548,7 +554,9 @@ Window* Window::create(const Config& config, Result* out_result) {
 
 void Window::destroy() {
     if (impl) {
-        delete impl->gfx;
+        if (impl->owns_graphics && impl->gfx) {
+            impl->gfx->destroy();
+        }
         delete impl;
         impl = nullptr;
     }

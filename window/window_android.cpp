@@ -153,6 +153,7 @@ struct Window::Impl {
     int height = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    bool owns_graphics = true;  // Whether this window owns its graphics context
     Config config;
     WindowStyle style = WindowStyle::Fullscreen; // Android NativeActivity is always fullscreen
 
@@ -483,7 +484,7 @@ extern "C" void ANativeActivity_onCreate(ANativeActivity* activity,
 // Window Implementation
 //=============================================================================
 
-Window* Window::create(const Config& config, Result* out_result) {
+Window* create_window_impl(const Config& config, Result* out_result) {
     auto set_result = [&](Result r) {
         if (out_result) *out_result = r;
     };
@@ -497,6 +498,7 @@ Window* Window::create(const Config& config, Result* out_result) {
     window->impl->height = win_cfg.height;
     window->impl->title = win_cfg.title;
     window->impl->config = config;
+    window->impl->owns_graphics = (config.shared_graphics == nullptr);
 
     // Initialize mouse input system
     window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
@@ -519,7 +521,9 @@ Window* Window::create(const Config& config, Result* out_result) {
 
 void Window::destroy() {
     if (impl) {
-        delete impl->gfx;
+        if (impl->owns_graphics && impl->gfx) {
+            impl->gfx->destroy();
+        }
         impl->gfx = nullptr;
 
         if (impl->activity) {

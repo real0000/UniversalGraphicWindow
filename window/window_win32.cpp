@@ -21,6 +21,7 @@
 #include <shellapi.h>
 #include <cstring>
 #include <string>
+#include <vector>
 
 //=============================================================================
 // Backend Configuration (use CMake-defined macros)
@@ -218,6 +219,7 @@ struct Window::Impl {
     int y = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    bool owns_graphics = true;  // Whether this window owns its graphics context
     WindowStyle style = WindowStyle::Default;
     // For fullscreen toggle restoration
     RECT windowed_rect = {};
@@ -573,11 +575,13 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-Window* Window::create(const Config& config, Result* out_result) {
+// Platform implementation of single window creation
+// Called from graphics_config.cpp's Window::create
+Window* create_window_impl(const Config& config, Result* out_result) {
     auto set_result = [&](Result r) { if (out_result) *out_result = r; };
 
     static bool class_registered = false;
-    static const wchar_t* CLASS_NAME = L"WindowHppClass";
+    static const wchar_t* CLASS_NAME = L"WindowHppClassName";
 
     if (!class_registered) {
         WNDCLASSEXW wc = {};
@@ -594,8 +598,9 @@ Window* Window::create(const Config& config, Result* out_result) {
         class_registered = true;
     }
 
-    // Get window settings from first window entry
+    // Get window settings from first window entry (the config is prepared by Window::create)
     const WindowConfigEntry& win_cfg = config.windows[0];
+    Graphics* shared_gfx = config.shared_graphics;
 
     // Determine effective style
     WindowStyle effective_style = win_cfg.style;
@@ -664,42 +669,17 @@ Window* Window::create(const Config& config, Result* out_result) {
 
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(window->impl));
 
-    // Create graphics backend based on config.backend
-    Graphics* gfx = nullptr;
-    Backend requested = config.backend;
-    if (requested == Backend::Auto) {
-        requested = get_default_backend();
-    }
+    // Use shared graphics if provided, otherwise create new one
+    Graphics* gfx = shared_gfx;
 
-    switch (requested) {
-#ifdef WINDOW_HAS_D3D11
-        case Backend::D3D11:
-            gfx = create_d3d11_graphics_hwnd(hwnd, config);
-            break;
-#endif
-#ifdef WINDOW_HAS_D3D12
-        case Backend::D3D12:
-            gfx = create_d3d12_graphics_hwnd(hwnd, config);
-            break;
-#endif
-#ifdef WINDOW_HAS_OPENGL
-        case Backend::OpenGL:
-            gfx = create_opengl_graphics_hwnd(hwnd, config);
-            break;
-#endif
-#ifdef WINDOW_HAS_VULKAN
-        case Backend::Vulkan:
-            gfx = create_vulkan_graphics_win32(hwnd, win_cfg.width, win_cfg.height, config);
-            break;
-#endif
-        default:
-            break;
-    }
+    if (!gfx) {
+        // Create graphics backend based on config.backend
+        Backend requested = config.backend;
+        if (requested == Backend::Auto) {
+            requested = get_default_backend();
+        }
 
-    // Fallback to default if requested backend failed or not supported
-    if (!gfx && config.backend != Backend::Auto) {
-        Backend fallback = get_default_backend();
-        switch (fallback) {
+        switch (requested) {
 #ifdef WINDOW_HAS_D3D11
             case Backend::D3D11:
                 gfx = create_d3d11_graphics_hwnd(hwnd, config);
@@ -715,20 +695,50 @@ Window* Window::create(const Config& config, Result* out_result) {
                 gfx = create_opengl_graphics_hwnd(hwnd, config);
                 break;
 #endif
+#ifdef WINDOW_HAS_VULKAN
+            case Backend::Vulkan:
+                gfx = create_vulkan_graphics_win32(hwnd, win_cfg.width, win_cfg.height, config);
+                break;
+#endif
             default:
                 break;
         }
-    }
 
-    if (!gfx) {
-        DestroyWindow(hwnd);
-        delete window->impl;
-        delete window;
-        set_result(Result::ErrorGraphicsInit);
-        return nullptr;
+        // Fallback to default if requested backend failed or not supported
+        if (!gfx && config.backend != Backend::Auto) {
+            Backend fallback = get_default_backend();
+            switch (fallback) {
+#ifdef WINDOW_HAS_D3D11
+                case Backend::D3D11:
+                    gfx = create_d3d11_graphics_hwnd(hwnd, config);
+                    break;
+#endif
+#ifdef WINDOW_HAS_D3D12
+                case Backend::D3D12:
+                    gfx = create_d3d12_graphics_hwnd(hwnd, config);
+                    break;
+#endif
+#ifdef WINDOW_HAS_OPENGL
+                case Backend::OpenGL:
+                    gfx = create_opengl_graphics_hwnd(hwnd, config);
+                    break;
+#endif
+                default:
+                    break;
+            }
+        }
+
+        if (!gfx) {
+            DestroyWindow(hwnd);
+            delete window->impl;
+            delete window;
+            set_result(Result::ErrorGraphicsInit);
+            return nullptr;
+        }
     }
 
     window->impl->gfx = gfx;
+    window->impl->owns_graphics = (shared_gfx == nullptr);  // Track ownership
 
     // Initialize mouse input system
     window->impl->mouse_device.set_window(window);
@@ -749,7 +759,9 @@ Window* Window::create(const Config& config, Result* out_result) {
 
 void Window::destroy() {
     if (impl) {
-        delete impl->gfx;
+        if (impl->owns_graphics && impl->gfx) {
+            impl->gfx->destroy();
+        }
         if (impl->hwnd) DestroyWindow(impl->hwnd);
         delete impl;
         impl = nullptr;
@@ -1188,27 +1200,6 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
 void Graphics::destroy() {
     delete this;
-}
-
-//=============================================================================
-// Window::create_from_config
-//=============================================================================
-
-Window* Window::create_from_config(const char* config_filepath, Result* out_result) {
-    auto set_result = [&](Result r) { if (out_result) *out_result = r; };
-
-    GraphicsConfig gfx_config;
-
-    // Try to load config file
-    if (config_filepath && GraphicsConfig::load(config_filepath, &gfx_config)) {
-        // Config loaded and validated
-    } else {
-        // Use defaults
-        gfx_config = GraphicsConfig{};
-    }
-
-    // Create window from config
-    return Window::create(gfx_config, out_result);
 }
 
 } // namespace window

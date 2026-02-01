@@ -629,69 +629,6 @@ bool Config::remove_window(const char* name) {
 }
 
 //=============================================================================
-// Multi-Window Creation
-//=============================================================================
-
-std::vector<Window*> create_windows(const Config& config, Result* out_result) {
-    auto set_result = [&](Result r) { if (out_result) *out_result = r; };
-
-    std::vector<Window*> result_windows;
-
-    if (config.window_count == 0) {
-        set_result(Result::ErrorInvalidParameter);
-        return result_windows;
-    }
-
-    // Create the first window with a new graphics context
-    Config first_config = config;
-    first_config.shared_graphics = nullptr;
-
-    Result result;
-    Window* first_window = Window::create(first_config, &result);
-    if (!first_window) {
-        set_result(result);
-        return result_windows;
-    }
-
-    result_windows.push_back(first_window);
-    Graphics* shared_gfx = first_window->graphics();
-
-    // Create remaining windows with shared graphics context
-    for (int i = 1; i < config.window_count; i++) {
-        Config win_config = config;
-        // Copy window-specific settings
-        win_config.windows[0] = config.windows[i];
-        win_config.window_count = 1;
-        win_config.shared_graphics = shared_gfx;
-
-        Window* window = Window::create(win_config, &result);
-        if (!window) {
-            // Clean up already created windows on failure
-            for (Window* w : result_windows) {
-                w->destroy();
-            }
-            result_windows.clear();
-            set_result(result);
-            return result_windows;
-        }
-
-        result_windows.push_back(window);
-    }
-
-    set_result(Result::Success);
-    return result_windows;
-}
-
-std::vector<Window*> create_windows_from_config(const char* filepath, Result* out_result) {
-    Config config;
-    if (!Config::load(filepath, &config)) {
-        // Use defaults if file not found
-        config = Config{};
-    }
-    return create_windows(config, out_result);
-}
-
-//=============================================================================
 // Helper functions
 //=============================================================================
 
@@ -740,6 +677,70 @@ bool get_primary_monitor(MonitorInfo* out_monitor) {
     }
 
     return false;
+}
+
+//=============================================================================
+// Window::create and Window::create_from_config
+// Multi-window creation implementation
+//=============================================================================
+
+std::vector<Window*> Window::create(const Config& config, Result* out_result) {
+    auto set_result = [&](Result r) { if (out_result) *out_result = r; };
+
+    std::vector<Window*> result_windows;
+
+    if (config.window_count == 0) {
+        set_result(Result::ErrorInvalidParameter);
+        return result_windows;
+    }
+
+    // Create the first window with a new graphics context
+    Config first_config = config;
+    first_config.shared_graphics = nullptr;
+
+    Result result;
+    Window* first_window = create_window_impl(first_config, &result);
+    if (!first_window) {
+        set_result(result);
+        return result_windows;
+    }
+
+    result_windows.push_back(first_window);
+    Graphics* shared_gfx = first_window->graphics();
+
+    // Create remaining windows with shared graphics context
+    for (int i = 1; i < config.window_count; i++) {
+        Config win_config = config;
+        // Copy window-specific settings
+        win_config.windows[0] = config.windows[i];
+        win_config.window_count = 1;
+        win_config.shared_graphics = shared_gfx;
+
+        Window* window = create_window_impl(win_config, &result);
+        if (!window) {
+            // Clean up already created windows on failure
+            for (Window* w : result_windows) {
+                w->destroy();
+            }
+            result_windows.clear();
+            set_result(result);
+            return result_windows;
+        }
+
+        result_windows.push_back(window);
+    }
+
+    set_result(Result::Success);
+    return result_windows;
+}
+
+std::vector<Window*> Window::create_from_config(const char* filepath, Result* out_result) {
+    Config config;
+    if (!Config::load(filepath, &config)) {
+        // Use defaults if file not found
+        config = Config{};
+    }
+    return Window::create(config, out_result);
 }
 
 } // namespace window

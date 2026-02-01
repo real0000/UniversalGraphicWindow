@@ -19,13 +19,14 @@ int main() {
     config.backend = window::Backend::Vulkan;
 
     window::Result result;
-    window::Window* win = window::Window::create(config, &result);
+    auto windows = window::Window::create(config, &result);
 
-    if (result != window::Result::Success) {
+    if (result != window::Result::Success || windows.empty()) {
         printf("Failed to create window: %s\n", window::result_to_string(result));
         return 1;
     }
 
+    window::Window* win = windows[0];
     window::Graphics* gfx = win->graphics();
 
     printf("Vulkan context created!\n");

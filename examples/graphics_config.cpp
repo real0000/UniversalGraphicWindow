@@ -115,13 +115,14 @@ void demo_window_from_config() {
 
     // Create window from config file
     window::Result result;
-    window::Window* win = window::Window::create_from_config(config_file, &result);
+    auto windows = window::Window::create_from_config(config_file, &result);
 
-    if (!win) {
+    if (windows.empty()) {
         printf("Failed to create window: %s\n", window::result_to_string(result));
         return;
     }
 
+    window::Window* win = windows[0];
     printf("Window created successfully!\n");
     printf("  Title: %s\n", win->get_title());
     printf("  Size: %dx%d\n", win->get_width(), win->get_height());
@@ -173,7 +174,7 @@ void demo_multi_window() {
 
     // Create windows
     window::Result result;
-    std::vector<window::Window*> windows = window::create_windows(config, &result);
+    std::vector<window::Window*> windows = window::Window::create(config, &result);
 
     if (windows.empty()) {
         printf("Failed to create windows: %s\n", window::result_to_string(result));

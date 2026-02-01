@@ -107,6 +107,7 @@ struct Window::Impl {
     int height = 0;
     std::string title;
     Graphics* gfx = nullptr;
+    bool owns_graphics = true;  // Whether this window owns its graphics context
     WindowStyle style = WindowStyle::Fullscreen; // iOS is always fullscreen
 
     // Event callbacks
@@ -296,7 +297,7 @@ struct Window::Impl {
 
 namespace window {
 
-Window* Window::create(const Config& config, Result* out_result) {
+Window* create_window_impl(const Config& config, Result* out_result) {
     auto set_result = [&](Result r) {
         if (out_result) *out_result = r;
     };
@@ -329,32 +330,17 @@ Window* Window::create(const Config& config, Result* out_result) {
         window->impl->width = static_cast<int>(frame.size.width * scale);
         window->impl->height = static_cast<int>(frame.size.height * scale);
 
-        // Create graphics backend based on config.backend
-        Graphics* gfx = nullptr;
-        Backend requested = config.backend;
-        if (requested == Backend::Auto) {
-            requested = get_default_backend();
-        }
+        // Use shared graphics if provided, otherwise create new one
+        Graphics* gfx = config.shared_graphics;
 
-        switch (requested) {
-#ifdef WINDOW_HAS_METAL
-            case Backend::Metal:
-                gfx = create_metal_graphics_uiview((__bridge void*)window->impl->view, window->impl->width, window->impl->height, config);
-                break;
-#endif
-#ifdef WINDOW_HAS_OPENGL
-            case Backend::OpenGL:
-                gfx = create_opengl_graphics_uiview((__bridge void*)window->impl->view, window->impl->width, window->impl->height, config);
-                break;
-#endif
-            default:
-                break;
-        }
+        if (!gfx) {
+            // Create graphics backend based on config.backend
+            Backend requested = config.backend;
+            if (requested == Backend::Auto) {
+                requested = get_default_backend();
+            }
 
-        // Fallback to default if requested backend failed or not supported
-        if (!gfx && config.backend != Backend::Auto) {
-            Backend fallback = get_default_backend();
-            switch (fallback) {
+            switch (requested) {
 #ifdef WINDOW_HAS_METAL
                 case Backend::Metal:
                     gfx = create_metal_graphics_uiview((__bridge void*)window->impl->view, window->impl->width, window->impl->height, config);
@@ -368,16 +354,36 @@ Window* Window::create(const Config& config, Result* out_result) {
                 default:
                     break;
             }
-        }
 
-        if (!gfx) {
-            delete window->impl;
-            delete window;
-            set_result(Result::ErrorGraphicsInit);
-            return nullptr;
+            // Fallback to default if requested backend failed or not supported
+            if (!gfx && config.backend != Backend::Auto) {
+                Backend fallback = get_default_backend();
+                switch (fallback) {
+#ifdef WINDOW_HAS_METAL
+                    case Backend::Metal:
+                        gfx = create_metal_graphics_uiview((__bridge void*)window->impl->view, window->impl->width, window->impl->height, config);
+                        break;
+#endif
+#ifdef WINDOW_HAS_OPENGL
+                    case Backend::OpenGL:
+                        gfx = create_opengl_graphics_uiview((__bridge void*)window->impl->view, window->impl->width, window->impl->height, config);
+                        break;
+#endif
+                    default:
+                        break;
+                }
+            }
+
+            if (!gfx) {
+                delete window->impl;
+                delete window;
+                set_result(Result::ErrorGraphicsInit);
+                return nullptr;
+            }
         }
 
         window->impl->gfx = gfx;
+        window->impl->owns_graphics = (config.shared_graphics == nullptr);
 
         if (win_cfg.visible) {
             [window->impl->ui_window makeKeyAndVisible];
@@ -391,7 +397,9 @@ Window* Window::create(const Config& config, Result* out_result) {
 void Window::destroy() {
     @autoreleasepool {
         if (impl) {
-            delete impl->gfx;
+            if (impl->owns_graphics && impl->gfx) {
+                impl->gfx->destroy();
+            }
             impl->ui_window.hidden = YES;
             impl->ui_window = nil;
             impl->view_controller = nil;
