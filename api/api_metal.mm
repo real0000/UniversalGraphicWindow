@@ -24,11 +24,11 @@ namespace window {
 // Metal Format Conversion
 //=============================================================================
 
-static MTLPixelFormat get_metal_format(int r, int g, int b, int a) {
-    if (r == 8 && g == 8 && b == 8 && a == 8) return MTLPixelFormatBGRA8Unorm;
-    if (r == 10 && g == 10 && b == 10 && a == 2) return MTLPixelFormatBGR10A2Unorm;
-    if (r == 16 && g == 16 && b == 16 && a == 16) return MTLPixelFormatRGBA16Float;
-    return MTLPixelFormatBGRA8Unorm;
+static MTLPixelFormat get_metal_format_from_color_bits(int color_bits) {
+    // color_bits: 16, 24, 32, or 64 (HDR)
+    if (color_bits >= 64) return MTLPixelFormatRGBA16Float;  // 64-bit HDR
+    if (color_bits >= 32) return MTLPixelFormatBGRA8Unorm;   // 32-bit standard
+    return MTLPixelFormatBGRA8Unorm;  // Default
 }
 
 //=============================================================================
@@ -105,7 +105,7 @@ Graphics* create_metal_graphics_nsview(void* ns_view, int width, int height, con
 
         CAMetalLayer* layer = [CAMetalLayer layer];
         layer.device = device;
-        layer.pixelFormat = get_metal_format(config.red_bits, config.green_bits, config.blue_bits, config.alpha_bits);
+        layer.pixelFormat = get_metal_format_from_color_bits(config.color_bits);
         layer.framebufferOnly = YES;
         layer.drawableSize = CGSizeMake(width, height);
 
@@ -159,7 +159,7 @@ Graphics* create_metal_graphics_uiview(void* ui_view, int width, int height, con
         }
 
         layer.device = device;
-        layer.pixelFormat = get_metal_format(config.red_bits, config.green_bits, config.blue_bits, config.alpha_bits);
+        layer.pixelFormat = get_metal_format_from_color_bits(config.color_bits);
         layer.framebufferOnly = YES;
         layer.drawableSize = CGSizeMake(width, height);
         layer.contentsScale = [UIScreen mainScreen].scale;
@@ -205,7 +205,7 @@ Graphics* create_metal_graphics_layer(void* metal_layer, const Config& config) {
         id<MTLCommandQueue> queue = [device newCommandQueue];
         if (!queue) return nullptr;
 
-        layer.pixelFormat = get_metal_format(config.red_bits, config.green_bits, config.blue_bits, config.alpha_bits);
+        layer.pixelFormat = get_metal_format_from_color_bits(config.color_bits);
         layer.framebufferOnly = YES;
 
         GraphicsMetal* gfx = new GraphicsMetal();

@@ -528,7 +528,7 @@ struct Config {
     int back_buffers = 2;           // 2 = double buffering, 3 = triple
 
     // Color/depth settings
-    int color_bits = 32;            // 16, 24, or 32
+    int color_bits = 32;            // 16, 24, 32, or 64 (64 = 16 bits per channel HDR)
     int depth_bits = 24;            // 0, 16, 24, or 32
     int stencil_bits = 8;           // 0 or 8
 

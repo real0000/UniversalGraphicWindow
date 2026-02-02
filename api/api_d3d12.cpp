@@ -28,7 +28,8 @@ namespace window {
 //=============================================================================
 
 static DXGI_FORMAT get_dxgi_format(int color_bits) {
-    // color_bits: 16 = R5G6B5, 24 = R8G8B8, 32 = R8G8B8A8
+    // color_bits: 16 = R5G6B5, 24/32 = R8G8B8A8, 64 = R16G16B16A16 (HDR)
+    if (color_bits >= 64) return DXGI_FORMAT_R16G16B16A16_FLOAT;  // 64-bit HDR
     if (color_bits >= 32) return DXGI_FORMAT_R8G8B8A8_UNORM;
     if (color_bits >= 24) return DXGI_FORMAT_R8G8B8A8_UNORM;  // No 24-bit in DXGI
     return DXGI_FORMAT_B5G6R5_UNORM;  // 16-bit

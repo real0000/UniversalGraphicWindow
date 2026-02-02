@@ -208,7 +208,22 @@ static VkSurfaceFormatKHR choose_surface_format(VkPhysicalDevice device, VkSurfa
     std::vector<VkSurfaceFormatKHR> formats(format_count);
     vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, formats.data());
 
-    // Prefer BGRA8 SRGB
+    // For 64-bit HDR, prefer R16G16B16A16_SFLOAT
+    if (config.color_bits >= 64) {
+        for (const auto& fmt : formats) {
+            if (fmt.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+                return fmt;
+            }
+        }
+        // Fallback to RGBA16 UNORM if float not available
+        for (const auto& fmt : formats) {
+            if (fmt.format == VK_FORMAT_R16G16B16A16_UNORM) {
+                return fmt;
+            }
+        }
+    }
+
+    // Prefer BGRA8 SRGB for standard color
     for (const auto& fmt : formats) {
         if (fmt.format == VK_FORMAT_B8G8R8A8_SRGB && fmt.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             return fmt;

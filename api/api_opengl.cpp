@@ -42,6 +42,7 @@ typedef BOOL (WINAPI* PFNWGLSWAPINTERVALEXTPROC)(int);
 #define WGL_DOUBLE_BUFFER_ARB             0x2011
 #define WGL_PIXEL_TYPE_ARB                0x2013
 #define WGL_TYPE_RGBA_ARB                 0x202B
+#define WGL_TYPE_RGBA_FLOAT_ARB           0x21A0
 #define WGL_COLOR_BITS_ARB                0x2014
 #define WGL_RED_BITS_ARB                  0x2015
 #define WGL_GREEN_BITS_ARB                0x2017
@@ -161,7 +162,12 @@ Graphics* create_opengl_graphics_hwnd(void* hwnd_ptr, const Config& config) {
 
     // Derive color channel bits from color_bits
     int red_bits = 8, green_bits = 8, blue_bits = 8, alpha_bits = 8;
-    if (config.color_bits == 16) {
+    int pixel_type = WGL_TYPE_RGBA_ARB;
+    if (config.color_bits >= 64) {
+        // 64-bit HDR: 16 bits per channel, floating point
+        red_bits = 16; green_bits = 16; blue_bits = 16; alpha_bits = 16;
+        pixel_type = WGL_TYPE_RGBA_FLOAT_ARB;
+    } else if (config.color_bits == 16) {
         red_bits = 5; green_bits = 6; blue_bits = 5; alpha_bits = 0;
     } else if (config.color_bits == 24) {
         red_bits = 8; green_bits = 8; blue_bits = 8; alpha_bits = 0;
@@ -171,7 +177,7 @@ Graphics* create_opengl_graphics_hwnd(void* hwnd_ptr, const Config& config) {
         WGL_DRAW_TO_WINDOW_ARB, GL_TRUE,
         WGL_SUPPORT_OPENGL_ARB, GL_TRUE,
         WGL_DOUBLE_BUFFER_ARB, GL_TRUE,
-        WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
+        WGL_PIXEL_TYPE_ARB, pixel_type,
         WGL_RED_BITS_ARB, red_bits,
         WGL_GREEN_BITS_ARB, green_bits,
         WGL_BLUE_BITS_ARB, blue_bits,
