@@ -253,8 +253,33 @@ Graphics* create_opengl_graphics_hwnd(void* hwnd_ptr, const Config& config) {
         return nullptr;
     }
 
+    // Set swap interval based on swap_mode
     if (wglSwapIntervalEXT) {
-        wglSwapIntervalEXT(config.vsync ? 1 : 0);
+        int interval = 1;  // Default to vsync
+        SwapMode swap_mode = config.swap_mode;
+        if (swap_mode == SwapMode::Auto) {
+            swap_mode = config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
+        }
+        switch (swap_mode) {
+            case SwapMode::Immediate:
+                interval = 0;
+                break;
+            case SwapMode::Mailbox:
+                // OpenGL doesn't have true mailbox, use vsync
+                interval = 1;
+                break;
+            case SwapMode::FifoRelaxed:
+                // Adaptive vsync: -1 requires WGL_EXT_swap_control_tear
+                // Falls back to regular vsync if not supported
+                interval = -1;
+                break;
+            case SwapMode::Fifo:
+            case SwapMode::Auto:
+            default:
+                interval = 1;
+                break;
+        }
+        wglSwapIntervalEXT(interval);
     }
 
     GraphicsOpenGL* gfx = new GraphicsOpenGL();

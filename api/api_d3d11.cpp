@@ -46,7 +46,8 @@ public:
     IDXGISwapChain1* swap_chain = nullptr;
     std::string device_name;
     bool owns_device = true;
-    bool vsync = true;
+    SwapMode swap_mode = SwapMode::Fifo;
+    bool allow_tearing = false;
 
     ~GraphicsD3D11() override {
         if (swap_chain) swap_chain->Release();
@@ -72,7 +73,28 @@ public:
 
     void present() override {
         if (swap_chain) {
-            swap_chain->Present(vsync ? 1 : 0, 0);
+            UINT sync_interval = 1;
+            UINT flags = 0;
+            switch (swap_mode) {
+                case SwapMode::Immediate:
+                    sync_interval = 0;
+                    if (allow_tearing) flags = DXGI_PRESENT_ALLOW_TEARING;
+                    break;
+                case SwapMode::Mailbox:
+                    // Mailbox-like behavior: vsync but drop frames if too fast
+                    sync_interval = 1;
+                    break;
+                case SwapMode::FifoRelaxed:
+                    // Present immediately if we missed vsync
+                    sync_interval = 1;
+                    break;
+                case SwapMode::Fifo:
+                case SwapMode::Auto:
+                default:
+                    sync_interval = 1;
+                    break;
+            }
+            swap_chain->Present(sync_interval, flags);
         }
     }
 
@@ -89,6 +111,14 @@ public:
 //=============================================================================
 // Creation for HWND (Win32)
 //=============================================================================
+
+// Helper to resolve swap mode from config
+static SwapMode resolve_swap_mode(const Config& config) {
+    if (config.swap_mode != SwapMode::Auto) {
+        return config.swap_mode;
+    }
+    return config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
+}
 
 Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     ID3D11Device* device = nullptr;
@@ -125,6 +155,19 @@ Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 
+    // Check for tearing support (required for true immediate mode)
+    bool allow_tearing = false;
+    IDXGIFactory5* factory5 = nullptr;
+    if (SUCCEEDED(factory->QueryInterface(__uuidof(IDXGIFactory5), (void**)&factory5))) {
+        BOOL tearing_support = FALSE;
+        if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing_support, sizeof(tearing_support)))) {
+            allow_tearing = (tearing_support == TRUE);
+        }
+        factory5->Release();
+    }
+
+    SwapMode swap_mode = resolve_swap_mode(config);
+
     const WindowConfigEntry& win_cfg = config.windows[0];
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = win_cfg.width;
@@ -134,6 +177,7 @@ Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = config.back_buffers;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.Flags = (allow_tearing && swap_mode == SwapMode::Immediate) ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     IDXGISwapChain1* swap_chain;
     HRESULT hr = factory->CreateSwapChainForHwnd(device, static_cast<HWND>(hwnd), &sd, nullptr, nullptr, &swap_chain);
@@ -153,7 +197,8 @@ Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     gfx->context = context;
     gfx->swap_chain = swap_chain;
     gfx->owns_device = owns_device;
-    gfx->vsync = config.vsync;
+    gfx->swap_mode = swap_mode;
+    gfx->allow_tearing = allow_tearing && (swap_mode == SwapMode::Immediate);
 
     char name[256];
     WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);
@@ -195,6 +240,8 @@ Graphics* create_d3d11_graphics_corewindow(void* core_window, int width, int hei
     DXGI_ADAPTER_DESC adapter_desc;
     adapter->GetDesc(&adapter_desc);
 
+    SwapMode swap_mode = resolve_swap_mode(config);
+
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = width;
     sd.Height = height;
@@ -227,7 +274,8 @@ Graphics* create_d3d11_graphics_corewindow(void* core_window, int width, int hei
     gfx->device = device;
     gfx->context = context;
     gfx->swap_chain = swap_chain;
-    gfx->vsync = config.vsync;
+    gfx->swap_mode = swap_mode;
+    gfx->allow_tearing = false;  // UWP doesn't support tearing
 
     char name[256];
     WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);

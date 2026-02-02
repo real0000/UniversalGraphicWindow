@@ -46,7 +46,8 @@ public:
     IDXGISwapChain4* swap_chain = nullptr;
     std::string device_name;
     bool owns_device = true;
-    bool vsync = true;
+    SwapMode swap_mode = SwapMode::Fifo;
+    bool allow_tearing = false;
     UINT buffer_count = 2;
 
     ~GraphicsD3D12() override {
@@ -63,14 +64,34 @@ public:
         if (!swap_chain || width <= 0 || height <= 0) return false;
 
         // Note: Caller must ensure GPU is idle before resizing
+        UINT flags = allow_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
         HRESULT hr = swap_chain->ResizeBuffers(buffer_count, static_cast<UINT>(width),
-                                                static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN, 0);
+                                                static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN, flags);
         return SUCCEEDED(hr);
     }
 
     void present() override {
         if (swap_chain) {
-            swap_chain->Present(vsync ? 1 : 0, 0);
+            UINT sync_interval = 1;
+            UINT flags = 0;
+            switch (swap_mode) {
+                case SwapMode::Immediate:
+                    sync_interval = 0;
+                    if (allow_tearing) flags = DXGI_PRESENT_ALLOW_TEARING;
+                    break;
+                case SwapMode::Mailbox:
+                    sync_interval = 1;
+                    break;
+                case SwapMode::FifoRelaxed:
+                    sync_interval = 1;
+                    break;
+                case SwapMode::Fifo:
+                case SwapMode::Auto:
+                default:
+                    sync_interval = 1;
+                    break;
+            }
+            swap_chain->Present(sync_interval, flags);
         }
     }
 
@@ -87,6 +108,14 @@ public:
 // Creation for HWND (Win32)
 //=============================================================================
 
+// Helper to resolve swap mode from config
+static SwapMode resolve_swap_mode(const Config& config) {
+    if (config.swap_mode != SwapMode::Auto) {
+        return config.swap_mode;
+    }
+    return config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
+}
+
 Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
     ID3D12Device* device = nullptr;
     bool owns_device = true;
@@ -94,6 +123,15 @@ Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
 
     IDXGIFactory6* factory;
     if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)))) return nullptr;
+
+    // Check for tearing support
+    bool allow_tearing = false;
+    {
+        BOOL tearing_support = FALSE;
+        if (SUCCEEDED(factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing_support, sizeof(tearing_support)))) {
+            allow_tearing = (tearing_support == TRUE);
+        }
+    }
 
     // Check for shared device
     if (config.shared_graphics && config.shared_graphics->get_backend() == Backend::D3D12) {
@@ -160,6 +198,8 @@ Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
     ID3D12CommandQueue* command_queue;
     device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&command_queue));
 
+    SwapMode swap_mode = resolve_swap_mode(config);
+
     const WindowConfigEntry& win_cfg = config.windows[0];
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = win_cfg.width;
@@ -169,6 +209,7 @@ Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = config.back_buffers;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.Flags = (allow_tearing && swap_mode == SwapMode::Immediate) ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     IDXGISwapChain1* swap_chain1;
     factory->CreateSwapChainForHwnd(command_queue, static_cast<HWND>(hwnd), &sd, nullptr, nullptr, &swap_chain1);
@@ -183,7 +224,8 @@ Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
     gfx->command_queue = command_queue;
     gfx->swap_chain = swap_chain;
     gfx->owns_device = owns_device;
-    gfx->vsync = config.vsync;
+    gfx->swap_mode = swap_mode;
+    gfx->allow_tearing = allow_tearing && (swap_mode == SwapMode::Immediate);
     gfx->buffer_count = static_cast<UINT>(config.back_buffers);
 
     char name[256];
@@ -253,6 +295,8 @@ Graphics* create_d3d12_graphics_corewindow(void* core_window, int width, int hei
     ID3D12CommandQueue* command_queue;
     device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&command_queue));
 
+    SwapMode swap_mode = resolve_swap_mode(config);
+
     DXGI_SWAP_CHAIN_DESC1 sd = {};
     sd.Width = width;
     sd.Height = height;
@@ -288,7 +332,8 @@ Graphics* create_d3d12_graphics_corewindow(void* core_window, int width, int hei
     gfx->device = device;
     gfx->command_queue = command_queue;
     gfx->swap_chain = swap_chain;
-    gfx->vsync = config.vsync;
+    gfx->swap_mode = swap_mode;
+    gfx->allow_tearing = false;  // UWP doesn't support tearing
     gfx->buffer_count = static_cast<UINT>(config.back_buffers);
 
     char name[256];

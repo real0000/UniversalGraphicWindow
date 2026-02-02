@@ -42,7 +42,6 @@ public:
     CAMetalLayer* layer = nil;
     std::string device_name;
     bool owns_device = true;
-    bool vsync = true;
 
     ~GraphicsMetal() override {
         layer = nil;
@@ -74,6 +73,30 @@ public:
     void* native_context() const override { return (__bridge void*)command_queue; }
     void* native_swapchain() const override { return (__bridge void*)layer; }
 };
+
+// Helper to resolve swap mode from config
+static SwapMode resolve_swap_mode(const Config& config) {
+    if (config.swap_mode != SwapMode::Auto) {
+        return config.swap_mode;
+    }
+    return config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
+}
+
+// Configure Metal layer vsync based on swap mode
+static void configure_layer_vsync(CAMetalLayer* layer, SwapMode swap_mode) {
+#if TARGET_OS_OSX
+    // macOS 10.13+ supports displaySyncEnabled
+    if (@available(macOS 10.13, *)) {
+        // Immediate mode disables vsync, all other modes enable it
+        layer.displaySyncEnabled = (swap_mode != SwapMode::Immediate);
+    }
+#elif TARGET_OS_IOS || TARGET_OS_TV
+    // iOS 10.3+ supports displaySyncEnabled
+    if (@available(iOS 10.3, tvOS 10.2, *)) {
+        layer.displaySyncEnabled = (swap_mode != SwapMode::Immediate);
+    }
+#endif
+}
 
 //=============================================================================
 // Creation for NSView (macOS)
@@ -108,6 +131,7 @@ Graphics* create_metal_graphics_nsview(void* ns_view, int width, int height, con
         layer.pixelFormat = get_metal_format_from_color_bits(config.color_bits);
         layer.framebufferOnly = YES;
         layer.drawableSize = CGSizeMake(width, height);
+        configure_layer_vsync(layer, resolve_swap_mode(config));
 
         [view setLayer:layer];
 
@@ -163,6 +187,7 @@ Graphics* create_metal_graphics_uiview(void* ui_view, int width, int height, con
         layer.framebufferOnly = YES;
         layer.drawableSize = CGSizeMake(width, height);
         layer.contentsScale = [UIScreen mainScreen].scale;
+        configure_layer_vsync(layer, resolve_swap_mode(config));
 
         GraphicsMetal* gfx = new GraphicsMetal();
         gfx->device = device;
@@ -207,6 +232,7 @@ Graphics* create_metal_graphics_layer(void* metal_layer, const Config& config) {
 
         layer.pixelFormat = get_metal_format_from_color_bits(config.color_bits);
         layer.framebufferOnly = YES;
+        configure_layer_vsync(layer, resolve_swap_mode(config));
 
         GraphicsMetal* gfx = new GraphicsMetal();
         gfx->device = device;

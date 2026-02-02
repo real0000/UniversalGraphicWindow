@@ -93,6 +93,31 @@ static bool parse_backend_cstr(const char* value, Backend* out) {
     }
     return false;
 }
+
+static bool parse_swap_mode_cstr(const char* value, SwapMode* out) {
+    if (!value || !out) return false;
+    if (strcmp(value, "fifo") == 0 || strcmp(value, "Fifo") == 0 || strcmp(value, "vsync") == 0) {
+        *out = SwapMode::Fifo;
+        return true;
+    }
+    if (strcmp(value, "fifo_relaxed") == 0 || strcmp(value, "FifoRelaxed") == 0 || strcmp(value, "adaptive") == 0) {
+        *out = SwapMode::FifoRelaxed;
+        return true;
+    }
+    if (strcmp(value, "mailbox") == 0 || strcmp(value, "Mailbox") == 0 || strcmp(value, "triple_buffer") == 0) {
+        *out = SwapMode::Mailbox;
+        return true;
+    }
+    if (strcmp(value, "immediate") == 0 || strcmp(value, "Immediate") == 0 || strcmp(value, "no_vsync") == 0) {
+        *out = SwapMode::Immediate;
+        return true;
+    }
+    if (strcmp(value, "auto") == 0 || strcmp(value, "Auto") == 0) {
+        *out = SwapMode::Auto;
+        return true;
+    }
+    return false;
+}
 #endif
 
 #ifdef WINDOW_USE_BOOST_INI
@@ -127,6 +152,34 @@ static bool parse_backend(const std::string& value, Backend* out) {
     }
     return false;
 }
+
+static bool parse_swap_mode_boost(const std::string& value, SwapMode* out) {
+    if (!out) return false;
+    std::string lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+    if (lower == "fifo" || lower == "vsync") {
+        *out = SwapMode::Fifo;
+        return true;
+    }
+    if (lower == "fifo_relaxed" || lower == "adaptive") {
+        *out = SwapMode::FifoRelaxed;
+        return true;
+    }
+    if (lower == "mailbox" || lower == "triple_buffer") {
+        *out = SwapMode::Mailbox;
+        return true;
+    }
+    if (lower == "immediate" || lower == "no_vsync") {
+        *out = SwapMode::Immediate;
+        return true;
+    }
+    if (lower == "auto") {
+        *out = SwapMode::Auto;
+        return true;
+    }
+    return false;
+}
 #endif
 
 static const char* backend_to_config_string(Backend backend) {
@@ -139,6 +192,69 @@ static const char* backend_to_config_string(Backend backend) {
         case Backend::Metal: return "metal";
         default: return "auto";
     }
+}
+
+static const char* swap_mode_to_config_string(SwapMode mode) {
+    switch (mode) {
+        case SwapMode::Fifo: return "fifo";
+        case SwapMode::FifoRelaxed: return "fifo_relaxed";
+        case SwapMode::Mailbox: return "mailbox";
+        case SwapMode::Immediate: return "immediate";
+        case SwapMode::Auto: return "auto";
+        default: return "auto";
+    }
+}
+
+//=============================================================================
+// Public API - SwapMode string conversion
+//=============================================================================
+
+const char* swap_mode_to_string(SwapMode mode) {
+    switch (mode) {
+        case SwapMode::Fifo: return "Fifo";
+        case SwapMode::FifoRelaxed: return "FifoRelaxed";
+        case SwapMode::Mailbox: return "Mailbox";
+        case SwapMode::Immediate: return "Immediate";
+        case SwapMode::Auto: return "Auto";
+        default: return "Auto";
+    }
+}
+
+bool parse_swap_mode(const char* value, SwapMode* out) {
+    if (!value || !out) return false;
+
+    // Case-insensitive comparison
+    auto lower_equal = [](const char* a, const char* b) {
+        while (*a && *b) {
+            char ca = (*a >= 'A' && *a <= 'Z') ? (*a + 32) : *a;
+            char cb = (*b >= 'A' && *b <= 'Z') ? (*b + 32) : *b;
+            if (ca != cb) return false;
+            a++; b++;
+        }
+        return *a == *b;
+    };
+
+    if (lower_equal(value, "fifo") || lower_equal(value, "vsync")) {
+        *out = SwapMode::Fifo;
+        return true;
+    }
+    if (lower_equal(value, "fifo_relaxed") || lower_equal(value, "fiforelaxed") || lower_equal(value, "adaptive")) {
+        *out = SwapMode::FifoRelaxed;
+        return true;
+    }
+    if (lower_equal(value, "mailbox") || lower_equal(value, "triple_buffer") || lower_equal(value, "triplebuffer")) {
+        *out = SwapMode::Mailbox;
+        return true;
+    }
+    if (lower_equal(value, "immediate") || lower_equal(value, "no_vsync") || lower_equal(value, "novsync")) {
+        *out = SwapMode::Immediate;
+        return true;
+    }
+    if (lower_equal(value, "auto")) {
+        *out = SwapMode::Auto;
+        return true;
+    }
+    return false;
 }
 
 //=============================================================================
@@ -154,6 +270,7 @@ bool Config::save(const char* filepath) const {
         tree.put("graphics.backend", backend_to_config_string(backend));
         tree.put("graphics.device_index", device_index);
         tree.put("graphics.device_name", device_name);
+        tree.put("graphics.swap_mode", swap_mode_to_config_string(swap_mode));
         tree.put("graphics.vsync", vsync);
         tree.put("graphics.samples", samples);
         tree.put("graphics.back_buffers", back_buffers);
@@ -191,6 +308,7 @@ bool Config::save(const char* filepath) const {
         file << "backend = " << tree.get<std::string>("graphics.backend") << "\n";
         file << "device_index = " << tree.get<int>("graphics.device_index") << "\n";
         file << "device_name = " << tree.get<std::string>("graphics.device_name") << "\n";
+        file << "swap_mode = " << tree.get<std::string>("graphics.swap_mode") << "\n";
         file << "vsync = " << (tree.get<bool>("graphics.vsync") ? "true" : "false") << "\n";
         file << "samples = " << tree.get<int>("graphics.samples") << "\n";
         file << "back_buffers = " << tree.get<int>("graphics.back_buffers") << "\n";
@@ -232,6 +350,7 @@ bool Config::save(const char* filepath) const {
     fprintf(file, "backend = %s\n", backend_to_config_string(backend));
     fprintf(file, "device_index = %d\n", device_index);
     fprintf(file, "device_name = %s\n", device_name);
+    fprintf(file, "swap_mode = %s\n", swap_mode_to_config_string(swap_mode));
     fprintf(file, "vsync = %s\n", vsync ? "true" : "false");
     fprintf(file, "samples = %d\n", samples);
     fprintf(file, "back_buffers = %d\n", back_buffers);
@@ -285,6 +404,9 @@ bool Config::load(const char* filepath, Config* out_config) {
             std::string device_name_str = graphics->get<std::string>("device_name", "");
             strncpy(out_config->device_name, device_name_str.c_str(), MAX_DEVICE_NAME_LENGTH - 1);
             out_config->device_name[MAX_DEVICE_NAME_LENGTH - 1] = '\0';
+
+            std::string swap_mode_str = graphics->get<std::string>("swap_mode", "auto");
+            parse_swap_mode_boost(swap_mode_str, &out_config->swap_mode);
 
             out_config->vsync = graphics->get<bool>("vsync", true);
             out_config->samples = graphics->get<int>("samples", 1);
@@ -413,6 +535,8 @@ bool Config::load(const char* filepath, Config* out_config) {
                 parse_int(value, &out_config->device_index);
             } else if (strcmp(key, "device_name") == 0) {
                 strncpy(out_config->device_name, value, MAX_DEVICE_NAME_LENGTH - 1);
+            } else if (strcmp(key, "swap_mode") == 0) {
+                parse_swap_mode_cstr(value, &out_config->swap_mode);
             } else if (strcmp(key, "vsync") == 0) {
                 parse_bool(value, &out_config->vsync);
             } else if (strcmp(key, "samples") == 0) {

@@ -103,6 +103,19 @@ enum class Backend {
     Metal
 };
 
+// Swap chain presentation mode
+enum class SwapMode : uint8_t {
+    Fifo = 0,           // VSync ON - wait for vertical blank (default, no tearing)
+    FifoRelaxed,        // Adaptive VSync - like Fifo but may tear if frame is late
+    Mailbox,            // Triple buffering - low latency, no tearing (if supported)
+    Immediate,          // VSync OFF - no waiting, lowest latency, may tear
+    Auto                // Auto-select based on vsync preference
+};
+
+// SwapMode string conversion
+const char* swap_mode_to_string(SwapMode mode);
+bool parse_swap_mode(const char* value, SwapMode* out);
+
 // Standard cursor types supported across platforms
 enum class CursorType : uint8_t {
     Arrow = 0,          // Default arrow cursor
@@ -523,7 +536,8 @@ struct Config {
     char device_name[MAX_DEVICE_NAME_LENGTH] = {};  // For validation
 
     // Rendering settings
-    bool vsync = true;
+    SwapMode swap_mode = SwapMode::Auto;  // Swap chain presentation mode
+    bool vsync = true;              // Used when swap_mode is Auto
     int samples = 1;                // MSAA (1, 2, 4, 8)
     int back_buffers = 2;           // 2 = double buffering, 3 = triple
 
@@ -598,7 +612,8 @@ struct ExternalWindowConfig {
     int height = 0;
 
     // Graphics settings
-    bool vsync = true;
+    SwapMode swap_mode = SwapMode::Auto;  // Swap chain presentation mode
+    bool vsync = true;      // Used when swap_mode is Auto
     int samples = 1;        // MSAA samples (1 = disabled)
     int red_bits = 8;
     int green_bits = 8;

@@ -74,7 +74,8 @@ struct Config {
     Backend backend = Backend::Auto;
     int device_index = -1;
     char device_name[MAX_DEVICE_NAME_LENGTH] = {};
-    bool vsync = true;
+    SwapMode swap_mode = SwapMode::Auto;  // Presentation mode
+    bool vsync = true;    // Used when swap_mode is Auto
     int samples = 1;
     int back_buffers = 2;
     int color_bits = 32;
@@ -93,6 +94,13 @@ struct Config {
     WindowConfigEntry* find_window(const char* name);
 };
 ```
+
+SwapMode values:
+- `Fifo` - VSync ON, wait for vertical blank (no tearing)
+- `FifoRelaxed` - Adaptive VSync, may tear if frame is late
+- `Mailbox` - Triple buffering, low latency, no tearing
+- `Immediate` - VSync OFF, lowest latency, may tear
+- `Auto` - Uses `vsync` bool to determine mode
 
 Window-specific settings are in `WindowConfigEntry`:
 ```cpp
@@ -116,7 +124,8 @@ struct WindowConfigEntry {
 backend = auto
 device_index = -1
 device_name =
-vsync = true
+swap_mode = auto    # fifo, fifo_relaxed, mailbox, immediate, auto
+vsync = true        # Used when swap_mode = auto
 samples = 1
 back_buffers = 2
 color_bits = 32

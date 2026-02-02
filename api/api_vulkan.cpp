@@ -234,21 +234,51 @@ static VkSurfaceFormatKHR choose_surface_format(VkPhysicalDevice device, VkSurfa
     return formats[0];
 }
 
-static VkPresentModeKHR choose_present_mode(VkPhysicalDevice device, VkSurfaceKHR surface, bool vsync) {
+// Helper to resolve swap mode from config
+static SwapMode resolve_swap_mode(const Config& config) {
+    if (config.swap_mode != SwapMode::Auto) {
+        return config.swap_mode;
+    }
+    return config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
+}
+
+static VkPresentModeKHR choose_present_mode(VkPhysicalDevice device, VkSurfaceKHR surface, SwapMode swap_mode) {
     uint32_t mode_count;
     vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &mode_count, nullptr);
     std::vector<VkPresentModeKHR> modes(mode_count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &mode_count, modes.data());
 
-    if (!vsync) {
+    auto has_mode = [&modes](VkPresentModeKHR target) {
         for (const auto& mode : modes) {
-            if (mode == VK_PRESENT_MODE_MAILBOX_KHR) return mode;
+            if (mode == target) return true;
         }
-        for (const auto& mode : modes) {
-            if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) return mode;
-        }
+        return false;
+    };
+
+    switch (swap_mode) {
+        case SwapMode::Immediate:
+            if (has_mode(VK_PRESENT_MODE_IMMEDIATE_KHR)) return VK_PRESENT_MODE_IMMEDIATE_KHR;
+            // Fallback to mailbox if immediate not available
+            if (has_mode(VK_PRESENT_MODE_MAILBOX_KHR)) return VK_PRESENT_MODE_MAILBOX_KHR;
+            break;
+
+        case SwapMode::Mailbox:
+            if (has_mode(VK_PRESENT_MODE_MAILBOX_KHR)) return VK_PRESENT_MODE_MAILBOX_KHR;
+            // Fallback to FIFO if mailbox not available
+            break;
+
+        case SwapMode::FifoRelaxed:
+            if (has_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR)) return VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+            // Fallback to regular FIFO
+            break;
+
+        case SwapMode::Fifo:
+        case SwapMode::Auto:
+        default:
+            break;
     }
 
+    // FIFO is always supported
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -324,7 +354,7 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
     }
 
     VkSurfaceFormatKHR surface_format = choose_surface_format(physical_device, surface, config);
-    VkPresentModeKHR present_mode = choose_present_mode(physical_device, surface, config.vsync);
+    VkPresentModeKHR present_mode = choose_present_mode(physical_device, surface, resolve_swap_mode(config));
 
     // Create swapchain
     VkSwapchainCreateInfoKHR swapchain_info = {};
