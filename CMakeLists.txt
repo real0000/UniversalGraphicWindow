@@ -21,6 +21,39 @@ option(WINDOW_ENABLE_METAL "Enable Metal support (Apple only)" ON)
 # Gamepad API options (Windows only)
 option(WINDOW_ENABLE_DINPUT "Use DirectInput for gamepad support instead of XInput (Windows only)" OFF)
 
+# Audio options
+option(WINDOW_ENABLE_AUDIO "Enable audio support" ON)
+option(WINDOW_ENABLE_OPENAL "Enable OpenAL Soft audio backend (cross-platform)" OFF)
+
+# Audio decoder options (each downloads its respective library via FetchContent)
+option(WINDOW_ENABLE_MP3_DECODER "Enable MP3 decoder (minimp3)" OFF)
+option(WINDOW_ENABLE_VORBIS_DECODER "Enable OGG Vorbis decoder (stb_vorbis)" OFF)
+option(WINDOW_ENABLE_FLAC_DECODER "Enable FLAC decoder (dr_flac)" OFF)
+
+#=============================================================================
+# FetchContent Configuration (git progress always enabled)
+#=============================================================================
+
+include(FetchContent)
+set(FETCHCONTENT_QUIET OFF CACHE BOOL "" FORCE)
+
+# Helper function to declare FetchContent with git progress
+# Usage: window_fetch_content(name GIT_REPOSITORY url GIT_TAG tag [other args...])
+function(window_fetch_content name)
+    set(options "")
+    set(oneValueArgs GIT_REPOSITORY GIT_TAG)
+    set(multiValueArgs "")
+    cmake_parse_arguments(FETCH "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    FetchContent_Declare(${name}
+        GIT_REPOSITORY ${FETCH_GIT_REPOSITORY}
+        GIT_TAG ${FETCH_GIT_TAG}
+        GIT_PROGRESS TRUE
+        GIT_SHALLOW TRUE
+        ${FETCH_UNPARSED_ARGUMENTS}
+    )
+endfunction()
+
 #=============================================================================
 # Platform Detection
 #=============================================================================
@@ -259,8 +292,161 @@ if(WINDOW_ENABLE_METAL AND (WINDOW_PLATFORM STREQUAL "MACOS" OR WINDOW_PLATFORM 
 endif()
 
 # Platform-specific dependencies
+#=============================================================================
+# Audio Backend Selection
+#=============================================================================
+
+if(WINDOW_ENABLE_AUDIO)
+    list(APPEND WINDOW_SOURCES audio/audio.cpp)
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_AUDIO)
+    message(STATUS "Audio support enabled")
+
+    # External audio decoders (each fetched individually)
+    set(WINDOW_AUDIO_DECODER_INCLUDES "")
+    set(AUDIO_DECODERS_ENABLED "")
+
+    # MP3 decoder (minimp3)
+    if(WINDOW_ENABLE_MP3_DECODER)
+        message(STATUS "Fetching MP3 decoder (minimp3)...")
+        window_fetch_content(minimp3
+            GIT_REPOSITORY https://github.com/lieff/minimp3.git
+            GIT_TAG master
+        )
+        FetchContent_MakeAvailable(minimp3)
+        list(APPEND WINDOW_AUDIO_DECODER_INCLUDES ${minimp3_SOURCE_DIR})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_MP3_DECODER)
+        list(APPEND AUDIO_DECODERS_ENABLED "MP3")
+    endif()
+
+    # OGG Vorbis decoder (stb_vorbis)
+    if(WINDOW_ENABLE_VORBIS_DECODER)
+        message(STATUS "Fetching OGG Vorbis decoder (stb_vorbis)...")
+        window_fetch_content(stb
+            GIT_REPOSITORY https://github.com/nothings/stb.git
+            GIT_TAG master
+        )
+        FetchContent_MakeAvailable(stb)
+        list(APPEND WINDOW_AUDIO_DECODER_INCLUDES ${stb_SOURCE_DIR})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VORBIS_DECODER)
+        list(APPEND AUDIO_DECODERS_ENABLED "OGG")
+    endif()
+
+    # FLAC decoder (dr_flac)
+    if(WINDOW_ENABLE_FLAC_DECODER)
+        message(STATUS "Fetching FLAC decoder (dr_flac)...")
+        window_fetch_content(dr_libs
+            GIT_REPOSITORY https://github.com/mackron/dr_libs.git
+            GIT_TAG master
+        )
+        FetchContent_MakeAvailable(dr_libs)
+        list(APPEND WINDOW_AUDIO_DECODER_INCLUDES ${dr_libs_SOURCE_DIR})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_FLAC_DECODER)
+        list(APPEND AUDIO_DECODERS_ENABLED "FLAC")
+    endif()
+
+    if(AUDIO_DECODERS_ENABLED)
+        string(REPLACE ";" ", " DECODERS_STR "${AUDIO_DECODERS_ENABLED}")
+        message(STATUS "Audio decoders: ${DECODERS_STR}")
+    endif()
+
+    # Check for OpenAL Soft (cross-platform option)
+    set(OPENAL_BACKEND_ENABLED FALSE)
+    if(WINDOW_ENABLE_OPENAL)
+        find_package(OpenAL QUIET)
+        if(NOT OpenAL_FOUND)
+            # Try pkg-config as fallback
+            find_package(PkgConfig QUIET)
+            if(PkgConfig_FOUND)
+                pkg_check_modules(OPENAL openal)
+                if(OPENAL_FOUND)
+                    set(OpenAL_FOUND TRUE)
+                    set(OPENAL_INCLUDE_DIR ${OPENAL_INCLUDE_DIRS})
+                    set(OPENAL_LIBRARY ${OPENAL_LIBRARIES})
+                endif()
+            endif()
+        endif()
+
+        if(OpenAL_FOUND OR OPENAL_FOUND)
+            list(APPEND WINDOW_SOURCES audio/audio_openal.cpp)
+            if(OPENAL_INCLUDE_DIR)
+                include_directories(${OPENAL_INCLUDE_DIR})
+            endif()
+            if(OPENAL_LIBRARY)
+                list(APPEND WINDOW_LIBS ${OPENAL_LIBRARY})
+            elseif(TARGET OpenAL::OpenAL)
+                list(APPEND WINDOW_LIBS OpenAL::OpenAL)
+            endif()
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENAL)
+            message(STATUS "Audio backend: OpenAL Soft (cross-platform)")
+            set(OPENAL_BACKEND_ENABLED TRUE)
+        else()
+            message(STATUS "OpenAL not found, falling back to native backend")
+        endif()
+    endif()
+
+    # Native platform backends (used if OpenAL not enabled or not found)
+    if(NOT OPENAL_BACKEND_ENABLED)
+        if(WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
+            # Windows: WASAPI
+            list(APPEND WINDOW_SOURCES audio/audio_wasapi.cpp)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_WASAPI)
+            message(STATUS "Audio backend: WASAPI")
+        elseif(APPLE)
+            # macOS/iOS: CoreAudio
+            list(APPEND WINDOW_SOURCES audio/audio_coreaudio.mm)
+            find_library(COREAUDIO_FRAMEWORK CoreAudio)
+            find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox)
+            list(APPEND WINDOW_LIBS ${COREAUDIO_FRAMEWORK} ${AUDIOTOOLBOX_FRAMEWORK})
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_COREAUDIO)
+            message(STATUS "Audio backend: CoreAudio")
+        elseif(ANDROID)
+            # Android: AAudio
+            list(APPEND WINDOW_SOURCES audio/audio_aaudio.cpp)
+            list(APPEND WINDOW_LIBS aaudio)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_AAUDIO)
+            message(STATUS "Audio backend: AAudio")
+        elseif(EMSCRIPTEN)
+            # WebAssembly: Web Audio API
+            list(APPEND WINDOW_SOURCES audio/audio_webaudio.cpp)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_WEBAUDIO)
+            message(STATUS "Audio backend: Web Audio")
+        elseif(UNIX)
+            # Linux: PulseAudio preferred, ALSA fallback
+            find_package(PkgConfig QUIET)
+            if(PkgConfig_FOUND)
+                pkg_check_modules(PULSEAUDIO libpulse)
+            endif()
+            if(PULSEAUDIO_FOUND)
+                list(APPEND WINDOW_SOURCES audio/audio_pulseaudio.cpp)
+                list(APPEND WINDOW_LIBS ${PULSEAUDIO_LIBRARIES})
+                include_directories(${PULSEAUDIO_INCLUDE_DIRS})
+                list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_PULSEAUDIO)
+                message(STATUS "Audio backend: PulseAudio")
+            else()
+                if(PkgConfig_FOUND)
+                    pkg_check_modules(ALSA alsa)
+                endif()
+                if(ALSA_FOUND)
+                    list(APPEND WINDOW_SOURCES audio/audio_alsa.cpp)
+                    list(APPEND WINDOW_LIBS ${ALSA_LIBRARIES})
+                    include_directories(${ALSA_INCLUDE_DIRS})
+                    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_ALSA)
+                    message(STATUS "Audio backend: ALSA")
+                else()
+                    message(STATUS "Audio: No backend found (PulseAudio or ALSA required)")
+                endif()
+            endif()
+        endif()
+    endif()
+else()
+    message(STATUS "Audio support disabled")
+endif()
+
+# Platform-specific dependencies
 if(WINDOW_PLATFORM STREQUAL "WIN32")
     list(APPEND WINDOW_LIBS user32 gdi32)
+    # Prevent Windows min/max macros from conflicting with std::min/std::max
+    list(APPEND WINDOW_DEFINES NOMINMAX)
 elseif(WINDOW_PLATFORM STREQUAL "UWP")
     # UWP uses Windows Runtime
 elseif(WINDOW_PLATFORM STREQUAL "X11")
@@ -319,6 +505,11 @@ target_include_directories(window PUBLIC
 
 target_compile_definitions(window PUBLIC ${WINDOW_DEFINES})
 target_link_libraries(window PUBLIC ${WINDOW_LIBS})
+
+# Add external audio decoder include directories
+if(WINDOW_AUDIO_DECODER_INCLUDES)
+    target_include_directories(window PRIVATE ${WINDOW_AUDIO_DECODER_INCLUDES})
+endif()
 
 # Enable Objective-C++ for Apple platforms
 if(APPLE)
@@ -396,6 +587,12 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         # Steering wheel example
         add_executable(example_wheel examples/wheel.cpp)
         target_link_libraries(example_wheel PRIVATE window)
+
+        # Audio example
+        if(WINDOW_ENABLE_AUDIO AND "WINDOW_SUPPORT_AUDIO" IN_LIST WINDOW_DEFINES)
+            add_executable(example_audio examples/audio.cpp)
+            target_link_libraries(example_audio PRIVATE window)
+        endif()
     endif()
 
     # Metal example (macOS only)
@@ -429,6 +626,13 @@ install(FILES
     input/input_wheel.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/input
 )
+
+if(WINDOW_ENABLE_AUDIO)
+    install(FILES
+        audio/audio.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/audio
+    )
+endif()
 
 install(EXPORT windowTargets
     FILE windowTargets.cmake
@@ -479,5 +683,6 @@ if(APPLE)
     message(STATUS "  Metal:       ${WINDOW_ENABLE_METAL}")
     message(STATUS "  Gamepad:     GCController")
 endif()
+message(STATUS "  Audio:       ${WINDOW_ENABLE_AUDIO}")
 message(STATUS "  Examples:    ${WINDOW_BUILD_EXAMPLES}")
 message(STATUS "")

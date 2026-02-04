@@ -28,8 +28,9 @@ cd build && ctest -C Release
 - `-DWINDOW_ENABLE_D3D12=ON|OFF` - Direct3D 12 (Windows only)
 - `-DWINDOW_ENABLE_METAL=ON|OFF` - Metal (Apple only)
 - `-DWINDOW_ENABLE_DINPUT=ON` - Use DirectInput for gamepad (Windows, default: XInput)
+- `-DWINDOW_ENABLE_AUDIO=ON|OFF` - Audio support (default: ON)
 
-Example executables are built as `example_basic`, `example_opengl`, `example_vulkan`, `example_d3d11`, `example_d3d12`, `example_metal`, `example_gamepad`, `example_wheel` in the build directory.
+Example executables are built as `example_basic`, `example_opengl`, `example_vulkan`, `example_d3d11`, `example_d3d12`, `example_metal`, `example_gamepad`, `example_wheel`, `example_audio` in the build directory.
 
 ### Dependencies
 
@@ -53,13 +54,25 @@ Example executables are built as `example_basic`, `example_opengl`, `example_vul
 │    Graphics Layer (api_*.cpp/mm)                        │
 │  OpenGL, OpenGL ES/EGL, Vulkan, D3D11, D3D12, Metal     │
 └─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│         Audio API (audio/audio.hpp)                     │
+│  AudioManager, AudioStream, AudioClip, AudioPlayer      │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────┴────────────────────────────────┐
+│    Audio Layer (audio/audio_*.cpp/mm)                   │
+│  WASAPI, CoreAudio, PulseAudio, ALSA, AAudio, WebAudio  │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### Key Files
 
 - **`window.hpp`** - Single public header (the only file consumers include)
+- **`audio/audio.hpp`** - Audio public header (independent audio module)
 - **`window/window_<platform>.cpp/mm`** - Platform implementations (Win32, X11, macOS, etc.)
 - **`api/api_<backend>.cpp/mm`** - Graphics backend implementations
+- **`audio/audio_<backend>.cpp/mm`** - Audio backend implementations
 - **`api/graphics_config.cpp`** - Config save/load (INI format) and multi-window creation
 - **`api/glad.c`, `api/glad.h`, `api/khrplatform.h`** - OpenGL loader (GLAD)
 - **`CMakeLists.txt`** - Build config with platform detection and graphics backend setup
@@ -159,6 +172,116 @@ std::vector<Window*> windows = Window::create(config, &result);
 std::vector<Window*> windows = Window::create_from_config("config.ini", &result);
 ```
 
+### Audio System
+
+The audio system is independent and can be used without the window system. Include `audio/audio.hpp`.
+
+```cpp
+#include "audio/audio.hpp"
+using namespace window::audio;
+
+// Initialize audio system
+AudioResult result = AudioManager::initialize(AudioBackend::Auto);
+
+// Enumerate devices
+AudioDeviceEnumeration devices;
+AudioManager::enumerate_devices(AudioDeviceType::Output, &devices);
+
+// Create a low-latency audio stream
+AudioStreamConfig config;
+config.format = AudioFormat::default_format();  // 48kHz, stereo, float32
+config.mode = AudioStreamMode::Playback;
+
+AudioStream* stream = AudioStream::create(config, &result);
+stream->set_callback(&my_callback);  // IAudioCallback implementation
+stream->start();
+
+// ... when done
+stream->stop();
+stream->destroy();
+AudioManager::shutdown();
+```
+
+Audio backends by platform:
+| Platform | Backend | Notes |
+|----------|---------|-------|
+| Windows | WASAPI | Low-latency, exclusive mode support |
+| macOS/iOS | CoreAudio | AudioUnit for streaming |
+| Linux | PulseAudio | Primary, most common |
+| Linux | ALSA | Fallback if PulseAudio unavailable |
+| Android | AAudio | Android 8.0+, low latency |
+| WASM | Web Audio | AudioWorklet / ScriptProcessorNode |
+| Cross-platform | OpenAL Soft | Use `-DWINDOW_ENABLE_OPENAL=ON` |
+
+### Audio Config File Format (INI)
+
+```ini
+[audio]
+backend = auto              # auto, wasapi, coreaudio, pulseaudio, alsa, aaudio, webaudio, openal
+output_device_index = -1    # -1 = default device
+output_device_name =
+input_device_index = -1
+input_device_name =
+sample_rate = 48000         # 8000-192000
+channels = 2                # 1-8
+sample_format = float32     # int16, int24, int32, float32
+buffer_frames = 0           # 0 = auto
+exclusive_mode = false
+master_volume = 1.0         # 0.0-1.0
+```
+
+```cpp
+// Save/load audio config
+AudioConfig audio_config;
+AudioConfig::load("audio.ini", &audio_config);
+audio_config.save("audio.ini");
+```
+
+### Audio File Streaming
+
+For large audio files (music, ambient sounds), use `AudioFileStream` to avoid loading the entire file into memory:
+
+```cpp
+#include "audio/audio.hpp"
+using namespace window::audio;
+
+// Open file for streaming
+AudioFileStream* file_stream = AudioFileStream::open("music.wav", &result);
+
+// Create streaming callback helper
+StreamingAudioCallback streaming_callback;
+streaming_callback.set_source(file_stream, true);  // Takes ownership
+streaming_callback.set_looping(true);
+streaming_callback.set_volume(0.8f);
+
+// Use with AudioStream
+AudioStreamConfig config;
+config.format = file_stream->get_format();  // Match file format
+config.mode = AudioStreamMode::Playback;
+
+AudioStream* stream = AudioStream::create(config, &result);
+stream->set_callback(&streaming_callback);
+stream->start();
+
+// Manual streaming (alternative approach)
+AudioFileStream* file = AudioFileStream::open("sound.wav", &result);
+const AudioFormat& fmt = file->get_format();
+
+// Read frames in chunks
+float buffer[1024 * 2];  // 1024 stereo frames
+while (!file->is_end_of_stream()) {
+    int frames_read = file->read_frames(buffer, 1024);
+    // Process frames...
+}
+
+// Seek support
+file->seek(0, AudioSeekOrigin::Begin);    // Rewind
+file->seek(44100, AudioSeekOrigin::Begin); // Seek to 1 second
+file->rewind();                            // Same as seek(0, Begin)
+
+file->close();
+```
+
 ### Platform Detection
 
 CMake sets `WINDOW_PLATFORM` and selects the appropriate source file:
@@ -183,8 +306,10 @@ On Wayland, multi-window support uses a compositor-style architecture:
 - **Public API changes**: Edit `window.hpp`. Keep ABI-stable, avoid heavy dependencies.
 - **New platform**: Add `window/window_<platform>.cpp`, update CMakeLists platform detection branch.
 - **New graphics backend**: Add `api/api_<backend>.cpp`, follow existing patterns for `WINDOW_SUPPORT_*` guards.
+- **New audio backend**: Add `audio/audio_<backend>.cpp`, follow existing patterns for `WINDOW_SUPPORT_*` guards.
 - **Apple platforms**: Objective-C++ files (`.mm`) are auto-configured with `-x objective-c++`.
 - **Config changes**: Update `api/graphics_config.cpp` for INI save/load (both Boost and fallback paths).
+- **Audio config changes**: Update `audio/audio.cpp` for INI save/load in `AudioConfig` methods.
 
 ### Directory Structure
 
@@ -213,6 +338,16 @@ UniversalGraphicWindow/
 │   ├── glad.c
 │   ├── glad.h
 │   └── khrplatform.h
+├── audio/              # Audio backends
+│   ├── audio.hpp            # Audio public header
+│   ├── audio.cpp            # Platform-independent utilities
+│   ├── audio_wasapi.cpp     # Windows WASAPI
+│   ├── audio_coreaudio.mm   # macOS/iOS CoreAudio
+│   ├── audio_pulseaudio.cpp # Linux PulseAudio
+│   ├── audio_alsa.cpp       # Linux ALSA
+│   ├── audio_aaudio.cpp     # Android AAudio
+│   ├── audio_webaudio.cpp   # WebAssembly Web Audio
+│   └── audio_openal.cpp     # OpenAL Soft (cross-platform)
 ├── input/              # Input device handling
 │   ├── input_keyboard.cpp/.hpp
 │   ├── input_mouse.cpp/.hpp
@@ -236,5 +371,6 @@ UniversalGraphicWindow/
 
 - Platform implementations: `window/window_<lowercase_platform>.cpp` or `.mm`
 - Graphics backends: `api/api_<backend>.cpp` or `.mm`
+- Audio backends: `audio/audio_<backend>.cpp` or `.mm`
 - Input handlers: `input/<device>_<backend>.cpp`
 - Library target: `window` (static)
