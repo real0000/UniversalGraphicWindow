@@ -21,11 +21,336 @@ namespace audio {
 // Global State
 // ============================================================================
 
+static constexpr int MAX_SESSION_EVENT_HANDLERS = 16;
+
 static struct {
     bool initialized = false;
     AudioBackend backend = AudioBackend::CoreAudio;
     std::mutex mutex;
+
+    // Session event handlers
+    IAudioSessionEventHandler* session_handlers[MAX_SESSION_EVENT_HANDLERS] = {};
+    int session_handler_count = 0;
+    std::mutex session_mutex;
+
+#if TARGET_OS_IPHONE
+    id interruption_observer = nil;
+    id route_change_observer = nil;
+    id media_reset_observer = nil;
+    id silence_secondary_observer = nil;
+#endif
 } g_audio_state;
+
+// ============================================================================
+// Session Event Notification
+// ============================================================================
+
+static void notify_session_event(const AudioSessionEventData& event_data) {
+    std::lock_guard<std::mutex> lock(g_audio_state.session_mutex);
+    for (int i = 0; i < g_audio_state.session_handler_count; ++i) {
+        if (g_audio_state.session_handlers[i]) {
+            g_audio_state.session_handlers[i]->on_audio_session_event(event_data);
+        }
+    }
+}
+
+#if TARGET_OS_IPHONE
+// ============================================================================
+// iOS Audio Session Notification Handlers
+// ============================================================================
+
+static void setup_ios_session_observers() {
+    NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+
+    // Interruption notifications
+    g_audio_state.interruption_observer = [center addObserverForName:AVAudioSessionInterruptionNotification
+                                                              object:nil
+                                                               queue:[NSOperationQueue mainQueue]
+                                                          usingBlock:^(NSNotification* notification) {
+        NSDictionary* info = notification.userInfo;
+        AVAudioSessionInterruptionType type = (AVAudioSessionInterruptionType)
+            [[info objectForKey:AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+
+        AudioSessionEventData event_data;
+
+        if (type == AVAudioSessionInterruptionTypeBegan) {
+            event_data.event = AudioSessionEvent::InterruptionBegan;
+        } else {
+            event_data.event = AudioSessionEvent::InterruptionEnded;
+
+            NSNumber* optionNumber = [info objectForKey:AVAudioSessionInterruptionOptionKey];
+            if (optionNumber) {
+                AVAudioSessionInterruptionOptions options = [optionNumber unsignedIntegerValue];
+                if (options & AVAudioSessionInterruptionOptionShouldResume) {
+                    event_data.interruption_option = AudioInterruptionOption::ShouldResume;
+                }
+            }
+        }
+
+        notify_session_event(event_data);
+    }];
+
+    // Route change notifications
+    g_audio_state.route_change_observer = [center addObserverForName:AVAudioSessionRouteChangeNotification
+                                                              object:nil
+                                                               queue:[NSOperationQueue mainQueue]
+                                                          usingBlock:^(NSNotification* notification) {
+        NSDictionary* info = notification.userInfo;
+        AVAudioSessionRouteChangeReason reason = (AVAudioSessionRouteChangeReason)
+            [[info objectForKey:AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+
+        AudioSessionEventData event_data;
+
+        switch (reason) {
+            case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
+                event_data.event = AudioSessionEvent::RouteChangeNewDeviceAvailable;
+                event_data.route_change_reason = AudioRouteChangeReason::NewDeviceAvailable;
+                break;
+            case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
+                event_data.event = AudioSessionEvent::RouteChangeOldDeviceUnavailable;
+                event_data.route_change_reason = AudioRouteChangeReason::OldDeviceUnavailable;
+                break;
+            case AVAudioSessionRouteChangeReasonCategoryChange:
+                event_data.event = AudioSessionEvent::RouteChangeCategoryChange;
+                event_data.route_change_reason = AudioRouteChangeReason::CategoryChange;
+                break;
+            case AVAudioSessionRouteChangeReasonOverride:
+                event_data.event = AudioSessionEvent::RouteChangeOverride;
+                event_data.route_change_reason = AudioRouteChangeReason::Override;
+                break;
+            case AVAudioSessionRouteChangeReasonWakeFromSleep:
+                event_data.event = AudioSessionEvent::RouteChangeWakeFromSleep;
+                event_data.route_change_reason = AudioRouteChangeReason::WakeFromSleep;
+                break;
+            case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
+                event_data.event = AudioSessionEvent::RouteChangeNoSuitableRouteForCategory;
+                event_data.route_change_reason = AudioRouteChangeReason::NoSuitableRouteForCategory;
+                break;
+            case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
+                event_data.event = AudioSessionEvent::RouteChangeRouteConfigurationChange;
+                event_data.route_change_reason = AudioRouteChangeReason::RouteConfigurationChange;
+                break;
+            default:
+                event_data.event = AudioSessionEvent::RouteChangeNewDeviceAvailable;
+                event_data.route_change_reason = AudioRouteChangeReason::Unknown;
+                break;
+        }
+
+        // Get previous route info
+        AVAudioSessionRouteDescription* previousRoute = [info objectForKey:AVAudioSessionRouteChangePreviousRouteKey];
+        if (previousRoute && previousRoute.outputs.count > 0) {
+            AVAudioSessionPortDescription* port = previousRoute.outputs.firstObject;
+            if (port.portName) {
+                strncpy(event_data.previous_device_name, [port.portName UTF8String],
+                        MAX_AUDIO_DEVICE_NAME_LENGTH - 1);
+            }
+        }
+
+        // Get current route info
+        AVAudioSession* session = [AVAudioSession sharedInstance];
+        AVAudioSessionRouteDescription* currentRoute = session.currentRoute;
+        if (currentRoute && currentRoute.outputs.count > 0) {
+            AVAudioSessionPortDescription* port = currentRoute.outputs.firstObject;
+            if (port.portName) {
+                strncpy(event_data.new_device_name, [port.portName UTF8String],
+                        MAX_AUDIO_DEVICE_NAME_LENGTH - 1);
+            }
+        }
+
+        notify_session_event(event_data);
+    }];
+
+    // Media services reset notifications
+    g_audio_state.media_reset_observer = [center addObserverForName:AVAudioSessionMediaServicesWereResetNotification
+                                                             object:nil
+                                                              queue:[NSOperationQueue mainQueue]
+                                                         usingBlock:^(NSNotification* notification) {
+        (void)notification;
+        AudioSessionEventData event_data;
+        event_data.event = AudioSessionEvent::MediaServicesWereReset;
+        notify_session_event(event_data);
+    }];
+
+    // Silence secondary audio hint
+    g_audio_state.silence_secondary_observer = [center addObserverForName:AVAudioSessionSilenceSecondaryAudioHintNotification
+                                                                   object:nil
+                                                                    queue:[NSOperationQueue mainQueue]
+                                                               usingBlock:^(NSNotification* notification) {
+        NSDictionary* info = notification.userInfo;
+        AVAudioSessionSilenceSecondaryAudioHintType type = (AVAudioSessionSilenceSecondaryAudioHintType)
+            [[info objectForKey:AVAudioSessionSilenceSecondaryAudioHintTypeKey] unsignedIntegerValue];
+
+        AudioSessionEventData event_data;
+        if (type == AVAudioSessionSilenceSecondaryAudioHintTypeBegin) {
+            event_data.event = AudioSessionEvent::SilenceSecondaryAudioHintBegan;
+        } else {
+            event_data.event = AudioSessionEvent::SilenceSecondaryAudioHintEnded;
+        }
+        notify_session_event(event_data);
+    }];
+}
+
+static void teardown_ios_session_observers() {
+    NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+
+    if (g_audio_state.interruption_observer) {
+        [center removeObserver:g_audio_state.interruption_observer];
+        g_audio_state.interruption_observer = nil;
+    }
+    if (g_audio_state.route_change_observer) {
+        [center removeObserver:g_audio_state.route_change_observer];
+        g_audio_state.route_change_observer = nil;
+    }
+    if (g_audio_state.media_reset_observer) {
+        [center removeObserver:g_audio_state.media_reset_observer];
+        g_audio_state.media_reset_observer = nil;
+    }
+    if (g_audio_state.silence_secondary_observer) {
+        [center removeObserver:g_audio_state.silence_secondary_observer];
+        g_audio_state.silence_secondary_observer = nil;
+    }
+}
+
+#else // macOS
+
+// ============================================================================
+// macOS Audio Hardware Listeners
+// ============================================================================
+
+static OSStatus default_output_device_changed_listener(AudioObjectID inObjectID,
+                                                       UInt32 inNumberAddresses,
+                                                       const AudioObjectPropertyAddress* inAddresses,
+                                                       void* inClientData) {
+    (void)inObjectID; (void)inNumberAddresses; (void)inAddresses; (void)inClientData;
+
+    AudioSessionEventData event_data;
+    event_data.event = AudioSessionEvent::DefaultOutputDeviceChanged;
+
+    // Get current device name
+    AudioObjectPropertyAddress addr = {
+        .mSelector = kAudioHardwarePropertyDefaultOutputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+
+    AudioDeviceID device_id = 0;
+    UInt32 size = sizeof(device_id);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &device_id) == noErr) {
+        CFStringRef name_ref = nullptr;
+        addr.mSelector = kAudioDevicePropertyDeviceNameCFString;
+        size = sizeof(name_ref);
+        if (AudioObjectGetPropertyData(device_id, &addr, 0, nullptr, &size, &name_ref) == noErr && name_ref) {
+            CFStringGetCString(name_ref, event_data.new_device_name,
+                               MAX_AUDIO_DEVICE_NAME_LENGTH, kCFStringEncodingUTF8);
+            CFRelease(name_ref);
+        }
+    }
+
+    notify_session_event(event_data);
+    return noErr;
+}
+
+static OSStatus default_input_device_changed_listener(AudioObjectID inObjectID,
+                                                      UInt32 inNumberAddresses,
+                                                      const AudioObjectPropertyAddress* inAddresses,
+                                                      void* inClientData) {
+    (void)inObjectID; (void)inNumberAddresses; (void)inAddresses; (void)inClientData;
+
+    AudioSessionEventData event_data;
+    event_data.event = AudioSessionEvent::DefaultInputDeviceChanged;
+
+    // Get current device name
+    AudioObjectPropertyAddress addr = {
+        .mSelector = kAudioHardwarePropertyDefaultInputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+
+    AudioDeviceID device_id = 0;
+    UInt32 size = sizeof(device_id);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &device_id) == noErr) {
+        CFStringRef name_ref = nullptr;
+        addr.mSelector = kAudioDevicePropertyDeviceNameCFString;
+        size = sizeof(name_ref);
+        if (AudioObjectGetPropertyData(device_id, &addr, 0, nullptr, &size, &name_ref) == noErr && name_ref) {
+            CFStringGetCString(name_ref, event_data.new_device_name,
+                               MAX_AUDIO_DEVICE_NAME_LENGTH, kCFStringEncodingUTF8);
+            CFRelease(name_ref);
+        }
+    }
+
+    notify_session_event(event_data);
+    return noErr;
+}
+
+static OSStatus device_list_changed_listener(AudioObjectID inObjectID,
+                                             UInt32 inNumberAddresses,
+                                             const AudioObjectPropertyAddress* inAddresses,
+                                             void* inClientData) {
+    (void)inObjectID; (void)inNumberAddresses; (void)inAddresses; (void)inClientData;
+
+    AudioSessionEventData event_data;
+    event_data.event = AudioSessionEvent::DeviceListChanged;
+    notify_session_event(event_data);
+    return noErr;
+}
+
+static void setup_macos_audio_listeners() {
+    // Default output device changed
+    AudioObjectPropertyAddress addr_output = {
+        .mSelector = kAudioHardwarePropertyDefaultOutputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+    AudioObjectAddPropertyListener(kAudioObjectSystemObject, &addr_output,
+                                   default_output_device_changed_listener, nullptr);
+
+    // Default input device changed
+    AudioObjectPropertyAddress addr_input = {
+        .mSelector = kAudioHardwarePropertyDefaultInputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+    AudioObjectAddPropertyListener(kAudioObjectSystemObject, &addr_input,
+                                   default_input_device_changed_listener, nullptr);
+
+    // Device list changed
+    AudioObjectPropertyAddress addr_devices = {
+        .mSelector = kAudioHardwarePropertyDevices,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+    AudioObjectAddPropertyListener(kAudioObjectSystemObject, &addr_devices,
+                                   device_list_changed_listener, nullptr);
+}
+
+static void teardown_macos_audio_listeners() {
+    AudioObjectPropertyAddress addr_output = {
+        .mSelector = kAudioHardwarePropertyDefaultOutputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+    AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &addr_output,
+                                      default_output_device_changed_listener, nullptr);
+
+    AudioObjectPropertyAddress addr_input = {
+        .mSelector = kAudioHardwarePropertyDefaultInputDevice,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+    AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &addr_input,
+                                      default_input_device_changed_listener, nullptr);
+
+    AudioObjectPropertyAddress addr_devices = {
+        .mSelector = kAudioHardwarePropertyDevices,
+        .mScope = kAudioObjectPropertyScopeGlobal,
+        .mElement = kAudioObjectPropertyElementMain
+    };
+    AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &addr_devices,
+                                      device_list_changed_listener, nullptr);
+}
+
+#endif // TARGET_OS_IPHONE
 
 // ============================================================================
 // AudioStream::Impl
@@ -520,7 +845,13 @@ AudioResult AudioManager::initialize(AudioBackend backend) {
         NSError* error = nil;
         [session setCategory:AVAudioSessionCategoryPlayback error:&error];
         [session setActive:YES error:&error];
+
+        // Set up iOS session observers
+        setup_ios_session_observers();
     }
+#else
+    // Set up macOS audio hardware listeners
+    setup_macos_audio_listeners();
 #endif
 
     g_audio_state.backend = AudioBackend::CoreAudio;
@@ -531,6 +862,28 @@ AudioResult AudioManager::initialize(AudioBackend backend) {
 
 void AudioManager::shutdown() {
     std::lock_guard<std::mutex> lock(g_audio_state.mutex);
+
+    if (!g_audio_state.initialized) {
+        return;
+    }
+
+#if TARGET_OS_IPHONE
+    @autoreleasepool {
+        teardown_ios_session_observers();
+    }
+#else
+    teardown_macos_audio_listeners();
+#endif
+
+    // Clear session handlers
+    {
+        std::lock_guard<std::mutex> session_lock(g_audio_state.session_mutex);
+        for (int i = 0; i < MAX_SESSION_EVENT_HANDLERS; ++i) {
+            g_audio_state.session_handlers[i] = nullptr;
+        }
+        g_audio_state.session_handler_count = 0;
+    }
+
     g_audio_state.initialized = false;
 }
 
@@ -639,6 +992,48 @@ bool AudioManager::is_format_supported(int device_index, const AudioFormat& form
 AudioFormat AudioManager::get_preferred_format(int device_index, AudioDeviceType type) {
     (void)device_index; (void)type;
     return AudioFormat::default_format();
+}
+
+bool AudioManager::register_session_event_handler(IAudioSessionEventHandler* handler) {
+    if (!handler) return false;
+
+    std::lock_guard<std::mutex> lock(g_audio_state.session_mutex);
+
+    // Check if already registered
+    for (int i = 0; i < g_audio_state.session_handler_count; ++i) {
+        if (g_audio_state.session_handlers[i] == handler) {
+            return true;  // Already registered
+        }
+    }
+
+    // Find empty slot
+    if (g_audio_state.session_handler_count >= MAX_SESSION_EVENT_HANDLERS) {
+        return false;  // No room
+    }
+
+    g_audio_state.session_handlers[g_audio_state.session_handler_count++] = handler;
+    return true;
+}
+
+void AudioManager::unregister_session_event_handler(IAudioSessionEventHandler* handler) {
+    if (!handler) return;
+
+    std::lock_guard<std::mutex> lock(g_audio_state.session_mutex);
+
+    for (int i = 0; i < g_audio_state.session_handler_count; ++i) {
+        if (g_audio_state.session_handlers[i] == handler) {
+            // Shift remaining handlers down
+            for (int j = i; j < g_audio_state.session_handler_count - 1; ++j) {
+                g_audio_state.session_handlers[j] = g_audio_state.session_handlers[j + 1];
+            }
+            g_audio_state.session_handlers[--g_audio_state.session_handler_count] = nullptr;
+            return;
+        }
+    }
+}
+
+bool AudioManager::are_session_events_supported() {
+    return true;  // CoreAudio supports session events
 }
 
 } // namespace audio

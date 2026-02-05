@@ -960,6 +960,20 @@ AudioFormat AudioManager::get_preferred_format(int device_index, AudioDeviceType
     return format;
 }
 
+bool AudioManager::register_session_event_handler(IAudioSessionEventHandler* handler) {
+    (void)handler;
+    // Session events not implemented for OpenAL
+    return false;
+}
+
+void AudioManager::unregister_session_event_handler(IAudioSessionEventHandler* handler) {
+    (void)handler;
+}
+
+bool AudioManager::are_session_events_supported() {
+    return false;  // Not implemented for OpenAL
+}
+
 } // namespace audio
 } // namespace window
 

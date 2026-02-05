@@ -1251,6 +1251,21 @@ AudioFormat AudioManager::get_preferred_format(int device_index, AudioDeviceType
     return format;
 }
 
+bool AudioManager::register_session_event_handler(IAudioSessionEventHandler* handler) {
+    (void)handler;
+    // Session events not implemented on Windows
+    // Could be implemented using IMMNotificationClient for device changes
+    return false;
+}
+
+void AudioManager::unregister_session_event_handler(IAudioSessionEventHandler* handler) {
+    (void)handler;
+}
+
+bool AudioManager::are_session_events_supported() {
+    return false;  // Not yet implemented for WASAPI
+}
+
 } // namespace audio
 } // namespace window
 

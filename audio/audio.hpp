@@ -242,6 +242,84 @@ struct AudioStreamTime {
 };
 
 // ============================================================================
+// Audio Session Events (Apple platforms)
+// ============================================================================
+
+// Audio session event types
+enum class AudioSessionEvent : uint8_t {
+    // Interruption events (iOS/macOS)
+    InterruptionBegan,          // Another app/system took audio focus
+    InterruptionEnded,          // Interruption ended, can resume
+
+    // Route change events (iOS/macOS)
+    RouteChangeNewDeviceAvailable,      // New device connected (headphones, Bluetooth)
+    RouteChangeOldDeviceUnavailable,    // Device disconnected
+    RouteChangeCategoryChange,          // Audio category changed
+    RouteChangeOverride,                // Route was overridden
+    RouteChangeWakeFromSleep,           // Device woke from sleep
+    RouteChangeNoSuitableRouteForCategory,
+    RouteChangeRouteConfigurationChange,
+
+    // Device events (macOS)
+    DefaultOutputDeviceChanged,  // Default output device changed
+    DefaultInputDeviceChanged,   // Default input device changed
+    DeviceListChanged,           // Device list changed (added/removed)
+
+    // Media services (iOS)
+    MediaServicesWereLost,       // Media services crashed
+    MediaServicesWereReset,      // Media services restarted
+
+    // Silence secondary audio (iOS)
+    SilenceSecondaryAudioHintBegan,  // Should silence secondary audio
+    SilenceSecondaryAudioHintEnded   // Can resume secondary audio
+};
+
+// Options for resuming after interruption
+enum class AudioInterruptionOption : uint8_t {
+    None = 0,
+    ShouldResume = 1    // System suggests resuming playback
+};
+
+// Audio route change reason
+enum class AudioRouteChangeReason : uint8_t {
+    Unknown = 0,
+    NewDeviceAvailable,
+    OldDeviceUnavailable,
+    CategoryChange,
+    Override,
+    WakeFromSleep,
+    NoSuitableRouteForCategory,
+    RouteConfigurationChange
+};
+
+// Audio session event data
+struct AudioSessionEventData {
+    AudioSessionEvent event = AudioSessionEvent::InterruptionBegan;
+
+    // For interruption events
+    AudioInterruptionOption interruption_option = AudioInterruptionOption::None;
+
+    // For route change events
+    AudioRouteChangeReason route_change_reason = AudioRouteChangeReason::Unknown;
+
+    // Previous/new device info (when available)
+    char previous_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH] = {};
+    char new_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH] = {};
+};
+
+// Audio session event handler interface
+class IAudioSessionEventHandler {
+public:
+    virtual ~IAudioSessionEventHandler() = default;
+
+    // Called when an audio session event occurs
+    virtual void on_audio_session_event(const AudioSessionEventData& event) = 0;
+};
+
+// String conversion for audio session events
+const char* audio_session_event_to_string(AudioSessionEvent event);
+
+// ============================================================================
 // AudioStreamConfig
 // ============================================================================
 
@@ -691,6 +769,523 @@ private:
 };
 
 // ============================================================================
+// Audio Effects Interface
+// ============================================================================
+
+// Common audio effect types
+enum class AudioEffectType : uint8_t {
+    Custom = 0,         // User-defined effect
+    Gain,               // Volume/gain adjustment
+    Pan,                // Stereo panning
+    Delay,              // Simple delay
+    LowPassFilter,      // Low-pass filter
+    HighPassFilter,     // High-pass filter
+    BandPassFilter,     // Band-pass filter
+    Notch,              // Notch filter
+    PeakingEQ,          // Peaking equalizer
+    LowShelf,           // Low shelf filter
+    HighShelf,          // High shelf filter
+    Compressor,         // Dynamics compressor
+    Limiter,            // Hard limiter
+    NoiseGate,          // Noise gate
+    Reverb,             // Reverb (basic)
+    Chorus,             // Chorus effect
+    Distortion          // Distortion/overdrive
+};
+
+// Biquad filter type for AudioEffectBiquadFilter
+enum class BiquadFilterType : uint8_t {
+    LowPass = 0,
+    HighPass,
+    BandPass,
+    Notch,
+    AllPass,
+    PeakingEQ,
+    LowShelf,
+    HighShelf
+};
+
+// Abstract audio effect interface
+class IAudioEffect {
+public:
+    virtual ~IAudioEffect() = default;
+
+    // Process audio samples in-place (interleaved float format)
+    // samples: interleaved audio samples
+    // frame_count: number of frames to process
+    // channels: number of channels in the audio
+    virtual void process(float* samples, int frame_count, int channels) = 0;
+
+    // Process audio samples from input to output buffer
+    // Can be same buffer for in-place processing
+    virtual void process(const float* input, float* output, int frame_count, int channels) {
+        // Default implementation: copy then process in-place
+        if (input != output) {
+            for (int i = 0; i < frame_count * channels; ++i) {
+                output[i] = input[i];
+            }
+        }
+        process(output, frame_count, channels);
+    }
+
+    // Reset effect state (call when seeking or starting new audio)
+    virtual void reset() = 0;
+
+    // Get effect type
+    virtual AudioEffectType get_type() const = 0;
+
+    // Get latency introduced by this effect in frames
+    virtual int get_latency_frames() const { return 0; }
+
+    // Check if effect is enabled
+    virtual bool is_enabled() const = 0;
+
+    // Enable/disable the effect
+    virtual void set_enabled(bool enabled) = 0;
+
+    // Get/set dry/wet mix (0.0 = all dry, 1.0 = all wet)
+    virtual float get_mix() const { return 1.0f; }
+    virtual void set_mix(float mix) { (void)mix; }
+};
+
+// ============================================================================
+// Audio Effect Chain
+// ============================================================================
+
+static constexpr int MAX_AUDIO_EFFECTS = 16;
+
+// Chain of audio effects processed in sequence
+class AudioEffectChain {
+public:
+    AudioEffectChain();
+    ~AudioEffectChain();
+
+    // Add an effect to the end of the chain
+    // Returns false if chain is full
+    bool add_effect(IAudioEffect* effect);
+
+    // Insert effect at specific position
+    bool insert_effect(int index, IAudioEffect* effect);
+
+    // Remove effect from chain (does not delete it)
+    bool remove_effect(IAudioEffect* effect);
+
+    // Remove effect at index
+    bool remove_effect_at(int index);
+
+    // Get effect at index
+    IAudioEffect* get_effect(int index) const;
+
+    // Get number of effects in chain
+    int get_effect_count() const;
+
+    // Clear all effects from chain (does not delete them)
+    void clear();
+
+    // Process audio through the entire chain
+    void process(float* samples, int frame_count, int channels);
+
+    // Reset all effects in chain
+    void reset();
+
+    // Get total latency of all effects in frames
+    int get_total_latency_frames() const;
+
+    // Enable/disable entire chain
+    void set_enabled(bool enabled);
+    bool is_enabled() const;
+
+    // Set master output gain for the chain
+    void set_output_gain(float gain);
+    float get_output_gain() const;
+
+private:
+    struct Impl;
+    Impl* impl_ = nullptr;
+};
+
+// ============================================================================
+// Built-in Audio Effects
+// ============================================================================
+
+// Gain effect - adjusts volume
+class AudioEffectGain : public IAudioEffect {
+public:
+    static AudioEffectGain* create(float gain_db = 0.0f);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Gain; }
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+
+    // Set gain in decibels (-inf to +inf, 0 = unity)
+    void set_gain_db(float db);
+    float get_gain_db() const;
+
+    // Set gain as linear multiplier (0.0 to inf, 1.0 = unity)
+    void set_gain_linear(float gain);
+    float get_gain_linear() const;
+
+    struct Impl;
+private:
+    AudioEffectGain() = default;
+    ~AudioEffectGain() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Pan effect - stereo panning
+class AudioEffectPan : public IAudioEffect {
+public:
+    static AudioEffectPan* create(float pan = 0.0f);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Pan; }
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+
+    // Set pan position (-1.0 = full left, 0.0 = center, 1.0 = full right)
+    void set_pan(float pan);
+    float get_pan() const;
+
+    // Set pan law in dB (typically -3.0 or -4.5 for constant power)
+    void set_pan_law_db(float db);
+
+    struct Impl;
+private:
+    AudioEffectPan() = default;
+    ~AudioEffectPan() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Delay effect - simple delay line
+class AudioEffectDelay : public IAudioEffect {
+public:
+    // max_delay_ms: maximum delay time in milliseconds
+    static AudioEffectDelay* create(int sample_rate, float max_delay_ms = 1000.0f);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Delay; }
+    int get_latency_frames() const override;
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+    float get_mix() const override;
+    void set_mix(float mix) override;
+
+    // Set delay time in milliseconds
+    void set_delay_ms(float ms);
+    float get_delay_ms() const;
+
+    // Set feedback amount (0.0 = no feedback, 1.0 = infinite)
+    void set_feedback(float feedback);
+    float get_feedback() const;
+
+    struct Impl;
+private:
+    AudioEffectDelay() = default;
+    ~AudioEffectDelay() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Biquad filter - versatile IIR filter
+class AudioEffectBiquadFilter : public IAudioEffect {
+public:
+    static AudioEffectBiquadFilter* create(int sample_rate, BiquadFilterType type = BiquadFilterType::LowPass);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override;
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+
+    // Set filter type
+    void set_filter_type(BiquadFilterType type);
+    BiquadFilterType get_filter_type() const;
+
+    // Set cutoff/center frequency in Hz
+    void set_frequency(float hz);
+    float get_frequency() const;
+
+    // Set Q factor (resonance)
+    void set_q(float q);
+    float get_q() const;
+
+    // Set gain in dB (for peaking/shelf filters)
+    void set_gain_db(float db);
+    float get_gain_db() const;
+
+    struct Impl;
+private:
+    AudioEffectBiquadFilter() = default;
+    ~AudioEffectBiquadFilter() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Compressor effect - dynamics compression
+class AudioEffectCompressor : public IAudioEffect {
+public:
+    static AudioEffectCompressor* create(int sample_rate);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Compressor; }
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+    float get_mix() const override;
+    void set_mix(float mix) override;
+
+    // Set threshold in dB (compression starts above this level)
+    void set_threshold_db(float db);
+    float get_threshold_db() const;
+
+    // Set ratio (e.g., 4.0 = 4:1 compression)
+    void set_ratio(float ratio);
+    float get_ratio() const;
+
+    // Set attack time in milliseconds
+    void set_attack_ms(float ms);
+    float get_attack_ms() const;
+
+    // Set release time in milliseconds
+    void set_release_ms(float ms);
+    float get_release_ms() const;
+
+    // Set makeup gain in dB
+    void set_makeup_gain_db(float db);
+    float get_makeup_gain_db() const;
+
+    // Set knee width in dB (0 = hard knee)
+    void set_knee_db(float db);
+    float get_knee_db() const;
+
+    // Get current gain reduction in dB
+    float get_gain_reduction_db() const;
+
+    struct Impl;
+private:
+    AudioEffectCompressor() = default;
+    ~AudioEffectCompressor() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Limiter effect - hard/soft limiting
+class AudioEffectLimiter : public IAudioEffect {
+public:
+    static AudioEffectLimiter* create(int sample_rate);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Limiter; }
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+
+    // Set ceiling in dB (maximum output level)
+    void set_ceiling_db(float db);
+    float get_ceiling_db() const;
+
+    // Set release time in milliseconds
+    void set_release_ms(float ms);
+    float get_release_ms() const;
+
+    // Get current gain reduction in dB
+    float get_gain_reduction_db() const;
+
+    struct Impl;
+private:
+    AudioEffectLimiter() = default;
+    ~AudioEffectLimiter() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Noise gate effect - reduces noise below threshold
+class AudioEffectNoiseGate : public IAudioEffect {
+public:
+    static AudioEffectNoiseGate* create(int sample_rate);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::NoiseGate; }
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+
+    // Set threshold in dB (gate opens above this level)
+    void set_threshold_db(float db);
+    float get_threshold_db() const;
+
+    // Set attack time in milliseconds (how fast gate opens)
+    void set_attack_ms(float ms);
+    float get_attack_ms() const;
+
+    // Set hold time in milliseconds (minimum time gate stays open)
+    void set_hold_ms(float ms);
+    float get_hold_ms() const;
+
+    // Set release time in milliseconds (how fast gate closes)
+    void set_release_ms(float ms);
+    float get_release_ms() const;
+
+    // Set range in dB (how much to attenuate when closed, 0 = full mute)
+    void set_range_db(float db);
+    float get_range_db() const;
+
+    // Get current gate state (0.0 = closed, 1.0 = open)
+    float get_gate_level() const;
+
+    struct Impl;
+private:
+    AudioEffectNoiseGate() = default;
+    ~AudioEffectNoiseGate() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Reverb effect - simple algorithmic reverb
+class AudioEffectReverb : public IAudioEffect {
+public:
+    static AudioEffectReverb* create(int sample_rate);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Reverb; }
+    int get_latency_frames() const override;
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+    float get_mix() const override;
+    void set_mix(float mix) override;
+
+    // Set room size (0.0 = small, 1.0 = large)
+    void set_room_size(float size);
+    float get_room_size() const;
+
+    // Set damping (0.0 = bright, 1.0 = dark)
+    void set_damping(float damping);
+    float get_damping() const;
+
+    // Set stereo width (0.0 = mono, 1.0 = full stereo)
+    void set_width(float width);
+    float get_width() const;
+
+    // Set pre-delay in milliseconds
+    void set_pre_delay_ms(float ms);
+    float get_pre_delay_ms() const;
+
+    // Freeze mode (infinite decay)
+    void set_freeze(bool freeze);
+    bool is_frozen() const;
+
+    struct Impl;
+private:
+    AudioEffectReverb() = default;
+    ~AudioEffectReverb() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Chorus effect - modulated delay for richness
+class AudioEffectChorus : public IAudioEffect {
+public:
+    static AudioEffectChorus* create(int sample_rate);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Chorus; }
+    int get_latency_frames() const override;
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+    float get_mix() const override;
+    void set_mix(float mix) override;
+
+    // Set LFO rate in Hz (modulation speed)
+    void set_rate_hz(float hz);
+    float get_rate_hz() const;
+
+    // Set depth (modulation amount, 0.0 to 1.0)
+    void set_depth(float depth);
+    float get_depth() const;
+
+    // Set delay time in milliseconds (center delay)
+    void set_delay_ms(float ms);
+    float get_delay_ms() const;
+
+    // Set feedback amount (-1.0 to 1.0)
+    void set_feedback(float feedback);
+    float get_feedback() const;
+
+    // Set number of voices (1-4)
+    void set_voices(int voices);
+    int get_voices() const;
+
+    struct Impl;
+private:
+    AudioEffectChorus() = default;
+    ~AudioEffectChorus() = default;
+    Impl* impl_ = nullptr;
+};
+
+// Distortion effect - overdrive/distortion
+class AudioEffectDistortion : public IAudioEffect {
+public:
+    // Distortion algorithm types
+    enum class Mode : uint8_t {
+        SoftClip,       // Soft clipping (warm overdrive)
+        HardClip,       // Hard clipping (harsh distortion)
+        Tanh,           // Hyperbolic tangent (tube-like)
+        Foldback,       // Foldback distortion (synth-like)
+        Bitcrush        // Bit reduction (lo-fi)
+    };
+
+    static AudioEffectDistortion* create(int sample_rate);
+    void destroy();
+
+    void process(float* samples, int frame_count, int channels) override;
+    void reset() override;
+    AudioEffectType get_type() const override { return AudioEffectType::Distortion; }
+    bool is_enabled() const override;
+    void set_enabled(bool enabled) override;
+    float get_mix() const override;
+    void set_mix(float mix) override;
+
+    // Set distortion mode
+    void set_mode(Mode mode);
+    Mode get_mode() const;
+
+    // Set drive amount (1.0 = unity, higher = more distortion)
+    void set_drive(float drive);
+    float get_drive() const;
+
+    // Set output level (0.0 to 1.0)
+    void set_output_level(float level);
+    float get_output_level() const;
+
+    // Set tone (for built-in filter, 0.0 = dark, 1.0 = bright)
+    void set_tone(float tone);
+    float get_tone() const;
+
+    // Bitcrush-specific: set bit depth (1-16)
+    void set_bit_depth(int bits);
+    int get_bit_depth() const;
+
+    // Bitcrush-specific: set sample rate reduction factor
+    void set_downsample(int factor);
+    int get_downsample() const;
+
+    struct Impl;
+private:
+    AudioEffectDistortion() = default;
+    ~AudioEffectDistortion() = default;
+    Impl* impl_ = nullptr;
+};
+
+// ============================================================================
 // AudioConfig - Audio Configuration for Config Files
 // ============================================================================
 
@@ -763,6 +1358,17 @@ public:
 
     // Get the preferred format for a device
     static AudioFormat get_preferred_format(int device_index, AudioDeviceType type);
+
+    // Session event handling (primarily Apple platforms)
+    // Register a handler to receive audio session events
+    // Returns true if handler was registered successfully
+    static bool register_session_event_handler(IAudioSessionEventHandler* handler);
+
+    // Unregister a previously registered handler
+    static void unregister_session_event_handler(IAudioSessionEventHandler* handler);
+
+    // Check if session events are supported on current platform/backend
+    static bool are_session_events_supported();
 
 private:
     AudioManager() = delete;

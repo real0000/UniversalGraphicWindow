@@ -1477,6 +1477,28 @@ const char* channel_layout_to_string(ChannelLayout layout) {
     }
 }
 
+const char* audio_session_event_to_string(AudioSessionEvent event) {
+    switch (event) {
+        case AudioSessionEvent::InterruptionBegan:               return "Interruption began";
+        case AudioSessionEvent::InterruptionEnded:               return "Interruption ended";
+        case AudioSessionEvent::RouteChangeNewDeviceAvailable:   return "New device available";
+        case AudioSessionEvent::RouteChangeOldDeviceUnavailable: return "Device unavailable";
+        case AudioSessionEvent::RouteChangeCategoryChange:       return "Category change";
+        case AudioSessionEvent::RouteChangeOverride:             return "Route override";
+        case AudioSessionEvent::RouteChangeWakeFromSleep:        return "Wake from sleep";
+        case AudioSessionEvent::RouteChangeNoSuitableRouteForCategory: return "No suitable route";
+        case AudioSessionEvent::RouteChangeRouteConfigurationChange:   return "Route config change";
+        case AudioSessionEvent::DefaultOutputDeviceChanged:      return "Default output changed";
+        case AudioSessionEvent::DefaultInputDeviceChanged:       return "Default input changed";
+        case AudioSessionEvent::DeviceListChanged:               return "Device list changed";
+        case AudioSessionEvent::MediaServicesWereLost:           return "Media services lost";
+        case AudioSessionEvent::MediaServicesWereReset:          return "Media services reset";
+        case AudioSessionEvent::SilenceSecondaryAudioHintBegan:  return "Silence secondary audio";
+        case AudioSessionEvent::SilenceSecondaryAudioHintEnded:  return "Resume secondary audio";
+        default: return "Unknown";
+    }
+}
+
 // ============================================================================
 // AudioBuffer Implementation
 // ============================================================================
@@ -2325,6 +2347,1735 @@ bool AudioConfig::validate() {
     // We don't validate it here since is_backend_supported() is platform-specific
 
     return all_valid;
+}
+
+// ============================================================================
+// Audio Effect Chain Implementation
+// ============================================================================
+
+struct AudioEffectChain::Impl {
+    IAudioEffect* effects[MAX_AUDIO_EFFECTS] = {};
+    int effect_count = 0;
+    bool enabled = true;
+    float output_gain = 1.0f;
+};
+
+AudioEffectChain::AudioEffectChain() {
+    impl_ = new Impl();
+}
+
+AudioEffectChain::~AudioEffectChain() {
+    delete impl_;
+}
+
+bool AudioEffectChain::add_effect(IAudioEffect* effect) {
+    if (!effect || impl_->effect_count >= MAX_AUDIO_EFFECTS) return false;
+    impl_->effects[impl_->effect_count++] = effect;
+    return true;
+}
+
+bool AudioEffectChain::insert_effect(int index, IAudioEffect* effect) {
+    if (!effect || index < 0 || index > impl_->effect_count ||
+        impl_->effect_count >= MAX_AUDIO_EFFECTS) return false;
+
+    // Shift effects to make room
+    for (int i = impl_->effect_count; i > index; --i) {
+        impl_->effects[i] = impl_->effects[i - 1];
+    }
+    impl_->effects[index] = effect;
+    impl_->effect_count++;
+    return true;
+}
+
+bool AudioEffectChain::remove_effect(IAudioEffect* effect) {
+    for (int i = 0; i < impl_->effect_count; ++i) {
+        if (impl_->effects[i] == effect) {
+            return remove_effect_at(i);
+        }
+    }
+    return false;
+}
+
+bool AudioEffectChain::remove_effect_at(int index) {
+    if (index < 0 || index >= impl_->effect_count) return false;
+
+    // Shift effects down
+    for (int i = index; i < impl_->effect_count - 1; ++i) {
+        impl_->effects[i] = impl_->effects[i + 1];
+    }
+    impl_->effects[--impl_->effect_count] = nullptr;
+    return true;
+}
+
+IAudioEffect* AudioEffectChain::get_effect(int index) const {
+    if (index < 0 || index >= impl_->effect_count) return nullptr;
+    return impl_->effects[index];
+}
+
+int AudioEffectChain::get_effect_count() const {
+    return impl_->effect_count;
+}
+
+void AudioEffectChain::clear() {
+    for (int i = 0; i < impl_->effect_count; ++i) {
+        impl_->effects[i] = nullptr;
+    }
+    impl_->effect_count = 0;
+}
+
+void AudioEffectChain::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled || !samples || frame_count <= 0 || channels <= 0) return;
+
+    // Process through each effect in the chain
+    for (int i = 0; i < impl_->effect_count; ++i) {
+        IAudioEffect* effect = impl_->effects[i];
+        if (effect && effect->is_enabled()) {
+            effect->process(samples, frame_count, channels);
+        }
+    }
+
+    // Apply output gain
+    if (impl_->output_gain != 1.0f) {
+        int sample_count = frame_count * channels;
+        for (int i = 0; i < sample_count; ++i) {
+            samples[i] *= impl_->output_gain;
+        }
+    }
+}
+
+void AudioEffectChain::reset() {
+    for (int i = 0; i < impl_->effect_count; ++i) {
+        if (impl_->effects[i]) {
+            impl_->effects[i]->reset();
+        }
+    }
+}
+
+int AudioEffectChain::get_total_latency_frames() const {
+    int total = 0;
+    for (int i = 0; i < impl_->effect_count; ++i) {
+        if (impl_->effects[i]) {
+            total += impl_->effects[i]->get_latency_frames();
+        }
+    }
+    return total;
+}
+
+void AudioEffectChain::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+bool AudioEffectChain::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectChain::set_output_gain(float gain) {
+    impl_->output_gain = std::max(0.0f, gain);
+}
+
+float AudioEffectChain::get_output_gain() const {
+    return impl_->output_gain;
+}
+
+// ============================================================================
+// AudioEffectGain Implementation
+// ============================================================================
+
+struct AudioEffectGain::Impl {
+    float gain_linear = 1.0f;
+    float gain_db = 0.0f;
+    bool enabled = true;
+};
+
+AudioEffectGain* AudioEffectGain::create(float gain_db) {
+    AudioEffectGain* effect = new AudioEffectGain();
+    effect->impl_ = new Impl();
+    effect->set_gain_db(gain_db);
+    return effect;
+}
+
+void AudioEffectGain::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectGain::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled || impl_->gain_linear == 1.0f) return;
+
+    int count = frame_count * channels;
+    for (int i = 0; i < count; ++i) {
+        samples[i] *= impl_->gain_linear;
+    }
+}
+
+void AudioEffectGain::reset() {
+    // Gain has no state to reset
+}
+
+bool AudioEffectGain::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectGain::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+void AudioEffectGain::set_gain_db(float db) {
+    impl_->gain_db = db;
+    impl_->gain_linear = std::pow(10.0f, db / 20.0f);
+}
+
+float AudioEffectGain::get_gain_db() const {
+    return impl_->gain_db;
+}
+
+void AudioEffectGain::set_gain_linear(float gain) {
+    impl_->gain_linear = std::max(0.0f, gain);
+    impl_->gain_db = (gain > 0.0f) ? (20.0f * std::log10(gain)) : -100.0f;
+}
+
+float AudioEffectGain::get_gain_linear() const {
+    return impl_->gain_linear;
+}
+
+// ============================================================================
+// AudioEffectPan Implementation
+// ============================================================================
+
+struct AudioEffectPan::Impl {
+    float pan = 0.0f;           // -1 to 1
+    float left_gain = 1.0f;
+    float right_gain = 1.0f;
+    float pan_law_db = -3.0f;   // Constant power pan law
+    bool enabled = true;
+
+    void update_gains() {
+        // Constant power panning
+        float angle = (pan + 1.0f) * 0.25f * static_cast<float>(PI);
+        left_gain = std::cos(angle);
+        right_gain = std::sin(angle);
+
+        // Apply pan law compensation
+        float compensation = std::pow(10.0f, pan_law_db / 20.0f);
+        float center_boost = 1.0f / compensation;
+
+        // Interpolate compensation based on pan position
+        float pan_abs = std::abs(pan);
+        float comp = 1.0f + (center_boost - 1.0f) * (1.0f - pan_abs);
+        left_gain *= comp;
+        right_gain *= comp;
+    }
+};
+
+AudioEffectPan* AudioEffectPan::create(float pan) {
+    AudioEffectPan* effect = new AudioEffectPan();
+    effect->impl_ = new Impl();
+    effect->set_pan(pan);
+    return effect;
+}
+
+void AudioEffectPan::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectPan::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled || channels < 2) return;
+
+    for (int f = 0; f < frame_count; ++f) {
+        float* frame = samples + f * channels;
+        frame[0] *= impl_->left_gain;
+        frame[1] *= impl_->right_gain;
+    }
+}
+
+void AudioEffectPan::reset() {
+    // Pan has no state to reset
+}
+
+bool AudioEffectPan::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectPan::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+void AudioEffectPan::set_pan(float pan) {
+    impl_->pan = std::max(-1.0f, std::min(1.0f, pan));
+    impl_->update_gains();
+}
+
+float AudioEffectPan::get_pan() const {
+    return impl_->pan;
+}
+
+void AudioEffectPan::set_pan_law_db(float db) {
+    impl_->pan_law_db = db;
+    impl_->update_gains();
+}
+
+// ============================================================================
+// AudioEffectDelay Implementation
+// ============================================================================
+
+struct AudioEffectDelay::Impl {
+    std::vector<float> buffer;
+    int write_pos = 0;
+    int delay_samples = 0;
+    int max_delay_samples = 0;
+    int sample_rate = 48000;
+    int channels = 2;
+    float delay_ms = 0.0f;
+    float feedback = 0.0f;
+    float mix = 0.5f;
+    bool enabled = true;
+};
+
+AudioEffectDelay* AudioEffectDelay::create(int sample_rate, float max_delay_ms) {
+    AudioEffectDelay* effect = new AudioEffectDelay();
+    effect->impl_ = new Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->max_delay_samples = static_cast<int>(max_delay_ms * sample_rate / 1000.0f);
+    effect->impl_->buffer.resize(effect->impl_->max_delay_samples * MAX_AUDIO_CHANNELS, 0.0f);
+    return effect;
+}
+
+void AudioEffectDelay::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectDelay::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled || impl_->delay_samples == 0) return;
+
+    impl_->channels = channels;
+    int buffer_size = impl_->max_delay_samples;
+
+    for (int f = 0; f < frame_count; ++f) {
+        for (int c = 0; c < channels; ++c) {
+            int idx = f * channels + c;
+
+            // Read from delay buffer
+            int read_pos = (impl_->write_pos - impl_->delay_samples + buffer_size) % buffer_size;
+            float delayed = impl_->buffer[read_pos * channels + c];
+
+            // Write to delay buffer (input + feedback)
+            impl_->buffer[impl_->write_pos * channels + c] =
+                samples[idx] + delayed * impl_->feedback;
+
+            // Mix dry and wet signals
+            samples[idx] = samples[idx] * (1.0f - impl_->mix) + delayed * impl_->mix;
+        }
+
+        impl_->write_pos = (impl_->write_pos + 1) % buffer_size;
+    }
+}
+
+void AudioEffectDelay::reset() {
+    std::fill(impl_->buffer.begin(), impl_->buffer.end(), 0.0f);
+    impl_->write_pos = 0;
+}
+
+int AudioEffectDelay::get_latency_frames() const {
+    return 0; // Delay doesn't add processing latency
+}
+
+bool AudioEffectDelay::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectDelay::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+float AudioEffectDelay::get_mix() const {
+    return impl_->mix;
+}
+
+void AudioEffectDelay::set_mix(float mix) {
+    impl_->mix = std::max(0.0f, std::min(1.0f, mix));
+}
+
+void AudioEffectDelay::set_delay_ms(float ms) {
+    impl_->delay_ms = std::max(0.0f, ms);
+    impl_->delay_samples = std::min(
+        static_cast<int>(ms * impl_->sample_rate / 1000.0f),
+        impl_->max_delay_samples
+    );
+}
+
+float AudioEffectDelay::get_delay_ms() const {
+    return impl_->delay_ms;
+}
+
+void AudioEffectDelay::set_feedback(float feedback) {
+    impl_->feedback = std::max(0.0f, std::min(0.99f, feedback));
+}
+
+float AudioEffectDelay::get_feedback() const {
+    return impl_->feedback;
+}
+
+// ============================================================================
+// AudioEffectBiquadFilter Implementation
+// ============================================================================
+
+struct AudioEffectBiquadFilter::Impl {
+    BiquadFilterType type = BiquadFilterType::LowPass;
+    int sample_rate = 48000;
+    float frequency = 1000.0f;
+    float q = 0.707f;           // Butterworth
+    float gain_db = 0.0f;
+    bool enabled = true;
+
+    // Biquad coefficients
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f;
+    float a1 = 0.0f, a2 = 0.0f;
+
+    // State variables per channel
+    float x1[MAX_AUDIO_CHANNELS] = {};
+    float x2[MAX_AUDIO_CHANNELS] = {};
+    float y1[MAX_AUDIO_CHANNELS] = {};
+    float y2[MAX_AUDIO_CHANNELS] = {};
+
+    void calculate_coefficients() {
+        float w0 = 2.0f * static_cast<float>(PI) * frequency / sample_rate;
+        float cos_w0 = std::cos(w0);
+        float sin_w0 = std::sin(w0);
+        float alpha = sin_w0 / (2.0f * q);
+        float A = std::pow(10.0f, gain_db / 40.0f);
+
+        float a0;
+
+        switch (type) {
+            case BiquadFilterType::LowPass:
+                b0 = (1.0f - cos_w0) / 2.0f;
+                b1 = 1.0f - cos_w0;
+                b2 = (1.0f - cos_w0) / 2.0f;
+                a0 = 1.0f + alpha;
+                a1 = -2.0f * cos_w0;
+                a2 = 1.0f - alpha;
+                break;
+
+            case BiquadFilterType::HighPass:
+                b0 = (1.0f + cos_w0) / 2.0f;
+                b1 = -(1.0f + cos_w0);
+                b2 = (1.0f + cos_w0) / 2.0f;
+                a0 = 1.0f + alpha;
+                a1 = -2.0f * cos_w0;
+                a2 = 1.0f - alpha;
+                break;
+
+            case BiquadFilterType::BandPass:
+                b0 = alpha;
+                b1 = 0.0f;
+                b2 = -alpha;
+                a0 = 1.0f + alpha;
+                a1 = -2.0f * cos_w0;
+                a2 = 1.0f - alpha;
+                break;
+
+            case BiquadFilterType::Notch:
+                b0 = 1.0f;
+                b1 = -2.0f * cos_w0;
+                b2 = 1.0f;
+                a0 = 1.0f + alpha;
+                a1 = -2.0f * cos_w0;
+                a2 = 1.0f - alpha;
+                break;
+
+            case BiquadFilterType::AllPass:
+                b0 = 1.0f - alpha;
+                b1 = -2.0f * cos_w0;
+                b2 = 1.0f + alpha;
+                a0 = 1.0f + alpha;
+                a1 = -2.0f * cos_w0;
+                a2 = 1.0f - alpha;
+                break;
+
+            case BiquadFilterType::PeakingEQ: {
+                float alpha_A = alpha * A;
+                float alpha_div_A = alpha / A;
+                b0 = 1.0f + alpha_A;
+                b1 = -2.0f * cos_w0;
+                b2 = 1.0f - alpha_A;
+                a0 = 1.0f + alpha_div_A;
+                a1 = -2.0f * cos_w0;
+                a2 = 1.0f - alpha_div_A;
+                break;
+            }
+
+            case BiquadFilterType::LowShelf: {
+                float sqrtA = std::sqrt(A);
+                float sqrtA_alpha = 2.0f * sqrtA * alpha;
+                b0 = A * ((A + 1.0f) - (A - 1.0f) * cos_w0 + sqrtA_alpha);
+                b1 = 2.0f * A * ((A - 1.0f) - (A + 1.0f) * cos_w0);
+                b2 = A * ((A + 1.0f) - (A - 1.0f) * cos_w0 - sqrtA_alpha);
+                a0 = (A + 1.0f) + (A - 1.0f) * cos_w0 + sqrtA_alpha;
+                a1 = -2.0f * ((A - 1.0f) + (A + 1.0f) * cos_w0);
+                a2 = (A + 1.0f) + (A - 1.0f) * cos_w0 - sqrtA_alpha;
+                break;
+            }
+
+            case BiquadFilterType::HighShelf: {
+                float sqrtA = std::sqrt(A);
+                float sqrtA_alpha = 2.0f * sqrtA * alpha;
+                b0 = A * ((A + 1.0f) + (A - 1.0f) * cos_w0 + sqrtA_alpha);
+                b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cos_w0);
+                b2 = A * ((A + 1.0f) + (A - 1.0f) * cos_w0 - sqrtA_alpha);
+                a0 = (A + 1.0f) - (A - 1.0f) * cos_w0 + sqrtA_alpha;
+                a1 = 2.0f * ((A - 1.0f) - (A + 1.0f) * cos_w0);
+                a2 = (A + 1.0f) - (A - 1.0f) * cos_w0 - sqrtA_alpha;
+                break;
+            }
+        }
+
+        // Normalize coefficients
+        b0 /= a0;
+        b1 /= a0;
+        b2 /= a0;
+        a1 /= a0;
+        a2 /= a0;
+    }
+};
+
+AudioEffectBiquadFilter* AudioEffectBiquadFilter::create(int sample_rate, BiquadFilterType type) {
+    AudioEffectBiquadFilter* effect = new AudioEffectBiquadFilter();
+    effect->impl_ = new Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->type = type;
+    effect->impl_->calculate_coefficients();
+    return effect;
+}
+
+void AudioEffectBiquadFilter::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectBiquadFilter::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled) return;
+
+    for (int f = 0; f < frame_count; ++f) {
+        for (int c = 0; c < channels && c < MAX_AUDIO_CHANNELS; ++c) {
+            int idx = f * channels + c;
+            float x0 = samples[idx];
+
+            // Direct Form I biquad
+            float y0 = impl_->b0 * x0 +
+                       impl_->b1 * impl_->x1[c] +
+                       impl_->b2 * impl_->x2[c] -
+                       impl_->a1 * impl_->y1[c] -
+                       impl_->a2 * impl_->y2[c];
+
+            // Update state
+            impl_->x2[c] = impl_->x1[c];
+            impl_->x1[c] = x0;
+            impl_->y2[c] = impl_->y1[c];
+            impl_->y1[c] = y0;
+
+            samples[idx] = y0;
+        }
+    }
+}
+
+void AudioEffectBiquadFilter::reset() {
+    for (int c = 0; c < MAX_AUDIO_CHANNELS; ++c) {
+        impl_->x1[c] = impl_->x2[c] = 0.0f;
+        impl_->y1[c] = impl_->y2[c] = 0.0f;
+    }
+}
+
+AudioEffectType AudioEffectBiquadFilter::get_type() const {
+    switch (impl_->type) {
+        case BiquadFilterType::LowPass:   return AudioEffectType::LowPassFilter;
+        case BiquadFilterType::HighPass:  return AudioEffectType::HighPassFilter;
+        case BiquadFilterType::BandPass:  return AudioEffectType::BandPassFilter;
+        case BiquadFilterType::Notch:     return AudioEffectType::Notch;
+        case BiquadFilterType::PeakingEQ: return AudioEffectType::PeakingEQ;
+        case BiquadFilterType::LowShelf:  return AudioEffectType::LowShelf;
+        case BiquadFilterType::HighShelf: return AudioEffectType::HighShelf;
+        default: return AudioEffectType::Custom;
+    }
+}
+
+bool AudioEffectBiquadFilter::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectBiquadFilter::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+void AudioEffectBiquadFilter::set_filter_type(BiquadFilterType type) {
+    impl_->type = type;
+    impl_->calculate_coefficients();
+}
+
+BiquadFilterType AudioEffectBiquadFilter::get_filter_type() const {
+    return impl_->type;
+}
+
+void AudioEffectBiquadFilter::set_frequency(float hz) {
+    impl_->frequency = std::max(20.0f, std::min(static_cast<float>(impl_->sample_rate) / 2.0f, hz));
+    impl_->calculate_coefficients();
+}
+
+float AudioEffectBiquadFilter::get_frequency() const {
+    return impl_->frequency;
+}
+
+void AudioEffectBiquadFilter::set_q(float q) {
+    impl_->q = std::max(0.1f, std::min(20.0f, q));
+    impl_->calculate_coefficients();
+}
+
+float AudioEffectBiquadFilter::get_q() const {
+    return impl_->q;
+}
+
+void AudioEffectBiquadFilter::set_gain_db(float db) {
+    impl_->gain_db = std::max(-24.0f, std::min(24.0f, db));
+    impl_->calculate_coefficients();
+}
+
+float AudioEffectBiquadFilter::get_gain_db() const {
+    return impl_->gain_db;
+}
+
+// ============================================================================
+// AudioEffectCompressor Implementation
+// ============================================================================
+
+struct AudioEffectCompressor::Impl {
+    int sample_rate = 48000;
+    float threshold_db = -20.0f;
+    float ratio = 4.0f;
+    float attack_ms = 10.0f;
+    float release_ms = 100.0f;
+    float makeup_gain_db = 0.0f;
+    float knee_db = 0.0f;
+    float mix = 1.0f;
+    bool enabled = true;
+
+    // Runtime state
+    float envelope = 0.0f;
+    float gain_reduction_db = 0.0f;
+    float attack_coef = 0.0f;
+    float release_coef = 0.0f;
+    float makeup_gain_linear = 1.0f;
+
+    void update_coefficients() {
+        attack_coef = std::exp(-1.0f / (attack_ms * sample_rate / 1000.0f));
+        release_coef = std::exp(-1.0f / (release_ms * sample_rate / 1000.0f));
+        makeup_gain_linear = std::pow(10.0f, makeup_gain_db / 20.0f);
+    }
+
+    float compute_gain(float input_db) {
+        // Compute output level based on threshold, ratio, and knee
+        float output_db;
+
+        if (knee_db > 0.0f) {
+            // Soft knee
+            float knee_start = threshold_db - knee_db / 2.0f;
+            float knee_end = threshold_db + knee_db / 2.0f;
+
+            if (input_db < knee_start) {
+                output_db = input_db;
+            } else if (input_db > knee_end) {
+                output_db = threshold_db + (input_db - threshold_db) / ratio;
+            } else {
+                // Quadratic interpolation in the knee region
+                float x = input_db - knee_start;
+                float knee_factor = (1.0f / ratio - 1.0f) / (2.0f * knee_db);
+                output_db = input_db + knee_factor * x * x;
+            }
+        } else {
+            // Hard knee
+            if (input_db < threshold_db) {
+                output_db = input_db;
+            } else {
+                output_db = threshold_db + (input_db - threshold_db) / ratio;
+            }
+        }
+
+        return output_db - input_db;  // Return gain reduction
+    }
+};
+
+AudioEffectCompressor* AudioEffectCompressor::create(int sample_rate) {
+    AudioEffectCompressor* effect = new AudioEffectCompressor();
+    effect->impl_ = new Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->update_coefficients();
+    return effect;
+}
+
+void AudioEffectCompressor::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectCompressor::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled) return;
+
+    for (int f = 0; f < frame_count; ++f) {
+        // Find peak level across all channels
+        float peak = 0.0f;
+        for (int c = 0; c < channels; ++c) {
+            float abs_sample = std::abs(samples[f * channels + c]);
+            if (abs_sample > peak) peak = abs_sample;
+        }
+
+        // Convert to dB
+        float input_db = (peak > 1e-6f) ? (20.0f * std::log10(peak)) : -120.0f;
+
+        // Compute target gain reduction
+        float target_gr = impl_->compute_gain(input_db);
+
+        // Apply envelope follower (attack/release)
+        if (target_gr < impl_->gain_reduction_db) {
+            // Attack
+            impl_->gain_reduction_db = target_gr + impl_->attack_coef *
+                (impl_->gain_reduction_db - target_gr);
+        } else {
+            // Release
+            impl_->gain_reduction_db = target_gr + impl_->release_coef *
+                (impl_->gain_reduction_db - target_gr);
+        }
+
+        // Convert gain reduction to linear
+        float gain = std::pow(10.0f, impl_->gain_reduction_db / 20.0f) *
+                     impl_->makeup_gain_linear;
+
+        // Apply gain to all channels
+        for (int c = 0; c < channels; ++c) {
+            int idx = f * channels + c;
+            float dry = samples[idx];
+            float wet = samples[idx] * gain;
+            samples[idx] = dry * (1.0f - impl_->mix) + wet * impl_->mix;
+        }
+    }
+}
+
+void AudioEffectCompressor::reset() {
+    impl_->envelope = 0.0f;
+    impl_->gain_reduction_db = 0.0f;
+}
+
+bool AudioEffectCompressor::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectCompressor::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+float AudioEffectCompressor::get_mix() const {
+    return impl_->mix;
+}
+
+void AudioEffectCompressor::set_mix(float mix) {
+    impl_->mix = std::max(0.0f, std::min(1.0f, mix));
+}
+
+void AudioEffectCompressor::set_threshold_db(float db) {
+    impl_->threshold_db = std::max(-60.0f, std::min(0.0f, db));
+}
+
+float AudioEffectCompressor::get_threshold_db() const {
+    return impl_->threshold_db;
+}
+
+void AudioEffectCompressor::set_ratio(float ratio) {
+    impl_->ratio = std::max(1.0f, std::min(100.0f, ratio));
+}
+
+float AudioEffectCompressor::get_ratio() const {
+    return impl_->ratio;
+}
+
+void AudioEffectCompressor::set_attack_ms(float ms) {
+    impl_->attack_ms = std::max(0.1f, std::min(500.0f, ms));
+    impl_->update_coefficients();
+}
+
+float AudioEffectCompressor::get_attack_ms() const {
+    return impl_->attack_ms;
+}
+
+void AudioEffectCompressor::set_release_ms(float ms) {
+    impl_->release_ms = std::max(1.0f, std::min(5000.0f, ms));
+    impl_->update_coefficients();
+}
+
+float AudioEffectCompressor::get_release_ms() const {
+    return impl_->release_ms;
+}
+
+void AudioEffectCompressor::set_makeup_gain_db(float db) {
+    impl_->makeup_gain_db = std::max(0.0f, std::min(40.0f, db));
+    impl_->update_coefficients();
+}
+
+float AudioEffectCompressor::get_makeup_gain_db() const {
+    return impl_->makeup_gain_db;
+}
+
+void AudioEffectCompressor::set_knee_db(float db) {
+    impl_->knee_db = std::max(0.0f, std::min(20.0f, db));
+}
+
+float AudioEffectCompressor::get_knee_db() const {
+    return impl_->knee_db;
+}
+
+float AudioEffectCompressor::get_gain_reduction_db() const {
+    return impl_->gain_reduction_db;
+}
+
+// ============================================================================
+// AudioEffectLimiter Implementation
+// ============================================================================
+
+struct AudioEffectLimiter::Impl {
+    int sample_rate = 48000;
+    float ceiling_db = 0.0f;
+    float ceiling_linear = 1.0f;
+    float release_ms = 50.0f;
+    float release_coef = 0.0f;
+    bool enabled = true;
+
+    float gain_reduction = 1.0f;  // Linear
+    float gain_reduction_db = 0.0f;
+
+    void update_coefficients() {
+        ceiling_linear = std::pow(10.0f, ceiling_db / 20.0f);
+        release_coef = std::exp(-1.0f / (release_ms * sample_rate / 1000.0f));
+    }
+};
+
+AudioEffectLimiter* AudioEffectLimiter::create(int sample_rate) {
+    AudioEffectLimiter* effect = new AudioEffectLimiter();
+    effect->impl_ = new Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->update_coefficients();
+    return effect;
+}
+
+void AudioEffectLimiter::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectLimiter::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled) return;
+
+    for (int f = 0; f < frame_count; ++f) {
+        // Find peak level across all channels
+        float peak = 0.0f;
+        for (int c = 0; c < channels; ++c) {
+            float abs_sample = std::abs(samples[f * channels + c]);
+            if (abs_sample > peak) peak = abs_sample;
+        }
+
+        // Calculate required gain reduction
+        float target_gain = 1.0f;
+        if (peak > impl_->ceiling_linear) {
+            target_gain = impl_->ceiling_linear / peak;
+        }
+
+        // Apply instant attack, smooth release
+        if (target_gain < impl_->gain_reduction) {
+            // Instant attack
+            impl_->gain_reduction = target_gain;
+        } else {
+            // Smooth release
+            impl_->gain_reduction = target_gain + impl_->release_coef *
+                (impl_->gain_reduction - target_gain);
+        }
+
+        // Update dB value for metering
+        impl_->gain_reduction_db = 20.0f * std::log10(std::max(impl_->gain_reduction, 1e-6f));
+
+        // Apply gain to all channels
+        for (int c = 0; c < channels; ++c) {
+            samples[f * channels + c] *= impl_->gain_reduction;
+        }
+    }
+}
+
+void AudioEffectLimiter::reset() {
+    impl_->gain_reduction = 1.0f;
+    impl_->gain_reduction_db = 0.0f;
+}
+
+bool AudioEffectLimiter::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectLimiter::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+void AudioEffectLimiter::set_ceiling_db(float db) {
+    impl_->ceiling_db = std::max(-20.0f, std::min(0.0f, db));
+    impl_->update_coefficients();
+}
+
+float AudioEffectLimiter::get_ceiling_db() const {
+    return impl_->ceiling_db;
+}
+
+void AudioEffectLimiter::set_release_ms(float ms) {
+    impl_->release_ms = std::max(1.0f, std::min(1000.0f, ms));
+    impl_->update_coefficients();
+}
+
+float AudioEffectLimiter::get_release_ms() const {
+    return impl_->release_ms;
+}
+
+float AudioEffectLimiter::get_gain_reduction_db() const {
+    return impl_->gain_reduction_db;
+}
+
+// ============================================================================
+// AudioEffectNoiseGate Implementation
+// ============================================================================
+
+struct AudioEffectNoiseGate::Impl {
+    int sample_rate = 48000;
+    bool enabled = true;
+    float threshold_db = -40.0f;
+    float threshold_linear = 0.01f;
+    float attack_ms = 1.0f;
+    float hold_ms = 50.0f;
+    float release_ms = 100.0f;
+    float range_db = -80.0f;
+    float range_linear = 0.0001f;
+
+    // Envelope follower state
+    float envelope = 0.0f;
+    float gate_level = 0.0f;
+    int hold_counter = 0;
+
+    // Coefficients
+    float attack_coeff = 0.0f;
+    float release_coeff = 0.0f;
+    int hold_samples = 0;
+
+    void update_coefficients() {
+        attack_coeff = std::exp(-1.0f / (attack_ms * 0.001f * sample_rate));
+        release_coeff = std::exp(-1.0f / (release_ms * 0.001f * sample_rate));
+        hold_samples = static_cast<int>(hold_ms * 0.001f * sample_rate);
+        threshold_linear = std::pow(10.0f, threshold_db / 20.0f);
+        range_linear = std::pow(10.0f, range_db / 20.0f);
+    }
+};
+
+AudioEffectNoiseGate* AudioEffectNoiseGate::create(int sample_rate) {
+    AudioEffectNoiseGate* effect = new AudioEffectNoiseGate();
+    effect->impl_ = new AudioEffectNoiseGate::Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->update_coefficients();
+    return effect;
+}
+
+void AudioEffectNoiseGate::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectNoiseGate::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled) return;
+
+    for (int i = 0; i < frame_count; ++i) {
+        // Compute peak level across all channels
+        float peak = 0.0f;
+        for (int c = 0; c < channels; ++c) {
+            float sample = std::abs(samples[i * channels + c]);
+            if (sample > peak) peak = sample;
+        }
+
+        // Envelope follower
+        if (peak > impl_->envelope) {
+            impl_->envelope = peak + impl_->attack_coeff * (impl_->envelope - peak);
+        } else {
+            impl_->envelope = peak + impl_->release_coeff * (impl_->envelope - peak);
+        }
+
+        // Gate logic
+        if (impl_->envelope > impl_->threshold_linear) {
+            // Signal above threshold - open gate
+            impl_->hold_counter = impl_->hold_samples;
+            impl_->gate_level = impl_->gate_level + impl_->attack_coeff * (1.0f - impl_->gate_level);
+        } else if (impl_->hold_counter > 0) {
+            // In hold phase
+            impl_->hold_counter--;
+        } else {
+            // Close gate
+            float target = impl_->range_linear;
+            impl_->gate_level = target + impl_->release_coeff * (impl_->gate_level - target);
+        }
+
+        // Apply gate
+        for (int c = 0; c < channels; ++c) {
+            samples[i * channels + c] *= impl_->gate_level;
+        }
+    }
+}
+
+void AudioEffectNoiseGate::reset() {
+    impl_->envelope = 0.0f;
+    impl_->gate_level = 0.0f;
+    impl_->hold_counter = 0;
+}
+
+bool AudioEffectNoiseGate::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectNoiseGate::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+void AudioEffectNoiseGate::set_threshold_db(float db) {
+    impl_->threshold_db = std::max(-80.0f, std::min(0.0f, db));
+    impl_->update_coefficients();
+}
+
+float AudioEffectNoiseGate::get_threshold_db() const {
+    return impl_->threshold_db;
+}
+
+void AudioEffectNoiseGate::set_attack_ms(float ms) {
+    impl_->attack_ms = std::max(0.1f, std::min(100.0f, ms));
+    impl_->update_coefficients();
+}
+
+float AudioEffectNoiseGate::get_attack_ms() const {
+    return impl_->attack_ms;
+}
+
+void AudioEffectNoiseGate::set_hold_ms(float ms) {
+    impl_->hold_ms = std::max(0.0f, std::min(1000.0f, ms));
+    impl_->update_coefficients();
+}
+
+float AudioEffectNoiseGate::get_hold_ms() const {
+    return impl_->hold_ms;
+}
+
+void AudioEffectNoiseGate::set_release_ms(float ms) {
+    impl_->release_ms = std::max(1.0f, std::min(2000.0f, ms));
+    impl_->update_coefficients();
+}
+
+float AudioEffectNoiseGate::get_release_ms() const {
+    return impl_->release_ms;
+}
+
+void AudioEffectNoiseGate::set_range_db(float db) {
+    impl_->range_db = std::max(-80.0f, std::min(0.0f, db));
+    impl_->update_coefficients();
+}
+
+float AudioEffectNoiseGate::get_range_db() const {
+    return impl_->range_db;
+}
+
+float AudioEffectNoiseGate::get_gate_level() const {
+    return impl_->gate_level;
+}
+
+// ============================================================================
+// AudioEffectReverb Implementation
+// ============================================================================
+
+// Freeverb-style reverb implementation
+struct AudioEffectReverb::Impl {
+    static constexpr int NUM_COMBS = 8;
+    static constexpr int NUM_ALLPASSES = 4;
+
+    // Comb filter delay times (in samples at 44100 Hz)
+    static constexpr int COMB_TUNING_L[NUM_COMBS] = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};
+    static constexpr int COMB_TUNING_R[NUM_COMBS] = {1116+23, 1188+23, 1277+23, 1356+23, 1422+23, 1491+23, 1557+23, 1617+23};
+
+    // Allpass filter delay times
+    static constexpr int ALLPASS_TUNING_L[NUM_ALLPASSES] = {556, 441, 341, 225};
+    static constexpr int ALLPASS_TUNING_R[NUM_ALLPASSES] = {556+23, 441+23, 341+23, 225+23};
+
+    int sample_rate = 48000;
+    bool enabled = true;
+    float mix = 0.3f;
+    float room_size = 0.5f;
+    float damping = 0.5f;
+    float width = 1.0f;
+    float pre_delay_ms = 0.0f;
+    bool freeze = false;
+
+    // Processed parameters
+    float feedback = 0.0f;
+    float damp1 = 0.0f;
+    float damp2 = 0.0f;
+    float wet1 = 0.0f;
+    float wet2 = 0.0f;
+
+    // Comb filters
+    struct CombFilter {
+        std::vector<float> buffer;
+        int buffer_size = 0;
+        int buffer_idx = 0;
+        float filter_store = 0.0f;
+    };
+    CombFilter combs_l[NUM_COMBS];
+    CombFilter combs_r[NUM_COMBS];
+
+    // Allpass filters
+    struct AllpassFilter {
+        std::vector<float> buffer;
+        int buffer_size = 0;
+        int buffer_idx = 0;
+    };
+    AllpassFilter allpasses_l[NUM_ALLPASSES];
+    AllpassFilter allpasses_r[NUM_ALLPASSES];
+
+    // Pre-delay buffer
+    std::vector<float> predelay_buffer_l;
+    std::vector<float> predelay_buffer_r;
+    int predelay_size = 0;
+    int predelay_idx = 0;
+
+    void init_buffers() {
+        float scale = static_cast<float>(sample_rate) / 44100.0f;
+
+        for (int i = 0; i < NUM_COMBS; ++i) {
+            combs_l[i].buffer_size = static_cast<int>(COMB_TUNING_L[i] * scale);
+            combs_l[i].buffer.resize(combs_l[i].buffer_size, 0.0f);
+            combs_l[i].buffer_idx = 0;
+            combs_l[i].filter_store = 0.0f;
+
+            combs_r[i].buffer_size = static_cast<int>(COMB_TUNING_R[i] * scale);
+            combs_r[i].buffer.resize(combs_r[i].buffer_size, 0.0f);
+            combs_r[i].buffer_idx = 0;
+            combs_r[i].filter_store = 0.0f;
+        }
+
+        for (int i = 0; i < NUM_ALLPASSES; ++i) {
+            allpasses_l[i].buffer_size = static_cast<int>(ALLPASS_TUNING_L[i] * scale);
+            allpasses_l[i].buffer.resize(allpasses_l[i].buffer_size, 0.0f);
+            allpasses_l[i].buffer_idx = 0;
+
+            allpasses_r[i].buffer_size = static_cast<int>(ALLPASS_TUNING_R[i] * scale);
+            allpasses_r[i].buffer.resize(allpasses_r[i].buffer_size, 0.0f);
+            allpasses_r[i].buffer_idx = 0;
+        }
+
+        // Pre-delay buffer (max 500ms)
+        int max_predelay = static_cast<int>(0.5f * sample_rate);
+        predelay_buffer_l.resize(max_predelay, 0.0f);
+        predelay_buffer_r.resize(max_predelay, 0.0f);
+        predelay_idx = 0;
+        update_predelay();
+    }
+
+    void update_parameters() {
+        feedback = room_size * 0.28f + 0.7f;
+        damp1 = damping * 0.4f;
+        damp2 = 1.0f - damp1;
+        wet1 = width * 0.5f + 0.5f;
+        wet2 = (1.0f - width) * 0.5f;
+
+        if (freeze) {
+            feedback = 1.0f;
+            damp1 = 0.0f;
+            damp2 = 1.0f;
+        }
+    }
+
+    void update_predelay() {
+        predelay_size = static_cast<int>(pre_delay_ms * 0.001f * sample_rate);
+        predelay_size = std::max(1, std::min(predelay_size, static_cast<int>(predelay_buffer_l.size())));
+    }
+
+    float process_comb(CombFilter& comb, float input) {
+        float output = comb.buffer[comb.buffer_idx];
+        comb.filter_store = output * damp2 + comb.filter_store * damp1;
+        comb.buffer[comb.buffer_idx] = input + comb.filter_store * feedback;
+        if (++comb.buffer_idx >= comb.buffer_size) comb.buffer_idx = 0;
+        return output;
+    }
+
+    float process_allpass(AllpassFilter& ap, float input) {
+        float bufout = ap.buffer[ap.buffer_idx];
+        float output = -input + bufout;
+        ap.buffer[ap.buffer_idx] = input + bufout * 0.5f;
+        if (++ap.buffer_idx >= ap.buffer_size) ap.buffer_idx = 0;
+        return output;
+    }
+};
+
+constexpr int AudioEffectReverb::Impl::COMB_TUNING_L[NUM_COMBS];
+constexpr int AudioEffectReverb::Impl::COMB_TUNING_R[NUM_COMBS];
+constexpr int AudioEffectReverb::Impl::ALLPASS_TUNING_L[NUM_ALLPASSES];
+constexpr int AudioEffectReverb::Impl::ALLPASS_TUNING_R[NUM_ALLPASSES];
+
+AudioEffectReverb* AudioEffectReverb::create(int sample_rate) {
+    AudioEffectReverb* effect = new AudioEffectReverb();
+    effect->impl_ = new AudioEffectReverb::Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->init_buffers();
+    effect->impl_->update_parameters();
+    return effect;
+}
+
+void AudioEffectReverb::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectReverb::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled) return;
+
+    for (int i = 0; i < frame_count; ++i) {
+        float in_l = samples[i * channels];
+        float in_r = (channels >= 2) ? samples[i * channels + 1] : in_l;
+
+        // Pre-delay
+        int predelay_read = (impl_->predelay_idx - impl_->predelay_size + impl_->predelay_buffer_l.size())
+                           % impl_->predelay_buffer_l.size();
+        float delayed_l = impl_->predelay_buffer_l[predelay_read];
+        float delayed_r = impl_->predelay_buffer_r[predelay_read];
+        impl_->predelay_buffer_l[impl_->predelay_idx] = in_l;
+        impl_->predelay_buffer_r[impl_->predelay_idx] = in_r;
+        if (++impl_->predelay_idx >= static_cast<int>(impl_->predelay_buffer_l.size())) {
+            impl_->predelay_idx = 0;
+        }
+
+        float input = (delayed_l + delayed_r) * 0.5f;
+
+        // Accumulate comb filters in parallel
+        float out_l = 0.0f;
+        float out_r = 0.0f;
+        for (int c = 0; c < AudioEffectReverb::Impl::NUM_COMBS; ++c) {
+            out_l += impl_->process_comb(impl_->combs_l[c], input);
+            out_r += impl_->process_comb(impl_->combs_r[c], input);
+        }
+
+        // Feed through allpasses in series
+        for (int a = 0; a < AudioEffectReverb::Impl::NUM_ALLPASSES; ++a) {
+            out_l = impl_->process_allpass(impl_->allpasses_l[a], out_l);
+            out_r = impl_->process_allpass(impl_->allpasses_r[a], out_r);
+        }
+
+        // Mix wet and dry with width
+        float wet_l = out_l * impl_->wet1 + out_r * impl_->wet2;
+        float wet_r = out_r * impl_->wet1 + out_l * impl_->wet2;
+
+        samples[i * channels] = in_l * (1.0f - impl_->mix) + wet_l * impl_->mix;
+        if (channels >= 2) {
+            samples[i * channels + 1] = in_r * (1.0f - impl_->mix) + wet_r * impl_->mix;
+        }
+    }
+}
+
+void AudioEffectReverb::reset() {
+    for (int i = 0; i < AudioEffectReverb::Impl::NUM_COMBS; ++i) {
+        std::fill(impl_->combs_l[i].buffer.begin(), impl_->combs_l[i].buffer.end(), 0.0f);
+        std::fill(impl_->combs_r[i].buffer.begin(), impl_->combs_r[i].buffer.end(), 0.0f);
+        impl_->combs_l[i].filter_store = 0.0f;
+        impl_->combs_r[i].filter_store = 0.0f;
+    }
+    for (int i = 0; i < AudioEffectReverb::Impl::NUM_ALLPASSES; ++i) {
+        std::fill(impl_->allpasses_l[i].buffer.begin(), impl_->allpasses_l[i].buffer.end(), 0.0f);
+        std::fill(impl_->allpasses_r[i].buffer.begin(), impl_->allpasses_r[i].buffer.end(), 0.0f);
+    }
+    std::fill(impl_->predelay_buffer_l.begin(), impl_->predelay_buffer_l.end(), 0.0f);
+    std::fill(impl_->predelay_buffer_r.begin(), impl_->predelay_buffer_r.end(), 0.0f);
+}
+
+int AudioEffectReverb::get_latency_frames() const {
+    return impl_->predelay_size;
+}
+
+bool AudioEffectReverb::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectReverb::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+float AudioEffectReverb::get_mix() const {
+    return impl_->mix;
+}
+
+void AudioEffectReverb::set_mix(float mix) {
+    impl_->mix = std::max(0.0f, std::min(1.0f, mix));
+}
+
+void AudioEffectReverb::set_room_size(float size) {
+    impl_->room_size = std::max(0.0f, std::min(1.0f, size));
+    impl_->update_parameters();
+}
+
+float AudioEffectReverb::get_room_size() const {
+    return impl_->room_size;
+}
+
+void AudioEffectReverb::set_damping(float damping) {
+    impl_->damping = std::max(0.0f, std::min(1.0f, damping));
+    impl_->update_parameters();
+}
+
+float AudioEffectReverb::get_damping() const {
+    return impl_->damping;
+}
+
+void AudioEffectReverb::set_width(float width) {
+    impl_->width = std::max(0.0f, std::min(1.0f, width));
+    impl_->update_parameters();
+}
+
+float AudioEffectReverb::get_width() const {
+    return impl_->width;
+}
+
+void AudioEffectReverb::set_pre_delay_ms(float ms) {
+    impl_->pre_delay_ms = std::max(0.0f, std::min(500.0f, ms));
+    impl_->update_predelay();
+}
+
+float AudioEffectReverb::get_pre_delay_ms() const {
+    return impl_->pre_delay_ms;
+}
+
+void AudioEffectReverb::set_freeze(bool freeze) {
+    impl_->freeze = freeze;
+    impl_->update_parameters();
+}
+
+bool AudioEffectReverb::is_frozen() const {
+    return impl_->freeze;
+}
+
+// ============================================================================
+// AudioEffectChorus Implementation
+// ============================================================================
+
+struct AudioEffectChorus::Impl {
+    static constexpr int MAX_VOICES = 4;
+    static constexpr float MAX_DELAY_MS = 50.0f;
+
+    int sample_rate = 48000;
+    bool enabled = true;
+    float mix = 0.5f;
+    float rate_hz = 1.5f;
+    float depth = 0.5f;
+    float delay_ms = 7.0f;
+    float feedback = 0.0f;
+    int voices = 2;
+
+    // Delay buffer
+    std::vector<float> delay_buffer_l;
+    std::vector<float> delay_buffer_r;
+    int buffer_size = 0;
+    int write_idx = 0;
+
+    // LFO state for each voice
+    struct VoiceLFO {
+        float phase = 0.0f;
+        float phase_offset = 0.0f;
+    };
+    VoiceLFO voice_lfo[MAX_VOICES];
+
+    float phase_increment = 0.0f;
+    float base_delay_samples = 0.0f;
+    float depth_samples = 0.0f;
+
+    void init_buffers() {
+        buffer_size = static_cast<int>(MAX_DELAY_MS * 0.001f * sample_rate * 2);
+        delay_buffer_l.resize(buffer_size, 0.0f);
+        delay_buffer_r.resize(buffer_size, 0.0f);
+        write_idx = 0;
+
+        // Initialize voice phase offsets
+        for (int v = 0; v < MAX_VOICES; ++v) {
+            voice_lfo[v].phase = 0.0f;
+            voice_lfo[v].phase_offset = static_cast<float>(v) / MAX_VOICES;
+        }
+
+        update_parameters();
+    }
+
+    void update_parameters() {
+        phase_increment = rate_hz / sample_rate;
+        base_delay_samples = delay_ms * 0.001f * sample_rate;
+        depth_samples = depth * base_delay_samples * 0.5f;
+    }
+
+    float read_delay(const std::vector<float>& buffer, float delay_samples) {
+        float read_pos = write_idx - delay_samples;
+        while (read_pos < 0) read_pos += buffer_size;
+
+        int idx0 = static_cast<int>(read_pos);
+        int idx1 = (idx0 + 1) % buffer_size;
+        float frac = read_pos - idx0;
+
+        // Linear interpolation
+        return buffer[idx0] * (1.0f - frac) + buffer[idx1] * frac;
+    }
+};
+
+AudioEffectChorus* AudioEffectChorus::create(int sample_rate) {
+    AudioEffectChorus* effect = new AudioEffectChorus();
+    effect->impl_ = new AudioEffectChorus::Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->init_buffers();
+    return effect;
+}
+
+void AudioEffectChorus::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectChorus::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled) return;
+
+    const float two_pi = 6.28318530718f;
+
+    for (int i = 0; i < frame_count; ++i) {
+        float in_l = samples[i * channels];
+        float in_r = (channels >= 2) ? samples[i * channels + 1] : in_l;
+
+        // Write to delay buffer (with feedback)
+        impl_->delay_buffer_l[impl_->write_idx] = in_l;
+        impl_->delay_buffer_r[impl_->write_idx] = in_r;
+
+        // Accumulate chorus output from all voices
+        float chorus_l = 0.0f;
+        float chorus_r = 0.0f;
+
+        for (int v = 0; v < impl_->voices; ++v) {
+            // Compute LFO value for this voice
+            float phase = impl_->voice_lfo[v].phase + impl_->voice_lfo[v].phase_offset;
+            if (phase >= 1.0f) phase -= 1.0f;
+            float lfo = std::sin(phase * two_pi);
+
+            // Compute delay for this voice
+            float delay = impl_->base_delay_samples + lfo * impl_->depth_samples;
+            delay = std::max(1.0f, delay);
+
+            // Read from delay line
+            chorus_l += impl_->read_delay(impl_->delay_buffer_l, delay);
+            chorus_r += impl_->read_delay(impl_->delay_buffer_r, delay);
+        }
+
+        // Normalize by number of voices
+        float voice_scale = 1.0f / impl_->voices;
+        chorus_l *= voice_scale;
+        chorus_r *= voice_scale;
+
+        // Apply feedback
+        impl_->delay_buffer_l[impl_->write_idx] += chorus_l * impl_->feedback;
+        impl_->delay_buffer_r[impl_->write_idx] += chorus_r * impl_->feedback;
+
+        // Mix dry and wet
+        samples[i * channels] = in_l * (1.0f - impl_->mix) + chorus_l * impl_->mix;
+        if (channels >= 2) {
+            samples[i * channels + 1] = in_r * (1.0f - impl_->mix) + chorus_r * impl_->mix;
+        }
+
+        // Advance write position
+        if (++impl_->write_idx >= impl_->buffer_size) impl_->write_idx = 0;
+
+        // Advance LFO phase (same for all voices)
+        impl_->voice_lfo[0].phase += impl_->phase_increment;
+        if (impl_->voice_lfo[0].phase >= 1.0f) impl_->voice_lfo[0].phase -= 1.0f;
+    }
+}
+
+void AudioEffectChorus::reset() {
+    std::fill(impl_->delay_buffer_l.begin(), impl_->delay_buffer_l.end(), 0.0f);
+    std::fill(impl_->delay_buffer_r.begin(), impl_->delay_buffer_r.end(), 0.0f);
+    impl_->write_idx = 0;
+    for (int v = 0; v < AudioEffectChorus::Impl::MAX_VOICES; ++v) {
+        impl_->voice_lfo[v].phase = 0.0f;
+    }
+}
+
+int AudioEffectChorus::get_latency_frames() const {
+    return static_cast<int>(impl_->base_delay_samples);
+}
+
+bool AudioEffectChorus::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectChorus::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+float AudioEffectChorus::get_mix() const {
+    return impl_->mix;
+}
+
+void AudioEffectChorus::set_mix(float mix) {
+    impl_->mix = std::max(0.0f, std::min(1.0f, mix));
+}
+
+void AudioEffectChorus::set_rate_hz(float hz) {
+    impl_->rate_hz = std::max(0.01f, std::min(10.0f, hz));
+    impl_->update_parameters();
+}
+
+float AudioEffectChorus::get_rate_hz() const {
+    return impl_->rate_hz;
+}
+
+void AudioEffectChorus::set_depth(float depth) {
+    impl_->depth = std::max(0.0f, std::min(1.0f, depth));
+    impl_->update_parameters();
+}
+
+float AudioEffectChorus::get_depth() const {
+    return impl_->depth;
+}
+
+void AudioEffectChorus::set_delay_ms(float ms) {
+    impl_->delay_ms = std::max(1.0f, std::min(AudioEffectChorus::Impl::MAX_DELAY_MS, ms));
+    impl_->update_parameters();
+}
+
+float AudioEffectChorus::get_delay_ms() const {
+    return impl_->delay_ms;
+}
+
+void AudioEffectChorus::set_feedback(float feedback) {
+    impl_->feedback = std::max(-0.9f, std::min(0.9f, feedback));
+}
+
+float AudioEffectChorus::get_feedback() const {
+    return impl_->feedback;
+}
+
+void AudioEffectChorus::set_voices(int voices) {
+    impl_->voices = std::max(1, std::min(AudioEffectChorus::Impl::MAX_VOICES, voices));
+}
+
+int AudioEffectChorus::get_voices() const {
+    return impl_->voices;
+}
+
+// ============================================================================
+// AudioEffectDistortion Implementation
+// ============================================================================
+
+struct AudioEffectDistortion::Impl {
+    int sample_rate = 48000;
+    bool enabled = true;
+    float mix = 1.0f;
+    AudioEffectDistortion::Mode mode = AudioEffectDistortion::Mode::SoftClip;
+    float drive = 2.0f;
+    float output_level = 0.5f;
+    float tone = 0.5f;
+    int bit_depth = 8;
+    int downsample = 1;
+
+    // Tone filter state (simple one-pole)
+    float filter_state_l = 0.0f;
+    float filter_state_r = 0.0f;
+    float filter_coeff = 0.0f;
+
+    // Sample hold for bitcrush
+    float hold_l = 0.0f;
+    float hold_r = 0.0f;
+    int hold_counter = 0;
+
+    void update_filter() {
+        // tone: 0 = dark (heavy filtering), 1 = bright (less filtering)
+        filter_coeff = 0.1f + tone * 0.9f;
+    }
+
+    float apply_distortion(float sample) {
+        float in = sample * drive;
+        float out = 0.0f;
+
+        switch (mode) {
+            case AudioEffectDistortion::Mode::SoftClip:
+                // Soft clipping using tanh-like curve
+                if (in > 1.0f) {
+                    out = 2.0f / 3.0f;
+                } else if (in < -1.0f) {
+                    out = -2.0f / 3.0f;
+                } else {
+                    out = in - (in * in * in) / 3.0f;
+                }
+                break;
+
+            case AudioEffectDistortion::Mode::HardClip:
+                out = std::max(-1.0f, std::min(1.0f, in));
+                break;
+
+            case AudioEffectDistortion::Mode::Tanh:
+                out = std::tanh(in);
+                break;
+
+            case AudioEffectDistortion::Mode::Foldback:
+                // Foldback distortion
+                while (in > 1.0f || in < -1.0f) {
+                    if (in > 1.0f) {
+                        in = 2.0f - in;
+                    } else if (in < -1.0f) {
+                        in = -2.0f - in;
+                    }
+                }
+                out = in;
+                break;
+
+            case AudioEffectDistortion::Mode::Bitcrush:
+                // Quantization handled separately
+                out = in;
+                break;
+        }
+
+        return out * output_level;
+    }
+
+    float apply_bitcrush(float sample) {
+        // Bit reduction
+        float levels = std::pow(2.0f, static_cast<float>(bit_depth)) - 1.0f;
+        float quantized = std::round(sample * levels) / levels;
+        return quantized * output_level;
+    }
+};
+
+AudioEffectDistortion* AudioEffectDistortion::create(int sample_rate) {
+    AudioEffectDistortion* effect = new AudioEffectDistortion();
+    effect->impl_ = new AudioEffectDistortion::Impl();
+    effect->impl_->sample_rate = sample_rate;
+    effect->impl_->update_filter();
+    return effect;
+}
+
+void AudioEffectDistortion::destroy() {
+    delete impl_;
+    delete this;
+}
+
+void AudioEffectDistortion::process(float* samples, int frame_count, int channels) {
+    if (!impl_->enabled) return;
+
+    for (int i = 0; i < frame_count; ++i) {
+        float dry_l = samples[i * channels];
+        float dry_r = (channels >= 2) ? samples[i * channels + 1] : dry_l;
+
+        float wet_l, wet_r;
+
+        if (impl_->mode == AudioEffectDistortion::Mode::Bitcrush) {
+            // Sample rate reduction
+            if (impl_->hold_counter <= 0) {
+                impl_->hold_l = impl_->apply_bitcrush(dry_l * impl_->drive);
+                impl_->hold_r = impl_->apply_bitcrush(dry_r * impl_->drive);
+                impl_->hold_counter = impl_->downsample;
+            }
+            impl_->hold_counter--;
+            wet_l = impl_->hold_l;
+            wet_r = impl_->hold_r;
+        } else {
+            wet_l = impl_->apply_distortion(dry_l);
+            wet_r = impl_->apply_distortion(dry_r);
+        }
+
+        // Apply tone filter (one-pole low-pass)
+        impl_->filter_state_l = impl_->filter_state_l + impl_->filter_coeff * (wet_l - impl_->filter_state_l);
+        impl_->filter_state_r = impl_->filter_state_r + impl_->filter_coeff * (wet_r - impl_->filter_state_r);
+
+        wet_l = impl_->filter_state_l;
+        wet_r = impl_->filter_state_r;
+
+        // Mix
+        samples[i * channels] = dry_l * (1.0f - impl_->mix) + wet_l * impl_->mix;
+        if (channels >= 2) {
+            samples[i * channels + 1] = dry_r * (1.0f - impl_->mix) + wet_r * impl_->mix;
+        }
+    }
+}
+
+void AudioEffectDistortion::reset() {
+    impl_->filter_state_l = 0.0f;
+    impl_->filter_state_r = 0.0f;
+    impl_->hold_l = 0.0f;
+    impl_->hold_r = 0.0f;
+    impl_->hold_counter = 0;
+}
+
+bool AudioEffectDistortion::is_enabled() const {
+    return impl_->enabled;
+}
+
+void AudioEffectDistortion::set_enabled(bool enabled) {
+    impl_->enabled = enabled;
+}
+
+float AudioEffectDistortion::get_mix() const {
+    return impl_->mix;
+}
+
+void AudioEffectDistortion::set_mix(float mix) {
+    impl_->mix = std::max(0.0f, std::min(1.0f, mix));
+}
+
+void AudioEffectDistortion::set_mode(Mode mode) {
+    impl_->mode = mode;
+}
+
+AudioEffectDistortion::Mode AudioEffectDistortion::get_mode() const {
+    return impl_->mode;
+}
+
+void AudioEffectDistortion::set_drive(float drive) {
+    impl_->drive = std::max(1.0f, std::min(100.0f, drive));
+}
+
+float AudioEffectDistortion::get_drive() const {
+    return impl_->drive;
+}
+
+void AudioEffectDistortion::set_output_level(float level) {
+    impl_->output_level = std::max(0.0f, std::min(1.0f, level));
+}
+
+float AudioEffectDistortion::get_output_level() const {
+    return impl_->output_level;
+}
+
+void AudioEffectDistortion::set_tone(float tone) {
+    impl_->tone = std::max(0.0f, std::min(1.0f, tone));
+    impl_->update_filter();
+}
+
+float AudioEffectDistortion::get_tone() const {
+    return impl_->tone;
+}
+
+void AudioEffectDistortion::set_bit_depth(int bits) {
+    impl_->bit_depth = std::max(1, std::min(16, bits));
+}
+
+int AudioEffectDistortion::get_bit_depth() const {
+    return impl_->bit_depth;
+}
+
+void AudioEffectDistortion::set_downsample(int factor) {
+    impl_->downsample = std::max(1, std::min(64, factor));
+}
+
+int AudioEffectDistortion::get_downsample() const {
+    return impl_->downsample;
 }
 
 } // namespace audio
