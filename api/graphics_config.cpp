@@ -1,21 +1,15 @@
 /*
  * graphics_config.cpp - Configuration save/load and multi-window creation
- * Uses Boost.PropertyTree for INI format parsing when available
+ * Uses Boost.PropertyTree for INI format parsing
  */
 
 #include "window.hpp"
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
 #include <fstream>
-#include <sstream>
 #include <algorithm>
 
-#ifdef WINDOW_USE_BOOST_INI
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/ini_parser.hpp>
 namespace pt = boost::property_tree;
-#endif
 
 namespace window {
 
@@ -23,104 +17,6 @@ namespace window {
 // Helper functions for parsing
 //=============================================================================
 
-#ifndef WINDOW_USE_BOOST_INI
-static void trim_whitespace(char* str) {
-    if (!str) return;
-
-    char* start = str;
-    while (*start && (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')) {
-        start++;
-    }
-
-    char* end = start + strlen(start) - 1;
-    while (end > start && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
-        *end = '\0';
-        end--;
-    }
-
-    if (start != str) {
-        memmove(str, start, strlen(start) + 1);
-    }
-}
-
-static bool parse_int(const char* value, int* out) {
-    if (!value || !out) return false;
-    char* end;
-    long val = strtol(value, &end, 10);
-    if (end == value || *end != '\0') return false;
-    *out = static_cast<int>(val);
-    return true;
-}
-
-static bool parse_bool(const char* value, bool* out) {
-    if (!value || !out) return false;
-    if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0 || strcmp(value, "yes") == 0) {
-        *out = true;
-        return true;
-    }
-    if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0 || strcmp(value, "no") == 0) {
-        *out = false;
-        return true;
-    }
-    return false;
-}
-
-static bool parse_backend_cstr(const char* value, Backend* out) {
-    if (!value || !out) return false;
-    if (strcmp(value, "auto") == 0 || strcmp(value, "Auto") == 0) {
-        *out = Backend::Auto;
-        return true;
-    }
-    if (strcmp(value, "opengl") == 0 || strcmp(value, "OpenGL") == 0) {
-        *out = Backend::OpenGL;
-        return true;
-    }
-    if (strcmp(value, "vulkan") == 0 || strcmp(value, "Vulkan") == 0) {
-        *out = Backend::Vulkan;
-        return true;
-    }
-    if (strcmp(value, "d3d11") == 0 || strcmp(value, "D3D11") == 0) {
-        *out = Backend::D3D11;
-        return true;
-    }
-    if (strcmp(value, "d3d12") == 0 || strcmp(value, "D3D12") == 0) {
-        *out = Backend::D3D12;
-        return true;
-    }
-    if (strcmp(value, "metal") == 0 || strcmp(value, "Metal") == 0) {
-        *out = Backend::Metal;
-        return true;
-    }
-    return false;
-}
-
-static bool parse_swap_mode_cstr(const char* value, SwapMode* out) {
-    if (!value || !out) return false;
-    if (strcmp(value, "fifo") == 0 || strcmp(value, "Fifo") == 0 || strcmp(value, "vsync") == 0) {
-        *out = SwapMode::Fifo;
-        return true;
-    }
-    if (strcmp(value, "fifo_relaxed") == 0 || strcmp(value, "FifoRelaxed") == 0 || strcmp(value, "adaptive") == 0) {
-        *out = SwapMode::FifoRelaxed;
-        return true;
-    }
-    if (strcmp(value, "mailbox") == 0 || strcmp(value, "Mailbox") == 0 || strcmp(value, "triple_buffer") == 0) {
-        *out = SwapMode::Mailbox;
-        return true;
-    }
-    if (strcmp(value, "immediate") == 0 || strcmp(value, "Immediate") == 0 || strcmp(value, "no_vsync") == 0) {
-        *out = SwapMode::Immediate;
-        return true;
-    }
-    if (strcmp(value, "auto") == 0 || strcmp(value, "Auto") == 0) {
-        *out = SwapMode::Auto;
-        return true;
-    }
-    return false;
-}
-#endif
-
-#ifdef WINDOW_USE_BOOST_INI
 static bool parse_backend(const std::string& value, Backend* out) {
     if (!out) return false;
     std::string lower = value;
@@ -153,7 +49,7 @@ static bool parse_backend(const std::string& value, Backend* out) {
     return false;
 }
 
-static bool parse_swap_mode_boost(const std::string& value, SwapMode* out) {
+static bool parse_swap_mode_impl(const std::string& value, SwapMode* out) {
     if (!out) return false;
     std::string lower = value;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
@@ -180,7 +76,6 @@ static bool parse_swap_mode_boost(const std::string& value, SwapMode* out) {
     }
     return false;
 }
-#endif
 
 static const char* backend_to_config_string(Backend backend) {
     switch (backend) {
@@ -262,7 +157,6 @@ bool parse_swap_mode(const char* value, SwapMode* out) {
 //=============================================================================
 
 bool Config::save(const char* filepath) const {
-#ifdef WINDOW_USE_BOOST_INI
     try {
         pt::ptree tree;
 
@@ -338,54 +232,11 @@ bool Config::save(const char* filepath) const {
     } catch (const std::exception&) {
         return false;
     }
-#else
-    FILE* file = fopen(filepath, "w");
-    if (!file) return false;
-
-    fprintf(file, "# Graphics Configuration File\n");
-    fprintf(file, "# Generated by window library\n\n");
-
-    // Graphics section (shared settings)
-    fprintf(file, "[graphics]\n");
-    fprintf(file, "backend = %s\n", backend_to_config_string(backend));
-    fprintf(file, "device_index = %d\n", device_index);
-    fprintf(file, "device_name = %s\n", device_name.c_str());
-    fprintf(file, "swap_mode = %s\n", swap_mode_to_config_string(swap_mode));
-    fprintf(file, "vsync = %s\n", vsync ? "true" : "false");
-    fprintf(file, "samples = %d\n", samples);
-    fprintf(file, "back_buffers = %d\n", back_buffers);
-    fprintf(file, "color_bits = %d\n", color_bits);
-    fprintf(file, "depth_bits = %d\n", depth_bits);
-    fprintf(file, "stencil_bits = %d\n", stencil_bits);
-    fprintf(file, "\n");
-
-    // Window sections
-    for (int i = 0; i < window_count; i++) {
-        const WindowConfigEntry& win = windows[i];
-        fprintf(file, "[window.%s]\n", win.name.c_str());
-        fprintf(file, "title = %s\n", win.title.c_str());
-        fprintf(file, "monitor = %d\n", win.monitor_index);
-        fprintf(file, "x = %d\n", win.x);
-        fprintf(file, "y = %d\n", win.y);
-        fprintf(file, "width = %d\n", win.width);
-        fprintf(file, "height = %d\n", win.height);
-        fprintf(file, "fullscreen = %s\n", win.fullscreen ? "true" : "false");
-
-        char style_str[512];
-        window_style_to_string(win.style, style_str, sizeof(style_str));
-        fprintf(file, "style = %s\n", style_str);
-        fprintf(file, "\n");
-    }
-
-    fclose(file);
-    return true;
-#endif
 }
 
 bool Config::load(const char* filepath, Config* out_config) {
     if (!out_config) return false;
 
-#ifdef WINDOW_USE_BOOST_INI
     try {
         pt::ptree tree;
         pt::read_ini(filepath, tree);
@@ -404,7 +255,7 @@ bool Config::load(const char* filepath, Config* out_config) {
             out_config->device_name = graphics->get<std::string>("device_name", "");
 
             std::string swap_mode_str = graphics->get<std::string>("swap_mode", "auto");
-            parse_swap_mode_boost(swap_mode_str, &out_config->swap_mode);
+            parse_swap_mode_impl(swap_mode_str, &out_config->swap_mode);
 
             out_config->vsync = graphics->get<bool>("vsync", true);
             out_config->samples = graphics->get<int>("samples", 1);
@@ -456,131 +307,6 @@ bool Config::load(const char* filepath, Config* out_config) {
     } catch (const std::exception&) {
         return false;
     }
-#else
-    FILE* file = fopen(filepath, "r");
-    if (!file) return false;
-
-    // Initialize with defaults
-    *out_config = Config{};
-    out_config->window_count = 0;  // Will be populated from file
-
-    char line[1024];
-    char section[128] = "";
-    std::string window_name;
-    int current_window_idx = -1;
-
-    while (fgets(line, sizeof(line), file)) {
-        trim_whitespace(line);
-
-        // Skip empty lines and comments
-        if (line[0] == '\0' || line[0] == '#' || line[0] == ';') {
-            continue;
-        }
-
-        // Section header
-        if (line[0] == '[') {
-            char* end = strchr(line, ']');
-            if (end) {
-                *end = '\0';
-                strncpy(section, line + 1, sizeof(section) - 1);
-                section[sizeof(section) - 1] = '\0';
-
-                // Check for window section: [window.name]
-                if (strncmp(section, "window.", 7) == 0) {
-                    window_name = section + 7;
-
-                    // Find or create window config
-                    current_window_idx = -1;
-                    for (int i = 0; i < out_config->window_count; i++) {
-                        if (out_config->windows[i].name == window_name) {
-                            current_window_idx = i;
-                            break;
-                        }
-                    }
-                    if (current_window_idx < 0 && out_config->window_count < MAX_CONFIG_WINDOWS) {
-                        current_window_idx = out_config->window_count;
-                        out_config->windows[current_window_idx].name = window_name;
-                        out_config->window_count++;
-                    }
-                } else {
-                    current_window_idx = -1;
-                    window_name.clear();
-                }
-            }
-            continue;
-        }
-
-        // Key = Value
-        char* eq = strchr(line, '=');
-        if (!eq) continue;
-
-        *eq = '\0';
-        char* key = line;
-        char* value = eq + 1;
-        trim_whitespace(key);
-        trim_whitespace(value);
-
-        // Parse graphics section
-        if (strcmp(section, "graphics") == 0) {
-            if (strcmp(key, "backend") == 0) {
-                parse_backend_cstr(value, &out_config->backend);
-            } else if (strcmp(key, "device_index") == 0) {
-                parse_int(value, &out_config->device_index);
-            } else if (strcmp(key, "device_name") == 0) {
-                out_config->device_name = value;
-            } else if (strcmp(key, "swap_mode") == 0) {
-                parse_swap_mode_cstr(value, &out_config->swap_mode);
-            } else if (strcmp(key, "vsync") == 0) {
-                parse_bool(value, &out_config->vsync);
-            } else if (strcmp(key, "samples") == 0) {
-                parse_int(value, &out_config->samples);
-            } else if (strcmp(key, "back_buffers") == 0) {
-                parse_int(value, &out_config->back_buffers);
-            } else if (strcmp(key, "color_bits") == 0) {
-                parse_int(value, &out_config->color_bits);
-            } else if (strcmp(key, "depth_bits") == 0) {
-                parse_int(value, &out_config->depth_bits);
-            } else if (strcmp(key, "stencil_bits") == 0) {
-                parse_int(value, &out_config->stencil_bits);
-            }
-        }
-        // Parse window section
-        else if (current_window_idx >= 0 && current_window_idx < out_config->window_count) {
-            WindowConfigEntry& win = out_config->windows[current_window_idx];
-            if (strcmp(key, "title") == 0) {
-                win.title = value;
-            } else if (strcmp(key, "monitor") == 0) {
-                parse_int(value, &win.monitor_index);
-            } else if (strcmp(key, "x") == 0) {
-                parse_int(value, &win.x);
-            } else if (strcmp(key, "y") == 0) {
-                parse_int(value, &win.y);
-            } else if (strcmp(key, "width") == 0) {
-                parse_int(value, &win.width);
-            } else if (strcmp(key, "height") == 0) {
-                parse_int(value, &win.height);
-            } else if (strcmp(key, "fullscreen") == 0) {
-                parse_bool(value, &win.fullscreen);
-            } else if (strcmp(key, "style") == 0) {
-                parse_window_style(value, &win.style);
-            }
-        }
-    }
-
-    fclose(file);
-
-    // Ensure at least one window exists
-    if (out_config->window_count == 0) {
-        out_config->window_count = 1;
-        out_config->windows[0].name = "main";
-        out_config->windows[0].title = "Window";
-    }
-
-    // Validate after loading
-    out_config->validate();
-
-    return true;
-#endif
 }
 
 bool Config::validate() {

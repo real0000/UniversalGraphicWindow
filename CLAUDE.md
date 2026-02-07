@@ -35,7 +35,7 @@ Example executables are built as `example_basic`, `example_opengl`, `example_vul
 ### Dependencies
 
 - **C++17** - Required (set in CMakeLists.txt)
-- **Boost** - Optional, for INI config parsing via PropertyTree. Falls back to built-in parser if not found.
+- **Boost** - Required for INI config parsing (PropertyTree) and GUI geometry (Boost.Geometry)
 
 ## Architecture
 
@@ -308,7 +308,7 @@ On Wayland, multi-window support uses a compositor-style architecture:
 - **New graphics backend**: Add `api/api_<backend>.cpp`, follow existing patterns for `WINDOW_SUPPORT_*` guards.
 - **New audio backend**: Add `audio/audio_<backend>.cpp`, follow existing patterns for `WINDOW_SUPPORT_*` guards.
 - **Apple platforms**: Objective-C++ files (`.mm`) are auto-configured with `-x objective-c++`.
-- **Config changes**: Update `api/graphics_config.cpp` for INI save/load (both Boost and fallback paths).
+- **Config changes**: Update `api/graphics_config.cpp` for INI save/load.
 - **Audio config changes**: Update `audio/audio.cpp` for INI save/load in `AudioConfig` methods.
 
 ### Directory Structure
@@ -334,7 +334,7 @@ UniversalGraphicWindow/
 │   ├── api_d3d11.cpp
 │   ├── api_d3d12.cpp
 │   ├── api_metal.mm
-│   ├── graphics_config.cpp  # Config parsing (Boost/fallback)
+│   ├── graphics_config.cpp  # Config parsing (Boost.PropertyTree)
 │   ├── glad.c
 │   ├── glad.h
 │   └── khrplatform.h

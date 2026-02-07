@@ -206,14 +206,29 @@ endif()
 # Find Dependencies
 #=============================================================================
 
-# Boost (for INI parser via property_tree) - optional
+# Boost (required for INI parsing and geometry)
 find_package(Boost QUIET)
-if(Boost_FOUND)
-    message(STATUS "Boost found: ${Boost_VERSION} - using Boost.PropertyTree for INI parsing")
-    list(APPEND WINDOW_LIBS Boost::boost)
-    list(APPEND WINDOW_DEFINES WINDOW_USE_BOOST_INI)
+if(NOT Boost_FOUND)
+    message(STATUS "Boost not found - fetching from GitHub...")
+    FetchContent_Declare(
+        Boost
+        GIT_REPOSITORY https://github.com/boostorg/boost.git
+        GIT_TAG boost-1.84.0
+        GIT_SHALLOW TRUE
+        GIT_PROGRESS TRUE
+    )
+    set(BOOST_INCLUDE_LIBRARIES geometry property_tree)
+    set(BOOST_ENABLE_CMAKE ON)
+    FetchContent_MakeAvailable(Boost)
+    message(STATUS "Boost fetched: 1.84.0")
+    set(BOOST_FETCHED TRUE)
+    # Get the Boost include directory for header-only libraries
+    FetchContent_GetProperties(Boost SOURCE_DIR BOOST_SOURCE_DIR)
+    set(BOOST_INCLUDE_DIR "${BOOST_SOURCE_DIR}/libs")
 else()
-    message(STATUS "Boost not found - using built-in INI parser")
+    message(STATUS "Boost found: ${Boost_VERSION}")
+    set(BOOST_FETCHED FALSE)
+    set(BOOST_INCLUDE_DIR "${Boost_INCLUDE_DIRS}")
 endif()
 
 # OpenGL
@@ -614,6 +629,29 @@ target_include_directories(window PUBLIC
 
 target_compile_definitions(window PUBLIC ${WINDOW_DEFINES})
 target_link_libraries(window PUBLIC ${WINDOW_LIBS})
+
+# Add Boost include directories (geometry and property_tree are header-only)
+if(BOOST_FETCHED)
+    # When fetched via FetchContent, add all Boost library include paths
+    # Each library has headers in libs/<name>/include/
+    file(GLOB BOOST_LIB_DIRS "${boost_SOURCE_DIR}/libs/*")
+    foreach(lib_dir ${BOOST_LIB_DIRS})
+        if(IS_DIRECTORY "${lib_dir}/include")
+            target_include_directories(window PUBLIC
+                $<BUILD_INTERFACE:${lib_dir}/include>
+            )
+        endif()
+    endforeach()
+    # Also add numeric/conversion which has a nested structure
+    if(IS_DIRECTORY "${boost_SOURCE_DIR}/libs/numeric/conversion/include")
+        target_include_directories(window PUBLIC
+            $<BUILD_INTERFACE:${boost_SOURCE_DIR}/libs/numeric/conversion/include>
+        )
+    endif()
+else()
+    # When system Boost is found, use its include directories
+    target_include_directories(window PUBLIC ${Boost_INCLUDE_DIRS})
+endif()
 
 # Add external audio decoder include directories
 if(WINDOW_AUDIO_DECODER_INCLUDES)

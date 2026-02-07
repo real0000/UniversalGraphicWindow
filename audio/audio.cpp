@@ -22,6 +22,10 @@
 #include <atomic>
 #include <memory>
 
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/ini_parser.hpp>
+namespace pt = boost::property_tree;
+
 // External audio decoder libraries (when enabled)
 #ifdef WINDOW_SUPPORT_MP3_DECODER
 #define MINIMP3_IMPLEMENTATION
@@ -2080,103 +2084,33 @@ int AudioResamplerCPU::flush(float* output) {
 // ============================================================================
 
 // Helper functions for parsing
-static void trim_whitespace(char* str) {
-    if (!str) return;
+static bool parse_audio_backend(const std::string& value, AudioBackend* out) {
+    if (!out) return false;
+    std::string lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
-    char* start = str;
-    while (*start && (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n')) {
-        start++;
-    }
-
-    char* end = start + strlen(start) - 1;
-    while (end > start && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
-        *end = '\0';
-        end--;
-    }
-
-    if (start != str) {
-        memmove(str, start, strlen(start) + 1);
-    }
-}
-
-static bool parse_int(const char* value, int* out) {
-    if (!value || !out) return false;
-    char* end;
-    long val = strtol(value, &end, 10);
-    if (end == value || *end != '\0') return false;
-    *out = static_cast<int>(val);
-    return true;
-}
-
-static bool parse_float(const char* value, float* out) {
-    if (!value || !out) return false;
-    char* end;
-    float val = strtof(value, &end);
-    if (end == value || *end != '\0') return false;
-    *out = val;
-    return true;
-}
-
-static bool parse_bool(const char* value, bool* out) {
-    if (!value || !out) return false;
-    if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0 || strcmp(value, "yes") == 0) {
-        *out = true;
-        return true;
-    }
-    if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0 || strcmp(value, "no") == 0) {
-        *out = false;
-        return true;
-    }
-    return false;
-}
-
-static bool parse_audio_backend(const char* value, AudioBackend* out) {
-    if (!value || !out) return false;
-
-    // Case-insensitive comparison helper
-    auto lower_equal = [](const char* a, const char* b) {
-        while (*a && *b) {
-            char ca = (*a >= 'A' && *a <= 'Z') ? (*a + 32) : *a;
-            char cb = (*b >= 'A' && *b <= 'Z') ? (*b + 32) : *b;
-            if (ca != cb) return false;
-            a++; b++;
-        }
-        return *a == *b;
-    };
-
-    if (lower_equal(value, "auto")) { *out = AudioBackend::Auto; return true; }
-    if (lower_equal(value, "wasapi")) { *out = AudioBackend::WASAPI; return true; }
-    if (lower_equal(value, "coreaudio")) { *out = AudioBackend::CoreAudio; return true; }
-    if (lower_equal(value, "pulseaudio")) { *out = AudioBackend::PulseAudio; return true; }
-    if (lower_equal(value, "alsa")) { *out = AudioBackend::ALSA; return true; }
-    if (lower_equal(value, "aaudio")) { *out = AudioBackend::AAudio; return true; }
-    if (lower_equal(value, "opensles")) { *out = AudioBackend::OpenSLES; return true; }
-    if (lower_equal(value, "webaudio")) { *out = AudioBackend::WebAudio; return true; }
-    if (lower_equal(value, "openal")) { *out = AudioBackend::OpenAL; return true; }
+    if (lower == "auto") { *out = AudioBackend::Auto; return true; }
+    if (lower == "wasapi") { *out = AudioBackend::WASAPI; return true; }
+    if (lower == "coreaudio") { *out = AudioBackend::CoreAudio; return true; }
+    if (lower == "pulseaudio") { *out = AudioBackend::PulseAudio; return true; }
+    if (lower == "alsa") { *out = AudioBackend::ALSA; return true; }
+    if (lower == "aaudio") { *out = AudioBackend::AAudio; return true; }
+    if (lower == "opensles") { *out = AudioBackend::OpenSLES; return true; }
+    if (lower == "webaudio") { *out = AudioBackend::WebAudio; return true; }
+    if (lower == "openal") { *out = AudioBackend::OpenAL; return true; }
 
     return false;
 }
 
-static bool parse_sample_format(const char* value, SampleFormat* out) {
-    if (!value || !out) return false;
+static bool parse_sample_format(const std::string& value, SampleFormat* out) {
+    if (!out) return false;
+    std::string lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
-    auto lower_equal = [](const char* a, const char* b) {
-        while (*a && *b) {
-            char ca = (*a >= 'A' && *a <= 'Z') ? (*a + 32) : *a;
-            char cb = (*b >= 'A' && *b <= 'Z') ? (*b + 32) : *b;
-            if (ca != cb) return false;
-            a++; b++;
-        }
-        return *a == *b;
-    };
-
-    if (lower_equal(value, "int16") || lower_equal(value, "s16")) { *out = SampleFormat::Int16; return true; }
-    if (lower_equal(value, "int24") || lower_equal(value, "s24")) { *out = SampleFormat::Int24; return true; }
-    if (lower_equal(value, "int32") || lower_equal(value, "s32")) { *out = SampleFormat::Int32; return true; }
-    if (lower_equal(value, "float32") || lower_equal(value, "f32") || lower_equal(value, "float")) {
-        *out = SampleFormat::Float32;
-        return true;
-    }
+    if (lower == "int16" || lower == "s16") { *out = SampleFormat::Int16; return true; }
+    if (lower == "int24" || lower == "s24") { *out = SampleFormat::Int24; return true; }
+    if (lower == "int32" || lower == "s32") { *out = SampleFormat::Int32; return true; }
+    if (lower == "float32" || lower == "f32" || lower == "float") { *out = SampleFormat::Float32; return true; }
 
     return false;
 }
@@ -2207,105 +2141,72 @@ static const char* sample_format_to_config_string(SampleFormat format) {
 }
 
 bool AudioConfig::save(const char* filepath) const {
-    FILE* file = fopen(filepath, "w");
-    if (!file) return false;
+    try {
+        std::ofstream file(filepath);
+        if (!file) return false;
 
-    fprintf(file, "# Audio Configuration File\n");
-    fprintf(file, "# Generated by window audio library\n\n");
+        file << "# Audio Configuration File\n";
+        file << "# Generated by window audio library\n\n";
 
-    fprintf(file, "[audio]\n");
-    fprintf(file, "backend = %s\n", audio_backend_to_config_string(backend));
-    fprintf(file, "output_device_index = %d\n", output_device_index);
-    fprintf(file, "output_device_name = %s\n", output_device_name.c_str());
-    fprintf(file, "input_device_index = %d\n", input_device_index);
-    fprintf(file, "input_device_name = %s\n", input_device_name.c_str());
-    fprintf(file, "sample_rate = %d\n", sample_rate);
-    fprintf(file, "channels = %d\n", channels);
-    fprintf(file, "sample_format = %s\n", sample_format_to_config_string(sample_format));
-    fprintf(file, "buffer_frames = %d\n", buffer_frames);
-    fprintf(file, "exclusive_mode = %s\n", exclusive_mode ? "true" : "false");
-    fprintf(file, "master_volume = %.2f\n", master_volume);
-    fprintf(file, "\n");
+        file << "[audio]\n";
+        file << "backend = " << audio_backend_to_config_string(backend) << "\n";
+        file << "output_device_index = " << output_device_index << "\n";
+        file << "output_device_name = " << output_device_name << "\n";
+        file << "input_device_index = " << input_device_index << "\n";
+        file << "input_device_name = " << input_device_name << "\n";
+        file << "sample_rate = " << sample_rate << "\n";
+        file << "channels = " << channels << "\n";
+        file << "sample_format = " << sample_format_to_config_string(sample_format) << "\n";
+        file << "buffer_frames = " << buffer_frames << "\n";
+        file << "exclusive_mode = " << (exclusive_mode ? "true" : "false") << "\n";
+        file << "master_volume = " << master_volume << "\n";
+        file << "\n";
 
-    fclose(file);
-    return true;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 bool AudioConfig::load(const char* filepath, AudioConfig* out_config) {
     if (!out_config) return false;
 
-    FILE* file = fopen(filepath, "r");
-    if (!file) return false;
+    try {
+        pt::ptree tree;
+        pt::read_ini(filepath, tree);
 
-    // Initialize with defaults
-    *out_config = AudioConfig{};
-
-    char line[1024];
-    char section[128] = "";
-
-    while (fgets(line, sizeof(line), file)) {
-        trim_whitespace(line);
-
-        // Skip empty lines and comments
-        if (line[0] == '\0' || line[0] == '#' || line[0] == ';') {
-            continue;
-        }
-
-        // Section header
-        if (line[0] == '[') {
-            char* end = strchr(line, ']');
-            if (end) {
-                *end = '\0';
-                strncpy(section, line + 1, sizeof(section) - 1);
-                section[sizeof(section) - 1] = '\0';
-            }
-            continue;
-        }
-
-        // Key = Value
-        char* eq = strchr(line, '=');
-        if (!eq) continue;
-
-        *eq = '\0';
-        char* key = line;
-        char* value = eq + 1;
-        trim_whitespace(key);
-        trim_whitespace(value);
+        // Initialize with defaults
+        *out_config = AudioConfig{};
 
         // Parse audio section
-        if (strcmp(section, "audio") == 0) {
-            if (strcmp(key, "backend") == 0) {
-                parse_audio_backend(value, &out_config->backend);
-            } else if (strcmp(key, "output_device_index") == 0) {
-                parse_int(value, &out_config->output_device_index);
-            } else if (strcmp(key, "output_device_name") == 0) {
-                out_config->output_device_name = value;
-            } else if (strcmp(key, "input_device_index") == 0) {
-                parse_int(value, &out_config->input_device_index);
-            } else if (strcmp(key, "input_device_name") == 0) {
-                out_config->input_device_name = value;
-            } else if (strcmp(key, "sample_rate") == 0) {
-                parse_int(value, &out_config->sample_rate);
-            } else if (strcmp(key, "channels") == 0) {
-                parse_int(value, &out_config->channels);
-            } else if (strcmp(key, "sample_format") == 0) {
-                parse_sample_format(value, &out_config->sample_format);
-            } else if (strcmp(key, "buffer_frames") == 0) {
-                parse_int(value, &out_config->buffer_frames);
-            } else if (strcmp(key, "exclusive_mode") == 0) {
-                parse_bool(value, &out_config->exclusive_mode);
-            } else if (strcmp(key, "master_volume") == 0) {
-                parse_float(value, &out_config->master_volume);
-            }
+        if (auto audio = tree.get_child_optional("audio")) {
+            std::string backend_str = audio->get<std::string>("backend", "auto");
+            parse_audio_backend(backend_str, &out_config->backend);
+
+            out_config->output_device_index = audio->get<int>("output_device_index", -1);
+            out_config->output_device_name = audio->get<std::string>("output_device_name", "");
+            out_config->input_device_index = audio->get<int>("input_device_index", -1);
+            out_config->input_device_name = audio->get<std::string>("input_device_name", "");
+            out_config->sample_rate = audio->get<int>("sample_rate", 48000);
+            out_config->channels = audio->get<int>("channels", 2);
+
+            std::string format_str = audio->get<std::string>("sample_format", "float32");
+            parse_sample_format(format_str, &out_config->sample_format);
+
+            out_config->buffer_frames = audio->get<int>("buffer_frames", 0);
+            out_config->exclusive_mode = audio->get<bool>("exclusive_mode", false);
+            out_config->master_volume = audio->get<float>("master_volume", 1.0f);
         }
+
+        // Validate after loading
+        out_config->validate();
+
+        return true;
+    } catch (const pt::ini_parser_error&) {
+        return false;
+    } catch (const std::exception&) {
+        return false;
     }
-
-    fclose(file);
-
-    // Validate after loading
-    out_config->validate();
-
-    return true;
 }
 
 bool AudioConfig::validate() {

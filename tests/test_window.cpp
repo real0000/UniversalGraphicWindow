@@ -418,7 +418,7 @@ TEST(graphics_config_save_load) {
     save_config.windows[0].height = 720;
     save_config.vsync = false;
     save_config.samples = 4;
-    save_config.backend = window::Backend::D3D11;
+    save_config.backend = window::Backend::OpenGL;  // Use OpenGL as it's widely supported
     save_config.windows[0].fullscreen = true;
 
     // Save to temp file
@@ -437,7 +437,7 @@ TEST(graphics_config_save_load) {
     ASSERT_EQ(load_config.windows[0].height, 720);
     ASSERT(load_config.vsync == false);
     ASSERT_EQ(load_config.samples, 4);
-    ASSERT(load_config.backend == window::Backend::D3D11);
+    ASSERT(load_config.backend == window::Backend::OpenGL);
     ASSERT(load_config.windows[0].fullscreen == true);
 
     // Cleanup
