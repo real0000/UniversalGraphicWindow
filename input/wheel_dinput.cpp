@@ -20,6 +20,7 @@
 #define DIRECTINPUT_VERSION 0x0800
 
 #include "input_wheel.hpp"
+#include "../internal/utf8_util.hpp"
 #include <windows.h>
 #include <dinput.h>
 #include <cstring>
@@ -305,12 +306,11 @@ struct WheelManager::Impl {
 
         // Copy name
 #ifdef UNICODE
-        WideCharToMultiByte(CP_UTF8, 0, instance->tszProductName, -1,
-                           wheel.name, MAX_WHEEL_NAME_LENGTH, nullptr, nullptr);
+        internal::wide_to_utf8(instance->tszProductName, wheel.name, MAX_WHEEL_NAME_LENGTH);
 #else
         strncpy(wheel.name, instance->tszProductName, MAX_WHEEL_NAME_LENGTH - 1);
-#endif
         wheel.name[MAX_WHEEL_NAME_LENGTH - 1] = '\0';
+#endif
 
         // Setup capabilities
         setup_capabilities(idx, &dicaps);

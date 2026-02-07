@@ -12,6 +12,7 @@
 #endif
 
 #include "font.hpp"
+#include "../../internal/utf8_util.hpp"
 #include <windows.h>
 #include <dwrite.h>
 #include <d2d1.h>
@@ -89,7 +90,7 @@ DirectWriteFontFace::DirectWriteFontFace(IDWriteFontFace* face, IDWriteFont* fon
             if (SUCCEEDED(family->GetFamilyNames(&names))) {
                 wchar_t name[256];
                 names->GetString(0, name, 256);
-                WideCharToMultiByte(CP_UTF8, 0, name, -1, family_name_, MAX_FONT_FAMILY_LENGTH, nullptr, nullptr);
+                internal::wide_to_utf8(name, family_name_, MAX_FONT_FAMILY_LENGTH);
                 names->Release();
             }
             family->Release();
@@ -100,7 +101,7 @@ DirectWriteFontFace::DirectWriteFontFace(IDWriteFontFace* face, IDWriteFont* fon
         if (SUCCEEDED(font_->GetFaceNames(&face_names))) {
             wchar_t name[128];
             face_names->GetString(0, name, 128);
-            WideCharToMultiByte(CP_UTF8, 0, name, -1, style_name_, sizeof(style_name_), nullptr, nullptr);
+            internal::wide_to_utf8(name, style_name_, sizeof(style_name_));
             face_names->Release();
         }
     }
@@ -389,7 +390,7 @@ public:
 
     void destroy_font(IFontFace* face) override;
 
-    int enumerate_system_fonts(FontDescriptor* out_fonts, int max_count) const override;
+    void enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const override;
     bool find_system_font(const FontDescriptor& descriptor,
                            char* out_path, int path_size) const override;
 
@@ -447,12 +448,11 @@ IFontFace* DirectWriteFontLibrary::load_font_file(const char* filepath, int face
     }
 
     // Convert to wide string
-    wchar_t wpath[MAX_PATH];
-    MultiByteToWideChar(CP_UTF8, 0, filepath, -1, wpath, MAX_PATH);
+    std::wstring wpath = internal::utf8_to_wide(filepath);
 
     // Create font file reference
     IDWriteFontFile* font_file = nullptr;
-    HRESULT hr = dwrite_factory_->CreateFontFileReference(wpath, nullptr, &font_file);
+    HRESULT hr = dwrite_factory_->CreateFontFileReference(wpath.c_str(), nullptr, &font_file);
     if (FAILED(hr) || !font_file) {
         if (out_result) *out_result = Result::ErrorFileNotFound;
         return nullptr;
@@ -512,13 +512,12 @@ IFontFace* DirectWriteFontLibrary::load_system_font(const FontDescriptor& descri
     }
 
     // Convert family name to wide string
-    wchar_t wfamily[256];
-    MultiByteToWideChar(CP_UTF8, 0, descriptor.family, -1, wfamily, 256);
+    std::wstring wfamily = internal::utf8_to_wide(descriptor.family);
 
     // Find font family
     UINT32 index = 0;
     BOOL exists = FALSE;
-    hr = font_collection->FindFamilyName(wfamily, &index, &exists);
+    hr = font_collection->FindFamilyName(wfamily.c_str(), &index, &exists);
     if (FAILED(hr) || !exists) {
         font_collection->Release();
         if (out_result) *out_result = Result::ErrorFileNotFound;
@@ -568,18 +567,18 @@ void DirectWriteFontLibrary::destroy_font(IFontFace* face) {
     delete face;
 }
 
-int DirectWriteFontLibrary::enumerate_system_fonts(FontDescriptor* out_fonts, int max_count) const {
-    if (!initialized_ || !out_fonts || max_count <= 0) return 0;
+void DirectWriteFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const {
+    out_fonts.clear();
+    if (!initialized_) return;
 
     IDWriteFontCollection* font_collection = nullptr;
     if (FAILED(dwrite_factory_->GetSystemFontCollection(&font_collection)) || !font_collection) {
-        return 0;
+        return;
     }
 
-    int count = 0;
     UINT32 family_count = font_collection->GetFontFamilyCount();
 
-    for (UINT32 i = 0; i < family_count && count < max_count; ++i) {
+    for (UINT32 i = 0; i < family_count; ++i) {
         IDWriteFontFamily* family = nullptr;
         if (FAILED(font_collection->GetFontFamily(i, &family)) || !family) continue;
 
@@ -588,21 +587,20 @@ int DirectWriteFontLibrary::enumerate_system_fonts(FontDescriptor* out_fonts, in
             wchar_t name[256];
             names->GetString(0, name, 256);
 
-            FontDescriptor& desc = out_fonts[count];
-            WideCharToMultiByte(CP_UTF8, 0, name, -1, desc.family, MAX_FONT_FAMILY_LENGTH, nullptr, nullptr);
+            FontDescriptor desc;
+            internal::wide_to_utf8(name, desc.family, MAX_FONT_FAMILY_LENGTH);
             desc.size = 12.0f;
             desc.weight = FontWeight::Regular;
             desc.style = FontStyle::Normal;
+            out_fonts.push_back(desc);
 
             names->Release();
-            count++;
         }
 
         family->Release();
     }
 
     font_collection->Release();
-    return count;
 }
 
 bool DirectWriteFontLibrary::find_system_font(const FontDescriptor& descriptor,

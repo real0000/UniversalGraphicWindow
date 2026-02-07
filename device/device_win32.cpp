@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <dxgi.h>
 #include <cstring>
+#include "../internal/utf8_util.hpp"
 
 #pragma comment(lib, "dxgi.lib")
 
@@ -52,7 +53,7 @@ int enumerate_devices(Backend backend, DeviceEnumeration* out_devices) {
         GraphicsDeviceInfo& device = out_devices->devices[out_devices->device_count];
 
         // Convert wide string to narrow
-        WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, device.name, MAX_DEVICE_NAME_LENGTH, nullptr, nullptr);
+        internal::wide_to_utf8(desc.Description, device.name, MAX_DEVICE_NAME_LENGTH);
 
         // Determine vendor name
         switch (desc.VendorId) {

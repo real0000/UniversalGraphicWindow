@@ -28,6 +28,7 @@
 #define DIRECTINPUT_VERSION 0x0800
 
 #include "input_gamepad.hpp"
+#include "../internal/utf8_util.hpp"
 #include <windows.h>
 #include <dinput.h>
 #include <cstring>
@@ -326,14 +327,13 @@ struct GamepadManager::Impl {
         devices[idx].connected = true;
         devices[idx].acquired = false;
 
-        // Copy device name (handle both Unicode and ANSI builds)
+        // Copy device name
 #ifdef UNICODE
-        WideCharToMultiByte(CP_UTF8, 0, instance->tszProductName, -1,
-                           devices[idx].name, MAX_GAMEPAD_NAME_LENGTH, nullptr, nullptr);
+        internal::wide_to_utf8(instance->tszProductName, devices[idx].name, MAX_GAMEPAD_NAME_LENGTH);
 #else
         strncpy(devices[idx].name, instance->tszProductName, MAX_GAMEPAD_NAME_LENGTH - 1);
-#endif
         devices[idx].name[MAX_GAMEPAD_NAME_LENGTH - 1] = '\0';
+#endif
 
         // Copy to gamepad state
         strncpy(gamepads[idx].name, devices[idx].name, MAX_GAMEPAD_NAME_LENGTH - 1);

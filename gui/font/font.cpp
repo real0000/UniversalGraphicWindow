@@ -338,14 +338,14 @@ class SimpleTextShaper : public ITextShaper {
 public:
     SimpleTextShaper(IFontLibrary* library) : library_(library) {}
 
-    int shape_text(IFontFace* font, const char* text, int text_length,
-                   PositionedGlyph* out_glyphs, int max_glyphs,
-                   const TextLayoutOptions& options) override {
-        if (!font || !text || !out_glyphs || max_glyphs <= 0) return -1;
+    void shape_text(IFontFace* font, const char* text, int text_length,
+                    std::vector<PositionedGlyph>& out_glyphs,
+                    const TextLayoutOptions& options) override {
+        out_glyphs.clear();
+        if (!font || !text) return;
 
         if (text_length < 0) text_length = static_cast<int>(strlen(text));
 
-        int glyph_count = 0;
         float x = 0.0f;
         float y = 0.0f;
         uint32_t prev_glyph = 0;
@@ -354,7 +354,7 @@ public:
         const char* end = text + text_length;
         int cluster = 0;
 
-        while (ptr < end && glyph_count < max_glyphs) {
+        while (ptr < end) {
             uint32_t codepoint;
             int bytes = utf8_to_codepoint(ptr, &codepoint);
             if (bytes == 0) {
@@ -373,13 +373,14 @@ public:
             GlyphMetrics metrics;
             font->get_glyph_metrics(glyph_index, &metrics);
 
-            PositionedGlyph& pg = out_glyphs[glyph_count];
+            PositionedGlyph pg;
             pg.codepoint = codepoint;
             pg.glyph_index = glyph_index;
             pg.x = x;
             pg.y = y;
             pg.advance = metrics.advance_x;
             pg.cluster = cluster;
+            out_glyphs.push_back(pg);
 
             x += metrics.advance_x;
 
@@ -391,16 +392,14 @@ public:
             prev_glyph = glyph_index;
             ptr += bytes;
             cluster++;
-            glyph_count++;
         }
-
-        return glyph_count;
     }
 
     TextLayoutResult layout_text(IFontFace* font, const char* text, int text_length,
-                                  PositionedGlyph* out_glyphs, int max_glyphs,
+                                  std::vector<PositionedGlyph>& out_glyphs,
                                   const TextLayoutOptions& options) override {
         TextLayoutResult result;
+        out_glyphs.clear();
 
         if (!font || !text) return result;
         if (text_length < 0) text_length = static_cast<int>(strlen(text));
@@ -408,7 +407,6 @@ public:
         const FontMetrics& metrics = font->get_metrics();
         float line_height = metrics.line_height * options.line_spacing;
 
-        int glyph_count = 0;
         float x = 0.0f;
         float y = metrics.ascender;
         float max_x = 0.0f;
@@ -421,7 +419,7 @@ public:
         int line_glyph_start = 0;
         int word_glyph_start = 0;
 
-        while (ptr < end && glyph_count < max_glyphs) {
+        while (ptr < end) {
             uint32_t codepoint;
             int bytes = utf8_to_codepoint(ptr, &codepoint);
             if (bytes == 0) {
@@ -438,15 +436,15 @@ public:
                 ptr += bytes;
                 line_start = ptr;
                 word_start = ptr;
-                line_glyph_start = glyph_count;
-                word_glyph_start = glyph_count;
+                line_glyph_start = static_cast<int>(out_glyphs.size());
+                word_glyph_start = static_cast<int>(out_glyphs.size());
                 continue;
             }
 
             // Track word boundaries
             if (codepoint == ' ' || codepoint == '\t') {
                 word_start = ptr + bytes;
-                word_glyph_start = glyph_count + 1;
+                word_glyph_start = static_cast<int>(out_glyphs.size()) + 1;
             }
 
             uint32_t glyph_index = font->get_glyph_index(codepoint);
@@ -455,6 +453,8 @@ public:
 
             float advance = glyph_metrics.advance_x + options.letter_spacing;
             if (codepoint == ' ') advance += options.word_spacing;
+
+            int glyph_count = static_cast<int>(out_glyphs.size());
 
             // Check for wrap
             if (options.max_width > 0.0f && x + advance > options.max_width && x > 0.0f) {
@@ -484,20 +484,18 @@ public:
                 }
             }
 
-            if (out_glyphs && glyph_count < max_glyphs) {
-                PositionedGlyph& pg = out_glyphs[glyph_count];
-                pg.codepoint = codepoint;
-                pg.glyph_index = glyph_index;
-                pg.x = x;
-                pg.y = y;
-                pg.advance = glyph_metrics.advance_x;
-                pg.cluster = result.char_count;
-            }
+            PositionedGlyph pg;
+            pg.codepoint = codepoint;
+            pg.glyph_index = glyph_index;
+            pg.x = x;
+            pg.y = y;
+            pg.advance = glyph_metrics.advance_x;
+            pg.cluster = result.char_count;
+            out_glyphs.push_back(pg);
 
             x += advance;
             ptr += bytes;
             result.char_count++;
-            glyph_count++;
         }
 
         if (x > max_x) max_x = x;
@@ -511,27 +509,26 @@ public:
 
     Size measure_text(IFontFace* font, const char* text, int text_length,
                       const TextLayoutOptions& options) override {
-        TextLayoutResult result = layout_text(font, text, text_length, nullptr, 0, options);
+        std::vector<PositionedGlyph> glyphs;
+        TextLayoutResult result = layout_text(font, text, text_length, glyphs, options);
         return Size{result.bounds.width, result.bounds.height};
     }
 
-    int get_caret_positions(IFontFace* font, const char* text, int text_length,
-                             float* out_positions, int max_positions) override {
-        if (!font || !text || !out_positions || max_positions <= 0) return 0;
+    void get_caret_positions(IFontFace* font, const char* text, int text_length,
+                              std::vector<float>& out_positions) override {
+        out_positions.clear();
+        if (!font || !text) return;
 
         if (text_length < 0) text_length = static_cast<int>(strlen(text));
 
-        int count = 0;
         float x = 0.0f;
         const char* ptr = text;
         const char* end = text + text_length;
 
         // First caret position at start
-        if (count < max_positions) {
-            out_positions[count++] = x;
-        }
+        out_positions.push_back(x);
 
-        while (ptr < end && count < max_positions) {
+        while (ptr < end) {
             uint32_t codepoint;
             int bytes = utf8_to_codepoint(ptr, &codepoint);
             if (bytes == 0) {
@@ -544,12 +541,10 @@ public:
             font->get_glyph_metrics(glyph_index, &metrics);
 
             x += metrics.advance_x;
-            out_positions[count++] = x;
+            out_positions.push_back(x);
 
             ptr += bytes;
         }
-
-        return count;
     }
 
     int hit_test(IFontFace* font, const char* text, int text_length,
@@ -644,19 +639,18 @@ public:
         }
 
         // Layout text to get positioned glyphs
-        std::vector<PositionedGlyph> glyphs(text_length * 2); // Reserve extra for composed chars
-        TextLayoutResult layout = shaper_->layout_text(font, text, text_length,
-                                                        glyphs.data(), static_cast<int>(glyphs.size()),
-                                                        layout_opts);
+        std::vector<PositionedGlyph> glyphs;
+        TextLayoutResult layout = shaper_->layout_text(font, text, text_length, glyphs, layout_opts);
 
-        int glyph_count = layout.char_count;
-        if (glyph_count <= 0) {
+        if (glyphs.empty()) {
             *out_pixels = nullptr;
             *out_width = 0;
             *out_height = 0;
             if (out_format) *out_format = render_opts.output_format;
             return Result::Success;
         }
+
+        int glyph_count = static_cast<int>(glyphs.size());
 
         // Calculate bitmap dimensions
         int bitmap_width = static_cast<int>(std::ceil(layout.bounds.width)) + 2;
@@ -713,14 +707,13 @@ public:
         if (text_length == 0) return Result::Success;
 
         // Layout text
-        std::vector<PositionedGlyph> glyphs(text_length * 2);
+        std::vector<PositionedGlyph> glyphs;
         TextLayoutResult layout = shaper_->layout_text(font, text, text_length,
-                                                        glyphs.data(), static_cast<int>(glyphs.size()),
-                                                        layout_opts);
+                                                        glyphs, layout_opts);
 
         if (layout.char_count <= 0) return Result::Success;
 
-        return render_glyphs(font, glyphs.data(), layout.char_count,
+        return render_glyphs(font, glyphs.data(), static_cast<int>(glyphs.size()),
                              color, render_opts,
                              bitmap, bitmap_width, bitmap_height, bitmap_pitch,
                              bitmap_format, x, y);

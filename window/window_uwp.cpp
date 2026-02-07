@@ -20,6 +20,7 @@
 
 #include <string>
 #include <chrono>
+#include "../internal/utf8_util.hpp"
 
 using namespace winrt;
 using namespace Windows::ApplicationModel::Core;
@@ -538,11 +539,8 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 
     // Set title
     auto view = ApplicationView::GetForCurrentView();
-    int len = MultiByteToWideChar(CP_UTF8, 0, win_cfg.title, -1, nullptr, 0);
-    wchar_t* wide = new wchar_t[len];
-    MultiByteToWideChar(CP_UTF8, 0, win_cfg.title, -1, wide, len);
-    view.Title(wide);
-    delete[] wide;
+    std::wstring wide_title = internal::utf8_to_wide(win_cfg.title);
+    view.Title(wide_title.c_str());
 
     if (win_cfg.visible) {
         core_window.Activate();
@@ -582,11 +580,8 @@ bool Window::is_visible() const {
 void Window::set_title(const char* title) {
     if (impl) {
         auto view = ApplicationView::GetForCurrentView();
-        int len = MultiByteToWideChar(CP_UTF8, 0, title, -1, nullptr, 0);
-        wchar_t* wide = new wchar_t[len];
-        MultiByteToWideChar(CP_UTF8, 0, title, -1, wide, len);
-        view.Title(wide);
-        delete[] wide;
+        std::wstring wide = internal::utf8_to_wide(title);
+        view.Title(wide.c_str());
         impl->title = title;
     }
 }

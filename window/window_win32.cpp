@@ -22,6 +22,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "../internal/utf8_util.hpp"
 
 //=============================================================================
 // Backend Configuration (use CMake-defined macros)
@@ -541,13 +542,12 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                     char** paths = new char*[count];
                     for (UINT i = 0; i < count; i++) {
                         UINT len = DragQueryFileW(hdrop, i, nullptr, 0) + 1;
-                        wchar_t* wpath = new wchar_t[len];
-                        DragQueryFileW(hdrop, i, wpath, len);
+                        std::wstring wpath(len, L'\0');
+                        DragQueryFileW(hdrop, i, &wpath[0], len);
 
-                        int utf8_len = WideCharToMultiByte(CP_UTF8, 0, wpath, -1, nullptr, 0, nullptr, nullptr);
-                        paths[i] = new char[utf8_len];
-                        WideCharToMultiByte(CP_UTF8, 0, wpath, -1, paths[i], utf8_len, nullptr, nullptr);
-                        delete[] wpath;
+                        std::string utf8_path = internal::wide_to_utf8(wpath.c_str());
+                        paths[i] = new char[utf8_path.size() + 1];
+                        std::memcpy(paths[i], utf8_path.c_str(), utf8_path.size() + 1);
                     }
 
                     DropFileEvent event;
@@ -629,13 +629,10 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         pos_y = win_cfg.y >= 0 ? win_cfg.y : CW_USEDEFAULT;
     }
 
-    int title_len = MultiByteToWideChar(CP_UTF8, 0, win_cfg.title, -1, nullptr, 0);
-    wchar_t* title_wide = new wchar_t[title_len];
-    MultiByteToWideChar(CP_UTF8, 0, win_cfg.title, -1, title_wide, title_len);
+    std::wstring title_wide = internal::utf8_to_wide(win_cfg.title);
 
-    HWND hwnd = CreateWindowExW(ex_style, CLASS_NAME, title_wide, style, pos_x, pos_y, win_width, win_height,
+    HWND hwnd = CreateWindowExW(ex_style, CLASS_NAME, title_wide.c_str(), style, pos_x, pos_y, win_width, win_height,
                                  nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-    delete[] title_wide;
 
     if (!hwnd) {
         set_result(Result::ErrorWindowCreation);
@@ -775,11 +772,8 @@ bool Window::is_visible() const { return impl ? impl->visible : false; }
 
 void Window::set_title(const char* title) {
     if (impl && impl->hwnd) {
-        int len = MultiByteToWideChar(CP_UTF8, 0, title, -1, nullptr, 0);
-        wchar_t* wide = new wchar_t[len];
-        MultiByteToWideChar(CP_UTF8, 0, title, -1, wide, len);
-        SetWindowTextW(impl->hwnd, wide);
-        delete[] wide;
+        std::wstring wide = internal::utf8_to_wide(title);
+        SetWindowTextW(impl->hwnd, wide.c_str());
         impl->title = title;
     }
 }

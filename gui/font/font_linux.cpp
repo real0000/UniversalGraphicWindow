@@ -21,6 +21,7 @@
 #include <fontconfig/fontconfig.h>
 #include <cstring>
 #include <cstdio>
+#include <vector>
 
 namespace font {
 
@@ -92,11 +93,11 @@ bool find_system_font_fontconfig(const FontDescriptor& descriptor,
     return false;
 }
 
-int enumerate_system_fonts_fontconfig(FontDescriptor* out_fonts, int max_count) {
-    if (!out_fonts || max_count <= 0) return 0;
+void enumerate_system_fonts_fontconfig(std::vector<FontDescriptor>& out_fonts) {
+    out_fonts.clear();
 
     FcConfig* config = FcInitLoadConfigAndFonts();
-    if (!config) return 0;
+    if (!config) return;
 
     // List all fonts
     FcPattern* pattern = FcPatternCreate();
@@ -108,16 +109,15 @@ int enumerate_system_fonts_fontconfig(FontDescriptor* out_fonts, int max_count) 
 
     if (!fonts) {
         FcConfigDestroy(config);
-        return 0;
+        return;
     }
 
-    int count = 0;
-    for (int i = 0; i < fonts->nfont && count < max_count; ++i) {
+    for (int i = 0; i < fonts->nfont; ++i) {
         FcChar8* family = nullptr;
         if (FcPatternGetString(fonts->fonts[i], FC_FAMILY, 0, &family) == FcResultMatch && family) {
             // Check if we already have this family
             bool duplicate = false;
-            for (int j = 0; j < count; ++j) {
+            for (size_t j = 0; j < out_fonts.size(); ++j) {
                 if (strcmp(out_fonts[j].family, reinterpret_cast<const char*>(family)) == 0) {
                     duplicate = true;
                     break;
@@ -125,20 +125,19 @@ int enumerate_system_fonts_fontconfig(FontDescriptor* out_fonts, int max_count) 
             }
 
             if (!duplicate) {
-                FontDescriptor& desc = out_fonts[count];
+                FontDescriptor desc;
                 strncpy(desc.family, reinterpret_cast<const char*>(family), MAX_FONT_FAMILY_LENGTH - 1);
+                desc.family[MAX_FONT_FAMILY_LENGTH - 1] = '\0';
                 desc.size = 12.0f;
                 desc.weight = FontWeight::Regular;
                 desc.style = FontStyle::Normal;
-                count++;
+                out_fonts.push_back(desc);
             }
         }
     }
 
     FcFontSetDestroy(fonts);
     FcConfigDestroy(config);
-
-    return count;
 }
 
 } // namespace font
@@ -204,7 +203,7 @@ public:
 
     void destroy_font(IFontFace* face) override { delete face; }
 
-    int enumerate_system_fonts(FontDescriptor*, int) const override { return 0; }
+    void enumerate_system_fonts(std::vector<FontDescriptor>&) const override {}
     bool find_system_font(const FontDescriptor&, char*, int) const override { return false; }
 
     IFontFace* get_default_font(float, Result* r) override {

@@ -17,6 +17,7 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <string>
+#include "../internal/utf8_util.hpp"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -228,9 +229,7 @@ Graphics* create_d3d12_graphics_hwnd(void* hwnd, const Config& config) {
     gfx->allow_tearing = allow_tearing && (swap_mode == SwapMode::Immediate);
     gfx->buffer_count = static_cast<UINT>(config.back_buffers);
 
-    char name[256];
-    WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);
-    gfx->device_name = name;
+    gfx->device_name = internal::wide_to_utf8(adapter_desc.Description);
 
     return gfx;
 }
@@ -336,9 +335,7 @@ Graphics* create_d3d12_graphics_corewindow(void* core_window, int width, int hei
     gfx->allow_tearing = false;  // UWP doesn't support tearing
     gfx->buffer_count = static_cast<UINT>(config.back_buffers);
 
-    char name[256];
-    WideCharToMultiByte(CP_UTF8, 0, adapter_desc.Description, -1, name, sizeof(name), nullptr, nullptr);
-    gfx->device_name = name;
+    gfx->device_name = internal::wide_to_utf8(adapter_desc.Description);
 
     return gfx;
 }

@@ -12,6 +12,7 @@
 #endif
 
 #include "virtual_keyboard.hpp"
+#include "../../internal/utf8_util.hpp"
 #include <windows.h>
 #include <shellapi.h>
 #include <shobjidl.h>
@@ -308,11 +309,10 @@ LRESULT CALLBACK VirtualKeyboardWin32::edit_subclass_proc(HWND hwnd, UINT msg, W
 void VirtualKeyboardWin32::forward_char_to_target(wchar_t ch) {
     // Directly call text delegate instead of posting message
     if (text_delegate_) {
-        char utf8[5] = {};
-        // Convert wchar to UTF-8
-        WideCharToMultiByte(CP_UTF8, 0, &ch, 1, utf8, sizeof(utf8), nullptr, nullptr);
-        text_delegate_->insert_text(utf8);
-        printf("[VK] Inserted char: U+%04X '%s'\n", static_cast<unsigned int>(ch), utf8);
+        wchar_t wch[2] = { ch, L'\0' };
+        std::string utf8 = internal::wide_to_utf8(wch);
+        text_delegate_->insert_text(utf8.c_str());
+        printf("[VK] Inserted char: U+%04X '%s'\n", static_cast<unsigned int>(ch), utf8.c_str());
     }
 }
 
@@ -445,7 +445,7 @@ Result VirtualKeyboardWin32::get_available_layouts(KeyboardLayoutList* out_list)
         // Get display name
         wchar_t display_name[128];
         if (GetLocaleInfoW(MAKELCID(lang_id, SORT_DEFAULT), LOCALE_SLANGUAGE, display_name, 128)) {
-            WideCharToMultiByte(CP_UTF8, 0, display_name, -1, info.display_name, sizeof(info.display_name), nullptr, nullptr);
+            internal::wide_to_utf8(display_name, info.display_name, sizeof(info.display_name));
         }
 
         info.is_current = (layouts[i] == current_layout);
@@ -472,7 +472,7 @@ Result VirtualKeyboardWin32::get_current_layout(KeyboardLayoutInfo* out_info) co
 
     wchar_t display_name[128];
     if (GetLocaleInfoW(MAKELCID(lang_id, SORT_DEFAULT), LOCALE_SLANGUAGE, display_name, 128)) {
-        WideCharToMultiByte(CP_UTF8, 0, display_name, -1, out_info->display_name, sizeof(out_info->display_name), nullptr, nullptr);
+        internal::wide_to_utf8(display_name, out_info->display_name, sizeof(out_info->display_name));
     }
 
     out_info->is_current = true;

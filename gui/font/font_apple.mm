@@ -319,7 +319,7 @@ public:
 
     void destroy_font(IFontFace* face) override;
 
-    int enumerate_system_fonts(FontDescriptor* out_fonts, int max_count) const override;
+    void enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const override;
     bool find_system_font(const FontDescriptor& descriptor,
                            char* out_path, int path_size) const override;
 
@@ -505,38 +505,37 @@ void CoreTextFontLibrary::destroy_font(IFontFace* face) {
     delete face;
 }
 
-int CoreTextFontLibrary::enumerate_system_fonts(FontDescriptor* out_fonts, int max_count) const {
-    if (!initialized_ || !out_fonts || max_count <= 0) return 0;
+void CoreTextFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const {
+    out_fonts.clear();
+    if (!initialized_) return;
 
     // Get all font descriptors
     CTFontCollectionRef collection = CTFontCollectionCreateFromAvailableFonts(nullptr);
-    if (!collection) return 0;
+    if (!collection) return;
 
     CFArrayRef descriptors = CTFontCollectionCreateMatchingFontDescriptors(collection);
     CFRelease(collection);
 
-    if (!descriptors) return 0;
+    if (!descriptors) return;
 
     CFIndex count = CFArrayGetCount(descriptors);
-    int result_count = 0;
 
-    for (CFIndex i = 0; i < count && result_count < max_count; ++i) {
+    for (CFIndex i = 0; i < count; ++i) {
         CTFontDescriptorRef desc = (CTFontDescriptorRef)CFArrayGetValueAtIndex(descriptors, i);
 
         CFStringRef family = (CFStringRef)CTFontDescriptorCopyAttribute(desc, kCTFontFamilyNameAttribute);
         if (family) {
-            FontDescriptor& font_desc = out_fonts[result_count];
+            FontDescriptor font_desc;
             CFStringGetCString(family, font_desc.family, MAX_FONT_FAMILY_LENGTH, kCFStringEncodingUTF8);
             font_desc.size = 12.0f;
             font_desc.weight = FontWeight::Regular;
             font_desc.style = FontStyle::Normal;
             CFRelease(family);
-            result_count++;
+            out_fonts.push_back(font_desc);
         }
     }
 
     CFRelease(descriptors);
-    return result_count;
 }
 
 bool CoreTextFontLibrary::find_system_font(const FontDescriptor& descriptor,

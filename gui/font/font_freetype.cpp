@@ -380,7 +380,7 @@ public:
 
     void destroy_font(IFontFace* face) override;
 
-    int enumerate_system_fonts(FontDescriptor* out_fonts, int max_count) const override;
+    void enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const override;
     bool find_system_font(const FontDescriptor& descriptor,
                            char* out_path, int path_size) const override;
 
@@ -508,12 +508,10 @@ void FreeTypeFontLibrary::destroy_font(IFontFace* face) {
     delete face;
 }
 
-int FreeTypeFontLibrary::enumerate_system_fonts(FontDescriptor* out_fonts, int max_count) const {
+void FreeTypeFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const {
     // Platform-specific implementation would be needed
-    // For now, return 0
-    (void)out_fonts;
-    (void)max_count;
-    return 0;
+    // For now, just clear output
+    out_fonts.clear();
 }
 
 bool FreeTypeFontLibrary::find_system_font(const FontDescriptor& descriptor,

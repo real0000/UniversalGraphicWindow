@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstring>
 #include <functional>
+#include <vector>
 
 // Include graphics API types (TextureFormat, etc.)
 #include "../../graphics_api.hpp"
@@ -351,7 +352,7 @@ public:
     virtual void destroy_font(IFontFace* face) = 0;
 
     // Enumerate system fonts
-    virtual int enumerate_system_fonts(FontDescriptor* out_fonts, int max_count) const = 0;
+    virtual void enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const = 0;
 
     // Find best matching system font
     virtual bool find_system_font(const FontDescriptor& descriptor,
@@ -374,14 +375,13 @@ public:
     virtual ~ITextShaper() = default;
 
     // Shape text and return positioned glyphs
-    // Returns number of glyphs, or -1 on error
-    virtual int shape_text(IFontFace* font, const char* text, int text_length,
-                           PositionedGlyph* out_glyphs, int max_glyphs,
-                           const TextLayoutOptions& options = TextLayoutOptions()) = 0;
+    virtual void shape_text(IFontFace* font, const char* text, int text_length,
+                            std::vector<PositionedGlyph>& out_glyphs,
+                            const TextLayoutOptions& options = TextLayoutOptions()) = 0;
 
     // Layout text with wrapping
     virtual TextLayoutResult layout_text(IFontFace* font, const char* text, int text_length,
-                                          PositionedGlyph* out_glyphs, int max_glyphs,
+                                          std::vector<PositionedGlyph>& out_glyphs,
                                           const TextLayoutOptions& options) = 0;
 
     // Measure text without rendering
@@ -389,8 +389,8 @@ public:
                               const TextLayoutOptions& options = TextLayoutOptions()) = 0;
 
     // Get caret positions for text
-    virtual int get_caret_positions(IFontFace* font, const char* text, int text_length,
-                                     float* out_positions, int max_positions) = 0;
+    virtual void get_caret_positions(IFontFace* font, const char* text, int text_length,
+                                      std::vector<float>& out_positions) = 0;
 
     // Hit test - find character index at position
     virtual int hit_test(IFontFace* font, const char* text, int text_length,

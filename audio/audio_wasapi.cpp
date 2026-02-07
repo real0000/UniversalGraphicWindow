@@ -14,6 +14,7 @@
 #endif
 
 #include "audio.hpp"
+#include "../internal/utf8_util.hpp"
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -124,15 +125,6 @@ static AudioFormat format_from_waveformat(const WAVEFORMATEX* wfx) {
     return format;
 }
 
-static void wide_to_utf8(const wchar_t* wide, char* utf8, size_t utf8_size) {
-    if (!wide || !utf8 || utf8_size == 0) return;
-    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
-    if (len > 0 && static_cast<size_t>(len) <= utf8_size) {
-        WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, len, nullptr, nullptr);
-    } else {
-        utf8[0] = '\0';
-    }
-}
 
 // ============================================================================
 // AudioStream::Impl
@@ -1078,7 +1070,7 @@ int AudioManager::enumerate_devices(AudioDeviceType type, AudioDeviceEnumeration
         wchar_t* device_id = nullptr;
         device->GetId(&device_id);
         if (device_id) {
-            wide_to_utf8(device_id, info.id, sizeof(info.id));
+            ::internal::wide_to_utf8(device_id, info.id, sizeof(info.id));
             info.is_default = default_id && wcscmp(device_id, default_id) == 0;
             CoTaskMemFree(device_id);
         }
@@ -1091,7 +1083,7 @@ int AudioManager::enumerate_devices(AudioDeviceType type, AudioDeviceEnumeration
             PropVariantInit(&name);
             hr = props->GetValue(PKEY_Device_FriendlyName, &name);
             if (SUCCEEDED(hr) && name.vt == VT_LPWSTR) {
-                wide_to_utf8(name.pwszVal, info.name, sizeof(info.name));
+                ::internal::wide_to_utf8(name.pwszVal, info.name, sizeof(info.name));
             }
             PropVariantClear(&name);
             props->Release();
@@ -1140,7 +1132,7 @@ bool AudioManager::get_default_device(AudioDeviceType type, AudioDeviceInfo* out
     wchar_t* device_id = nullptr;
     device->GetId(&device_id);
     if (device_id) {
-        wide_to_utf8(device_id, out->id, sizeof(out->id));
+        ::internal::wide_to_utf8(device_id, out->id, sizeof(out->id));
         CoTaskMemFree(device_id);
     }
 
@@ -1152,7 +1144,7 @@ bool AudioManager::get_default_device(AudioDeviceType type, AudioDeviceInfo* out
         PropVariantInit(&name);
         hr = props->GetValue(PKEY_Device_FriendlyName, &name);
         if (SUCCEEDED(hr) && name.vt == VT_LPWSTR) {
-            wide_to_utf8(name.pwszVal, out->name, sizeof(out->name));
+            ::internal::wide_to_utf8(name.pwszVal, out->name, sizeof(out->name));
         }
         PropVariantClear(&name);
         props->Release();
