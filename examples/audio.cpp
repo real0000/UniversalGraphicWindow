@@ -148,7 +148,7 @@ int main(int argc, char* argv[]) {
 
     for (int i = 0; i < output_count; ++i) {
         const auto& dev = output_devices.devices[i];
-        printf("  [%d] %s%s\n", i, dev.name, dev.is_default ? " (default)" : "");
+        printf("  [%d] %s%s\n", i, dev.name.c_str(), dev.is_default ? " (default)" : "");
         printf("      Sample rate: %d-%d Hz, Channels: %d-%d\n",
                dev.min_sample_rate, dev.max_sample_rate,
                dev.min_channels, dev.max_channels);
@@ -163,7 +163,7 @@ int main(int argc, char* argv[]) {
 
     for (int i = 0; i < input_count; ++i) {
         const auto& dev = input_devices.devices[i];
-        printf("  [%d] %s%s\n", i, dev.name, dev.is_default ? " (default)" : "");
+        printf("  [%d] %s%s\n", i, dev.name.c_str(), dev.is_default ? " (default)" : "");
     }
     printf("\n");
 
@@ -176,8 +176,7 @@ int main(int argc, char* argv[]) {
 
     // Create a window for input handling
     Config config;
-    strncpy(config.windows[0].title, "Audio Example - Press 1-4 for notes, ESC to quit",
-            MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].title = "Audio Example - Press 1-4 for notes, ESC to quit";
     config.windows[0].width = 640;
     config.windows[0].height = 200;
 

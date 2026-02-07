@@ -50,6 +50,14 @@ static int g_tests_failed = 0;
     } \
 } while(0)
 
+#define ASSERT_STR_EQ(a, b) do { \
+    if ((a) != (b)) { \
+        printf("FAILED at line %d: \"%s\" != \"%s\"\n", __LINE__, (a).c_str(), (b)); \
+        g_tests_failed++; \
+        return; \
+    } \
+} while(0)
+
 //=============================================================================
 // Tests for utility functions
 //=============================================================================
@@ -114,7 +122,7 @@ TEST(get_default_backend) {
 TEST(config_defaults) {
     window::Config config;
 
-    ASSERT_STREQ(config.windows[0].title, "Window");
+    ASSERT_STR_EQ(config.windows[0].title, "Window");
     ASSERT_EQ(config.windows[0].width, 800);
     ASSERT_EQ(config.windows[0].height, 600);
     ASSERT_EQ(config.windows[0].x, -1);
@@ -132,7 +140,7 @@ TEST(config_defaults) {
 
 TEST(config_custom) {
     window::Config config;
-    strncpy(config.windows[0].title, "Custom Title", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].title = "Custom Title";
     config.windows[0].width = 1920;
     config.windows[0].height = 1080;
     config.windows[0].x = 100;
@@ -142,7 +150,7 @@ TEST(config_custom) {
     config.samples = 4;
     config.backend = window::Backend::OpenGL;
 
-    ASSERT_STREQ(config.windows[0].title, "Custom Title");
+    ASSERT_STR_EQ(config.windows[0].title, "Custom Title");
     ASSERT_EQ(config.windows[0].width, 1920);
     ASSERT_EQ(config.windows[0].height, 1080);
     ASSERT_EQ(config.windows[0].x, 100);
@@ -337,7 +345,7 @@ TEST(graphics_config_defaults) {
     window::GraphicsConfig config;
 
     // Window defaults
-    ASSERT_STREQ(config.windows[0].title, "Window");
+    ASSERT_STR_EQ(config.windows[0].title, "Window");
     ASSERT_EQ(config.windows[0].x, -1);
     ASSERT_EQ(config.windows[0].y, -1);
     ASSERT_EQ(config.windows[0].width, 800);
@@ -405,7 +413,7 @@ TEST(graphics_config_validate) {
 TEST(graphics_config_save_load) {
     // Create a config
     window::GraphicsConfig save_config;
-    strncpy(save_config.windows[0].title, "Test Window", window::MAX_DEVICE_NAME_LENGTH - 1);
+    save_config.windows[0].title = "Test Window";
     save_config.windows[0].width = 1280;
     save_config.windows[0].height = 720;
     save_config.vsync = false;
@@ -424,7 +432,7 @@ TEST(graphics_config_save_load) {
     ASSERT(load_result == true);
 
     // Verify values match
-    ASSERT_STREQ(load_config.windows[0].title, "Test Window");
+    ASSERT_STR_EQ(load_config.windows[0].title, "Test Window");
     ASSERT_EQ(load_config.windows[0].width, 1280);
     ASSERT_EQ(load_config.windows[0].height, 720);
     ASSERT(load_config.vsync == false);

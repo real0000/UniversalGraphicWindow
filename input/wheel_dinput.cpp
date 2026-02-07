@@ -321,8 +321,7 @@ struct WheelManager::Impl {
         }
 
         // Copy to state
-        strncpy(wheels[idx].name, wheel.name, MAX_WHEEL_NAME_LENGTH - 1);
-        wheels[idx].name[MAX_WHEEL_NAME_LENGTH - 1] = '\0';
+        wheels[idx].name = wheel.name;
         wheels[idx].connected = true;
 
         device_count++;
@@ -332,7 +331,7 @@ struct WheelManager::Impl {
         event.type = WheelEventType::Connected;
         event.wheel_index = idx;
         event.timestamp = get_timestamp();
-        event.name = wheels[idx].name;
+        event.name = wheels[idx].name.c_str();
         event.connected = true;
         dispatcher.dispatch_connection(event);
 

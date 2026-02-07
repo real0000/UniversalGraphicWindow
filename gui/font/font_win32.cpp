@@ -588,7 +588,7 @@ void DirectWriteFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>&
             names->GetString(0, name, 256);
 
             FontDescriptor desc;
-            internal::wide_to_utf8(name, desc.family, MAX_FONT_FAMILY_LENGTH);
+            desc.family = internal::wide_to_utf8(name);
             desc.size = 12.0f;
             desc.weight = FontWeight::Regular;
             desc.style = FontStyle::Normal;

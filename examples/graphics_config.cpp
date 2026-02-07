@@ -26,8 +26,8 @@ void print_devices() {
 
     for (int i = 0; i < devices.device_count; i++) {
         const window::GraphicsDeviceInfo& dev = devices.devices[i];
-        printf("[%d] %s%s\n", i, dev.name, dev.is_default ? " (Default)" : "");
-        printf("    Vendor: %s (0x%04X)\n", dev.vendor, dev.vendor_id);
+        printf("[%d] %s%s\n", i, dev.name.c_str(), dev.is_default ? " (Default)" : "");
+        printf("    Vendor: %s (0x%04X)\n", dev.vendor.c_str(), dev.vendor_id);
         printf("    Device ID: 0x%04X\n", dev.device_id);
         printf("    Dedicated VRAM: %.0f MB\n", dev.dedicated_video_memory / (1024.0 * 1024.0));
         printf("    Shared Memory: %.0f MB\n", dev.shared_system_memory / (1024.0 * 1024.0));
@@ -48,7 +48,7 @@ void print_monitors() {
 
     for (int i = 0; i < monitors.monitor_count; i++) {
         const window::MonitorInfo& mon = monitors.monitors[i];
-        printf("[%d] %s%s\n", i, mon.name, mon.is_primary ? " (Primary)" : "");
+        printf("[%d] %s%s\n", i, mon.name.c_str(), mon.is_primary ? " (Primary)" : "");
         printf("    Position: %d, %d\n", mon.x, mon.y);
         printf("    Resolution: %dx%d @ %d Hz\n", mon.width, mon.height, mon.refresh_rate);
         printf("    Display Modes: %d\n", mon.mode_count);
@@ -73,7 +73,7 @@ void demo_config_save_load() {
 
     // Create a custom config
     window::GraphicsConfig config;
-    strncpy(config.windows[0].title, "My Game", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].title = "My Game";
     config.windows[0].width = 1280;
     config.windows[0].height = 720;
     config.windows[0].fullscreen = false;
@@ -94,7 +94,7 @@ void demo_config_save_load() {
     window::GraphicsConfig loaded_config;
     if (window::GraphicsConfig::load(config_file, &loaded_config)) {
         printf("Configuration loaded successfully:\n");
-        printf("  Title: %s\n", loaded_config.windows[0].title);
+        printf("  Title: %s\n", loaded_config.windows[0].title.c_str());
         printf("  Resolution: %dx%d\n", loaded_config.windows[0].width, loaded_config.windows[0].height);
         printf("  Fullscreen: %s\n", loaded_config.windows[0].fullscreen ? "true" : "false");
         printf("  VSync: %s\n", loaded_config.vsync ? "true" : "false");
@@ -151,8 +151,8 @@ void demo_multi_window() {
     config.samples = 1;
 
     // First window (already exists by default)
-    strncpy(config.windows[0].name, "main", window::MAX_WINDOW_NAME_LENGTH - 1);
-    strncpy(config.windows[0].title, "Main Window", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].name = "main";
+    config.windows[0].title = "Main Window";
     config.windows[0].x = 100;
     config.windows[0].y = 100;
     config.windows[0].width = 800;
@@ -160,8 +160,8 @@ void demo_multi_window() {
 
     // Add second window
     window::WindowConfigEntry secondary;
-    strncpy(secondary.name, "secondary", window::MAX_WINDOW_NAME_LENGTH - 1);
-    strncpy(secondary.title, "Secondary Window", window::MAX_DEVICE_NAME_LENGTH - 1);
+    secondary.name = "secondary";
+    secondary.title = "Secondary Window";
     secondary.x = 950;
     secondary.y = 100;
     secondary.width = 640;

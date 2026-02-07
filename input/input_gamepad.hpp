@@ -22,6 +22,7 @@
 #define INPUT_GAMEPAD_HPP
 
 #include <cstdint>
+#include <string>
 
 namespace window {
 namespace input {
@@ -215,7 +216,7 @@ struct GamepadState {
     bool buttons[MAX_GAMEPAD_BUTTONS] = {};
     float axes[MAX_GAMEPAD_AXES] = {};
     bool connected = false;
-    char name[MAX_GAMEPAD_NAME_LENGTH] = {};
+    std::string name;
 
     // Check if any button is pressed
     bool any_button_down() const;

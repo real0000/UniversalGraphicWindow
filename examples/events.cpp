@@ -105,7 +105,7 @@ int main() {
     printf("Try: clicking, scrolling, typing, resizing, dragging files\n\n");
 
     Config config;
-    strncpy(config.windows[0].title, "Event Handling Example", MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].title = "Event Handling Example";
     config.windows[0].width = 800;
     config.windows[0].height = 600;
 

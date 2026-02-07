@@ -349,7 +349,7 @@ bool Config::save(const char* filepath) const {
     fprintf(file, "[graphics]\n");
     fprintf(file, "backend = %s\n", backend_to_config_string(backend));
     fprintf(file, "device_index = %d\n", device_index);
-    fprintf(file, "device_name = %s\n", device_name);
+    fprintf(file, "device_name = %s\n", device_name.c_str());
     fprintf(file, "swap_mode = %s\n", swap_mode_to_config_string(swap_mode));
     fprintf(file, "vsync = %s\n", vsync ? "true" : "false");
     fprintf(file, "samples = %d\n", samples);
@@ -362,8 +362,8 @@ bool Config::save(const char* filepath) const {
     // Window sections
     for (int i = 0; i < window_count; i++) {
         const WindowConfigEntry& win = windows[i];
-        fprintf(file, "[window.%s]\n", win.name);
-        fprintf(file, "title = %s\n", win.title);
+        fprintf(file, "[window.%s]\n", win.name.c_str());
+        fprintf(file, "title = %s\n", win.title.c_str());
         fprintf(file, "monitor = %d\n", win.monitor_index);
         fprintf(file, "x = %d\n", win.x);
         fprintf(file, "y = %d\n", win.y);
@@ -401,9 +401,7 @@ bool Config::load(const char* filepath, Config* out_config) {
 
             out_config->device_index = graphics->get<int>("device_index", -1);
 
-            std::string device_name_str = graphics->get<std::string>("device_name", "");
-            strncpy(out_config->device_name, device_name_str.c_str(), MAX_DEVICE_NAME_LENGTH - 1);
-            out_config->device_name[MAX_DEVICE_NAME_LENGTH - 1] = '\0';
+            out_config->device_name = graphics->get<std::string>("device_name", "");
 
             std::string swap_mode_str = graphics->get<std::string>("swap_mode", "auto");
             parse_swap_mode_boost(swap_mode_str, &out_config->swap_mode);
@@ -425,12 +423,8 @@ bool Config::load(const char* filepath, Config* out_config) {
 
                 WindowConfigEntry& win = out_config->windows[out_config->window_count];
 
-                strncpy(win.name, window_name.c_str(), MAX_WINDOW_NAME_LENGTH - 1);
-                win.name[MAX_WINDOW_NAME_LENGTH - 1] = '\0';
-
-                std::string title_str = window_tree.get<std::string>("title", "Window");
-                strncpy(win.title, title_str.c_str(), MAX_DEVICE_NAME_LENGTH - 1);
-                win.title[MAX_DEVICE_NAME_LENGTH - 1] = '\0';
+                win.name = window_name;
+                win.title = window_tree.get<std::string>("title", "Window");
 
                 win.monitor_index = window_tree.get<int>("monitor", 0);
                 win.x = window_tree.get<int>("x", -1);
@@ -449,8 +443,8 @@ bool Config::load(const char* filepath, Config* out_config) {
         // Ensure at least one window exists
         if (out_config->window_count == 0) {
             out_config->window_count = 1;
-            strncpy(out_config->windows[0].name, "main", MAX_WINDOW_NAME_LENGTH - 1);
-            strncpy(out_config->windows[0].title, "Window", MAX_DEVICE_NAME_LENGTH - 1);
+            out_config->windows[0].name = "main";
+            out_config->windows[0].title = "Window";
         }
 
         // Validate after loading
@@ -472,7 +466,7 @@ bool Config::load(const char* filepath, Config* out_config) {
 
     char line[1024];
     char section[128] = "";
-    char window_name[MAX_WINDOW_NAME_LENGTH] = "";
+    std::string window_name;
     int current_window_idx = -1;
 
     while (fgets(line, sizeof(line), file)) {
@@ -493,25 +487,24 @@ bool Config::load(const char* filepath, Config* out_config) {
 
                 // Check for window section: [window.name]
                 if (strncmp(section, "window.", 7) == 0) {
-                    strncpy(window_name, section + 7, MAX_WINDOW_NAME_LENGTH - 1);
-                    window_name[MAX_WINDOW_NAME_LENGTH - 1] = '\0';
+                    window_name = section + 7;
 
                     // Find or create window config
                     current_window_idx = -1;
                     for (int i = 0; i < out_config->window_count; i++) {
-                        if (strcmp(out_config->windows[i].name, window_name) == 0) {
+                        if (out_config->windows[i].name == window_name) {
                             current_window_idx = i;
                             break;
                         }
                     }
                     if (current_window_idx < 0 && out_config->window_count < MAX_CONFIG_WINDOWS) {
                         current_window_idx = out_config->window_count;
-                        strncpy(out_config->windows[current_window_idx].name, window_name, MAX_WINDOW_NAME_LENGTH - 1);
+                        out_config->windows[current_window_idx].name = window_name;
                         out_config->window_count++;
                     }
                 } else {
                     current_window_idx = -1;
-                    window_name[0] = '\0';
+                    window_name.clear();
                 }
             }
             continue;
@@ -534,7 +527,7 @@ bool Config::load(const char* filepath, Config* out_config) {
             } else if (strcmp(key, "device_index") == 0) {
                 parse_int(value, &out_config->device_index);
             } else if (strcmp(key, "device_name") == 0) {
-                strncpy(out_config->device_name, value, MAX_DEVICE_NAME_LENGTH - 1);
+                out_config->device_name = value;
             } else if (strcmp(key, "swap_mode") == 0) {
                 parse_swap_mode_cstr(value, &out_config->swap_mode);
             } else if (strcmp(key, "vsync") == 0) {
@@ -555,7 +548,7 @@ bool Config::load(const char* filepath, Config* out_config) {
         else if (current_window_idx >= 0 && current_window_idx < out_config->window_count) {
             WindowConfigEntry& win = out_config->windows[current_window_idx];
             if (strcmp(key, "title") == 0) {
-                strncpy(win.title, value, MAX_DEVICE_NAME_LENGTH - 1);
+                win.title = value;
             } else if (strcmp(key, "monitor") == 0) {
                 parse_int(value, &win.monitor_index);
             } else if (strcmp(key, "x") == 0) {
@@ -579,8 +572,8 @@ bool Config::load(const char* filepath, Config* out_config) {
     // Ensure at least one window exists
     if (out_config->window_count == 0) {
         out_config->window_count = 1;
-        strncpy(out_config->windows[0].name, "main", MAX_WINDOW_NAME_LENGTH - 1);
-        strncpy(out_config->windows[0].title, "Window", MAX_DEVICE_NAME_LENGTH - 1);
+        out_config->windows[0].name = "main";
+        out_config->windows[0].title = "Window";
     }
 
     // Validate after loading
@@ -630,13 +623,13 @@ bool Config::validate() {
     }
 
     // Validate device exists (if specified)
-    if (device_index >= 0 && device_name[0] != '\0') {
+    if (device_index >= 0 && !device_name.empty()) {
         DeviceEnumeration devices;
         enumerate_devices(backend, &devices);
 
         bool found = false;
         for (int i = 0; i < devices.device_count; i++) {
-            if (strcmp(devices.devices[i].name, device_name) == 0) {
+            if (devices.devices[i].name == device_name) {
                 device_index = devices.devices[i].device_index;
                 found = true;
                 break;
@@ -645,7 +638,7 @@ bool Config::validate() {
 
         if (!found) {
             device_index = -1;
-            device_name[0] = '\0';
+            device_name.clear();
             all_valid = false;
         }
     }
@@ -659,8 +652,8 @@ bool Config::validate() {
         WindowConfigEntry& win = windows[i];
 
         // Validate name
-        if (win.name[0] == '\0') {
-            snprintf(win.name, MAX_WINDOW_NAME_LENGTH, "window_%d", i);
+        if (win.name.empty()) {
+            win.name = "window_" + std::to_string(i);
             all_valid = false;
         }
 
@@ -684,16 +677,8 @@ bool Config::validate() {
     // Check for duplicate window names
     for (int i = 0; i < window_count; i++) {
         for (int j = i + 1; j < window_count; j++) {
-            if (strcmp(windows[i].name, windows[j].name) == 0) {
-                char suffix[16];
-                snprintf(suffix, sizeof(suffix), "_%d", j);
-                size_t len = strlen(windows[j].name);
-                size_t suffix_len = strlen(suffix);
-                if (len + suffix_len < MAX_WINDOW_NAME_LENGTH) {
-                    strcat(windows[j].name, suffix);
-                } else {
-                    strncpy(windows[j].name + MAX_WINDOW_NAME_LENGTH - suffix_len - 1, suffix, suffix_len + 1);
-                }
+            if (windows[i].name == windows[j].name) {
+                windows[j].name += "_" + std::to_string(j);
                 all_valid = false;
             }
         }
@@ -705,7 +690,7 @@ bool Config::validate() {
 WindowConfigEntry* Config::find_window(const char* name) {
     if (!name) return nullptr;
     for (int i = 0; i < window_count; i++) {
-        if (strcmp(windows[i].name, name) == 0) {
+        if (windows[i].name == name) {
             return &windows[i];
         }
     }
@@ -715,7 +700,7 @@ WindowConfigEntry* Config::find_window(const char* name) {
 const WindowConfigEntry* Config::find_window(const char* name) const {
     if (!name) return nullptr;
     for (int i = 0; i < window_count; i++) {
-        if (strcmp(windows[i].name, name) == 0) {
+        if (windows[i].name == name) {
             return &windows[i];
         }
     }
@@ -724,7 +709,7 @@ const WindowConfigEntry* Config::find_window(const char* name) const {
 
 bool Config::add_window(const WindowConfigEntry& entry) {
     if (window_count >= MAX_CONFIG_WINDOWS) return false;
-    if (find_window(entry.name) != nullptr) return false;
+    if (find_window(entry.name.c_str()) != nullptr) return false;
 
     windows[window_count] = entry;
     window_count++;
@@ -736,7 +721,7 @@ bool Config::remove_window(const char* name) {
 
     int idx = -1;
     for (int i = 0; i < window_count; i++) {
-        if (strcmp(windows[i].name, name) == 0) {
+        if (windows[i].name == name) {
             idx = i;
             break;
         }

@@ -17,7 +17,7 @@
 
 int main() {
     window::Config config;
-    strncpy(config.windows[0].title, "Direct3D 11 Example", window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].title = "Direct3D 11 Example";
     config.windows[0].width = 800;
     config.windows[0].height = 600;
     config.backend = window::Backend::D3D11;

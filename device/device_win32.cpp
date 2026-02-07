@@ -53,15 +53,15 @@ int enumerate_devices(Backend backend, DeviceEnumeration* out_devices) {
         GraphicsDeviceInfo& device = out_devices->devices[out_devices->device_count];
 
         // Convert wide string to narrow
-        internal::wide_to_utf8(desc.Description, device.name, MAX_DEVICE_NAME_LENGTH);
+        device.name = internal::wide_to_utf8(desc.Description);
 
         // Determine vendor name
         switch (desc.VendorId) {
-            case 0x10DE: strncpy(device.vendor, "NVIDIA", MAX_DEVICE_NAME_LENGTH - 1); break;
-            case 0x1002: strncpy(device.vendor, "AMD", MAX_DEVICE_NAME_LENGTH - 1); break;
-            case 0x8086: strncpy(device.vendor, "Intel", MAX_DEVICE_NAME_LENGTH - 1); break;
-            case 0x1414: strncpy(device.vendor, "Microsoft", MAX_DEVICE_NAME_LENGTH - 1); break;
-            default: strncpy(device.vendor, "Unknown", MAX_DEVICE_NAME_LENGTH - 1); break;
+            case 0x10DE: device.vendor = "NVIDIA"; break;
+            case 0x1002: device.vendor = "AMD"; break;
+            case 0x8086: device.vendor = "Intel"; break;
+            case 0x1414: device.vendor = "Microsoft"; break;
+            default: device.vendor = "Unknown"; break;
         }
 
         device.device_id = desc.DeviceId;
@@ -111,7 +111,7 @@ static BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC hdcMonitor, LPRECT l
     MONITORINFOEXA monitorInfo;
     monitorInfo.cbSize = sizeof(MONITORINFOEXA);
     if (GetMonitorInfoA(hMonitor, &monitorInfo)) {
-        strncpy(monitor.name, monitorInfo.szDevice, MAX_DEVICE_NAME_LENGTH - 1);
+        monitor.name = monitorInfo.szDevice;
         monitor.x = monitorInfo.rcMonitor.left;
         monitor.y = monitorInfo.rcMonitor.top;
         monitor.width = monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left;

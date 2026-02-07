@@ -111,8 +111,8 @@ struct GamepadManager::Impl {
 
                 if (is_connected) {
                     // XInput doesn't provide device names, use generic name
-                    snprintf(gamepads[i].name, MAX_GAMEPAD_NAME_LENGTH, "XInput Controller %d", i + 1);
-                    event.name = gamepads[i].name;
+                    gamepads[i].name = "XInput Controller " + std::to_string(i + 1);
+                    event.name = gamepads[i].name.c_str();
                 } else {
                     gamepads[i].reset();
                     event.name = nullptr;

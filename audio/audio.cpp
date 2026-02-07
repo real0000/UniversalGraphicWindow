@@ -2216,9 +2216,9 @@ bool AudioConfig::save(const char* filepath) const {
     fprintf(file, "[audio]\n");
     fprintf(file, "backend = %s\n", audio_backend_to_config_string(backend));
     fprintf(file, "output_device_index = %d\n", output_device_index);
-    fprintf(file, "output_device_name = %s\n", output_device_name);
+    fprintf(file, "output_device_name = %s\n", output_device_name.c_str());
     fprintf(file, "input_device_index = %d\n", input_device_index);
-    fprintf(file, "input_device_name = %s\n", input_device_name);
+    fprintf(file, "input_device_name = %s\n", input_device_name.c_str());
     fprintf(file, "sample_rate = %d\n", sample_rate);
     fprintf(file, "channels = %d\n", channels);
     fprintf(file, "sample_format = %s\n", sample_format_to_config_string(sample_format));
@@ -2279,13 +2279,11 @@ bool AudioConfig::load(const char* filepath, AudioConfig* out_config) {
             } else if (strcmp(key, "output_device_index") == 0) {
                 parse_int(value, &out_config->output_device_index);
             } else if (strcmp(key, "output_device_name") == 0) {
-                strncpy(out_config->output_device_name, value, MAX_AUDIO_DEVICE_NAME_LENGTH - 1);
-                out_config->output_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH - 1] = '\0';
+                out_config->output_device_name = value;
             } else if (strcmp(key, "input_device_index") == 0) {
                 parse_int(value, &out_config->input_device_index);
             } else if (strcmp(key, "input_device_name") == 0) {
-                strncpy(out_config->input_device_name, value, MAX_AUDIO_DEVICE_NAME_LENGTH - 1);
-                out_config->input_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH - 1] = '\0';
+                out_config->input_device_name = value;
             } else if (strcmp(key, "sample_rate") == 0) {
                 parse_int(value, &out_config->sample_rate);
             } else if (strcmp(key, "channels") == 0) {

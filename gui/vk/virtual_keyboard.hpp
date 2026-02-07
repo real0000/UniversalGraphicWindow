@@ -18,15 +18,13 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 namespace vkeyboard {
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-static constexpr int MAX_TEXT_LENGTH = 4096;
-static constexpr int MAX_LANGUAGE_CODE_LENGTH = 16;
 static constexpr int MAX_KEYBOARD_LAYOUTS = 32;
 
 // ============================================================================
@@ -153,13 +151,13 @@ struct KeyboardConfig {
     bool enable_dictation = true;       // Voice input button
 
     // Hint text shown when input is empty
-    char placeholder[256] = {};
+    std::string placeholder;
 
     // Language/locale hint (e.g., "en-US", "ja-JP")
-    char language_hint[MAX_LANGUAGE_CODE_LENGTH] = {};
+    std::string language_hint;
 
     // For number inputs: allowed character set
-    char allowed_characters[128] = {};
+    std::string allowed_characters;
 
     // Maximum text length (0 = unlimited)
     int max_length = 0;
@@ -227,8 +225,7 @@ struct KeyboardConfig {
 // Represents the current state of a text input field
 struct TextInputContext {
     // Current text content (UTF-8)
-    char text[MAX_TEXT_LENGTH] = {};
-    int text_length = 0;
+    std::string text;
 
     // Selection/cursor position
     TextRange selection;            // If length=0, this is cursor position
@@ -241,8 +238,8 @@ struct TextInputContext {
     Rect text_field_frame;
 
     // Context around cursor (for better predictions)
-    char text_before_cursor[256] = {};
-    char text_after_cursor[256] = {};
+    std::string text_before_cursor;
+    std::string text_after_cursor;
 };
 
 // ============================================================================
@@ -262,8 +259,7 @@ struct TextInputEventData {
     TextInputAction action = TextInputAction::None;
 
     // For InsertText, Replace
-    char text[MAX_TEXT_LENGTH] = {};
-    int text_length = 0;
+    std::string text;
 
     // For Replace
     TextRange replace_range;
@@ -339,9 +335,9 @@ public:
 // ============================================================================
 
 struct KeyboardLayoutInfo {
-    char identifier[64] = {};           // e.g., "com.apple.keylayout.US"
-    char display_name[128] = {};        // e.g., "U.S."
-    char language_code[MAX_LANGUAGE_CODE_LENGTH] = {};  // e.g., "en"
+    std::string identifier;             // e.g., "com.apple.keylayout.US"
+    std::string display_name;           // e.g., "U.S."
+    std::string language_code;          // e.g., "en"
     bool is_current = false;
 };
 

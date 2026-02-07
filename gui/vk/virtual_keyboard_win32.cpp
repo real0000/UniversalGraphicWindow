@@ -434,18 +434,20 @@ Result VirtualKeyboardWin32::get_available_layouts(KeyboardLayoutList* out_list)
 
         // Get layout identifier
         LANGID lang_id = LOWORD(reinterpret_cast<uintptr_t>(layouts[i]));
-        snprintf(info.identifier, sizeof(info.identifier), "%08X",
+        char id_buf[16];
+        snprintf(id_buf, sizeof(id_buf), "%08X",
                  static_cast<unsigned int>(reinterpret_cast<uintptr_t>(layouts[i])));
+        info.identifier = id_buf;
 
         // Get language code
         char lang_code[16];
         GetLocaleInfoA(MAKELCID(lang_id, SORT_DEFAULT), LOCALE_SISO639LANGNAME, lang_code, sizeof(lang_code));
-        strncpy_s(info.language_code, lang_code, MAX_LANGUAGE_CODE_LENGTH - 1);
+        info.language_code = lang_code;
 
         // Get display name
         wchar_t display_name[128];
         if (GetLocaleInfoW(MAKELCID(lang_id, SORT_DEFAULT), LOCALE_SLANGUAGE, display_name, 128)) {
-            internal::wide_to_utf8(display_name, info.display_name, sizeof(info.display_name));
+            info.display_name = internal::wide_to_utf8(display_name);
         }
 
         info.is_current = (layouts[i] == current_layout);
@@ -463,16 +465,18 @@ Result VirtualKeyboardWin32::get_current_layout(KeyboardLayoutInfo* out_info) co
     HKL current_layout = GetKeyboardLayout(0);
     LANGID lang_id = LOWORD(reinterpret_cast<uintptr_t>(current_layout));
 
-    snprintf(out_info->identifier, sizeof(out_info->identifier), "%08X",
+    char id_buf[16];
+    snprintf(id_buf, sizeof(id_buf), "%08X",
              static_cast<unsigned int>(reinterpret_cast<uintptr_t>(current_layout)));
+    out_info->identifier = id_buf;
 
     char lang_code[16];
     GetLocaleInfoA(MAKELCID(lang_id, SORT_DEFAULT), LOCALE_SISO639LANGNAME, lang_code, sizeof(lang_code));
-    strncpy_s(out_info->language_code, lang_code, MAX_LANGUAGE_CODE_LENGTH - 1);
+    out_info->language_code = lang_code;
 
     wchar_t display_name[128];
     if (GetLocaleInfoW(MAKELCID(lang_id, SORT_DEFAULT), LOCALE_SLANGUAGE, display_name, 128)) {
-        internal::wide_to_utf8(display_name, out_info->display_name, sizeof(out_info->display_name));
+        out_info->display_name = internal::wide_to_utf8(display_name);
     }
 
     out_info->is_current = true;

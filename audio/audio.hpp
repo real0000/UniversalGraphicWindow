@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 namespace window {
 namespace audio {
@@ -23,9 +24,6 @@ class AudioFileStream;
 // ============================================================================
 // Constants
 // ============================================================================
-
-static constexpr int MAX_AUDIO_DEVICE_NAME_LENGTH = 256;
-static constexpr int MAX_AUDIO_DEVICE_ID_LENGTH = 256;
 static constexpr int MAX_AUDIO_DEVICES = 32;
 static constexpr int MAX_AUDIO_CHANNELS = 8;
 
@@ -188,8 +186,8 @@ struct AudioFormat {
 // ============================================================================
 
 struct AudioDeviceInfo {
-    char name[MAX_AUDIO_DEVICE_NAME_LENGTH] = {};
-    char id[MAX_AUDIO_DEVICE_ID_LENGTH] = {};
+    std::string name;
+    std::string id;
     AudioDeviceType type = AudioDeviceType::Output;
     bool is_default = false;
     int min_sample_rate = 0;
@@ -303,8 +301,8 @@ struct AudioSessionEventData {
     AudioRouteChangeReason route_change_reason = AudioRouteChangeReason::Unknown;
 
     // Previous/new device info (when available)
-    char previous_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH] = {};
-    char new_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH] = {};
+    std::string previous_device_name;
+    std::string new_device_name;
 };
 
 // Audio session event handler interface
@@ -1293,8 +1291,8 @@ struct AudioConfig {
     AudioBackend backend = AudioBackend::Auto;
     int output_device_index = -1;           // -1 = default device
     int input_device_index = -1;            // -1 = default device
-    char output_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH] = {};
-    char input_device_name[MAX_AUDIO_DEVICE_NAME_LENGTH] = {};
+    std::string output_device_name;
+    std::string input_device_name;
     int sample_rate = 48000;
     int channels = 2;
     SampleFormat sample_format = SampleFormat::Float32;

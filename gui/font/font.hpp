@@ -24,6 +24,7 @@
 #include <cstring>
 #include <functional>
 #include <vector>
+#include <string>
 
 // Include graphics API types (TextureFormat, etc.)
 #include "../../graphics_api.hpp"
@@ -168,19 +169,19 @@ struct Color {
 // ============================================================================
 
 struct FontDescriptor {
-    char family[MAX_FONT_FAMILY_LENGTH] = {};
+    std::string family;
     float size = 12.0f;                     // Size in points
     FontWeight weight = FontWeight::Regular;
     FontStyle style = FontStyle::Normal;
     FontStretch stretch = FontStretch::Normal;
 
     // Create descriptor from family name and size
-    static FontDescriptor create(const char* family, float size) {
+    static FontDescriptor create(const char* family_name, float sz) {
         FontDescriptor desc;
-        if (family) {
-            strncpy(desc.family, family, MAX_FONT_FAMILY_LENGTH - 1);
+        if (family_name) {
+            desc.family = family_name;
         }
-        desc.size = size;
+        desc.size = sz;
         return desc;
     }
 

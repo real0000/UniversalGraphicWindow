@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <functional>
 #include <vector>
+#include <string>
 
 // Include graphics API types (Backend, SwapMode, TextureFormat, Graphics, etc.)
 #include "graphics_api.hpp"
@@ -423,12 +424,11 @@ namespace input {
 //-----------------------------------------------------------------------------
 
 static const int MAX_CONFIG_WINDOWS = 16;
-static const int MAX_WINDOW_NAME_LENGTH = 64;
 
 // Individual window configuration within Config
 struct WindowConfigEntry {
-    char name[MAX_WINDOW_NAME_LENGTH] = "main";     // Unique identifier
-    char title[MAX_DEVICE_NAME_LENGTH] = "Window";
+    std::string name = "main";      // Unique identifier
+    std::string title = "Window";
     int x = -1;                     // -1 = centered
     int y = -1;                     // -1 = centered
     int width = 800;
@@ -445,7 +445,7 @@ struct Config {
     //-------------------------------------------------------------------------
     Backend backend = Backend::Auto;
     int device_index = -1;          // -1 = default device
-    char device_name[MAX_DEVICE_NAME_LENGTH] = {};  // For validation
+    std::string device_name;        // For validation
 
     // Rendering settings
     SwapMode swap_mode = SwapMode::Auto;  // Swap chain presentation mode

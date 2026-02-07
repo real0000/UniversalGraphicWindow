@@ -329,8 +329,7 @@ int main() {
 
     // Create OpenGL window
     window::Config config;
-    strncpy(config.windows[0].title, "Font Rendering Example - Press ESC to exit",
-            window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].title = "Font Rendering Example - Press ESC to exit";
     config.windows[0].width = 900;
     config.windows[0].height = 700;
     config.backend = window::Backend::OpenGL;

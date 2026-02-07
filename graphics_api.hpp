@@ -17,14 +17,13 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 namespace window {
 
 //=============================================================================
 // Constants
 //=============================================================================
-
-static const int MAX_DEVICE_NAME_LENGTH = 256;
 static const int MAX_DEVICES = 16;
 static const int MAX_MONITORS = 16;
 static const int MAX_DISPLAY_MODES = 256;
@@ -239,8 +238,8 @@ bool texture_format_has_alpha(TextureFormat format);
 
 // Information about a graphics device (GPU)
 struct GraphicsDeviceInfo {
-    char name[MAX_DEVICE_NAME_LENGTH] = {};     // Device name (e.g., "NVIDIA GeForce RTX 3080")
-    char vendor[MAX_DEVICE_NAME_LENGTH] = {};   // Vendor name (e.g., "NVIDIA")
+    std::string name;                           // Device name (e.g., "NVIDIA GeForce RTX 3080")
+    std::string vendor;                         // Vendor name (e.g., "NVIDIA")
     uint32_t device_id = 0;                     // Unique device identifier
     uint32_t vendor_id = 0;                     // Vendor identifier
     uint64_t dedicated_video_memory = 0;        // Dedicated VRAM in bytes
@@ -276,7 +275,7 @@ struct DisplayMode {
 
 // Information about a monitor/display
 struct MonitorInfo {
-    char name[MAX_DEVICE_NAME_LENGTH] = {};     // Monitor name
+    std::string name;                           // Monitor name
     int x = 0;                                  // Position X
     int y = 0;                                  // Position Y
     int width = 0;                              // Current width

@@ -239,8 +239,7 @@ public:
 
     vkeyboard::TextInputContext get_text_input_context() const override {
         vkeyboard::TextInputContext ctx;
-        strncpy(ctx.text, text.c_str(), vkeyboard::MAX_TEXT_LENGTH - 1);
-        ctx.text_length = static_cast<int>(text.length());
+        ctx.text = text;
         ctx.selection.start = cursor_pos;
         ctx.selection.length = selection_length;
         return ctx;
@@ -394,7 +393,7 @@ public:
 
     void on_text_input(const vkeyboard::TextInputEventData& data) override {
         printf("  [Event] Text input: action=%d, text='%s'\n",
-               static_cast<int>(data.action), data.text);
+               static_cast<int>(data.action), data.text.c_str());
     }
 
     void on_text_committed(const char* text) override {
@@ -524,8 +523,7 @@ int main() {
 
     // Create window
     window::Config config;
-    strncpy(config.windows[0].title, "Virtual Keyboard Test - Press ESC to exit",
-            window::MAX_DEVICE_NAME_LENGTH - 1);
+    config.windows[0].title = "Virtual Keyboard Test - Press ESC to exit";
     config.windows[0].width = 800;
     config.windows[0].height = 600;
     config.backend = window::Backend::OpenGL;
@@ -603,8 +601,8 @@ int main() {
         printf("Available keyboard layouts: %d\n", layouts.count);
         for (int i = 0; i < layouts.count && i < 5; i++) {
             printf("  [%d] %s (%s)%s\n", i,
-                   layouts.layouts[i].display_name,
-                   layouts.layouts[i].language_code,
+                   layouts.layouts[i].display_name.c_str(),
+                   layouts.layouts[i].language_code.c_str(),
                    layouts.layouts[i].is_current ? " [current]" : "");
         }
     }

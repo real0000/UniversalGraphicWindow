@@ -17,6 +17,7 @@
 #define INPUT_WHEEL_HPP
 
 #include <cstdint>
+#include <string>
 
 namespace window {
 namespace input {
@@ -189,7 +190,7 @@ struct WheelState {
 
     // Connection status
     bool connected = false;
-    char name[MAX_WHEEL_NAME_LENGTH] = {};
+    std::string name;
 
     void reset() {
         steering = 0.0f;
@@ -203,7 +204,7 @@ struct WheelState {
             buttons[i] = false;
         }
         connected = false;
-        name[0] = '\0';
+        name.clear();
     }
 };
 

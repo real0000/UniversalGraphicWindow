@@ -1070,7 +1070,7 @@ int AudioManager::enumerate_devices(AudioDeviceType type, AudioDeviceEnumeration
         wchar_t* device_id = nullptr;
         device->GetId(&device_id);
         if (device_id) {
-            ::internal::wide_to_utf8(device_id, info.id, sizeof(info.id));
+            info.id = ::internal::wide_to_utf8(device_id);
             info.is_default = default_id && wcscmp(device_id, default_id) == 0;
             CoTaskMemFree(device_id);
         }
@@ -1083,7 +1083,7 @@ int AudioManager::enumerate_devices(AudioDeviceType type, AudioDeviceEnumeration
             PropVariantInit(&name);
             hr = props->GetValue(PKEY_Device_FriendlyName, &name);
             if (SUCCEEDED(hr) && name.vt == VT_LPWSTR) {
-                ::internal::wide_to_utf8(name.pwszVal, info.name, sizeof(info.name));
+                info.name = ::internal::wide_to_utf8(name.pwszVal);
             }
             PropVariantClear(&name);
             props->Release();
@@ -1132,7 +1132,7 @@ bool AudioManager::get_default_device(AudioDeviceType type, AudioDeviceInfo* out
     wchar_t* device_id = nullptr;
     device->GetId(&device_id);
     if (device_id) {
-        ::internal::wide_to_utf8(device_id, out->id, sizeof(out->id));
+        out->id = ::internal::wide_to_utf8(device_id);
         CoTaskMemFree(device_id);
     }
 
@@ -1144,7 +1144,7 @@ bool AudioManager::get_default_device(AudioDeviceType type, AudioDeviceInfo* out
         PropVariantInit(&name);
         hr = props->GetValue(PKEY_Device_FriendlyName, &name);
         if (SUCCEEDED(hr) && name.vt == VT_LPWSTR) {
-            ::internal::wide_to_utf8(name.pwszVal, out->name, sizeof(out->name));
+            out->name = ::internal::wide_to_utf8(name.pwszVal);
         }
         PropVariantClear(&name);
         props->Release();
