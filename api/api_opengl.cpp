@@ -33,8 +33,9 @@ typedef BOOL (WINAPI* PFNWGLSWAPINTERVALEXTPROC)(int);
 #define WGL_CONTEXT_MAJOR_VERSION_ARB       0x2091
 #define WGL_CONTEXT_MINOR_VERSION_ARB       0x2092
 #define WGL_CONTEXT_PROFILE_MASK_ARB        0x9126
-#define WGL_CONTEXT_CORE_PROFILE_BIT_ARB    0x00000001
-#define WGL_CONTEXT_ES2_PROFILE_BIT_EXT     0x00000004
+#define WGL_CONTEXT_CORE_PROFILE_BIT_ARB          0x00000001
+#define WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB 0x00000002
+#define WGL_CONTEXT_ES2_PROFILE_BIT_EXT           0x00000004
 #define WGL_CONTEXT_FLAGS_ARB               0x2094
 #define WGL_CONTEXT_DEBUG_BIT_ARB           0x0001
 #define WGL_DRAW_TO_WINDOW_ARB            0x2001
@@ -206,7 +207,7 @@ Graphics* create_opengl_graphics_hwnd(void* hwnd_ptr, const Config& config) {
         shared_hglrc = static_cast<HGLRC>(config.shared_graphics->native_context());
     }
 
-    // Try highest OpenGL version first, then OpenGL ES
+    // Try highest OpenGL core version first, then OpenGL ES
     static const struct { int major, minor, profile; } versions[] = {
         // OpenGL Core
         {4, 6, WGL_CONTEXT_CORE_PROFILE_BIT_ARB},

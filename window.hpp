@@ -24,6 +24,9 @@
 #include <functional>
 #include <vector>
 
+// Include graphics API types (Backend, SwapMode, TextureFormat, Graphics, etc.)
+#include "graphics_api.hpp"
+
 //=============================================================================
 // Platform Detection (Internal)
 // These may already be defined by the build system (CMake), so check first
@@ -82,39 +85,7 @@ namespace window {
 // Enumerations
 //-----------------------------------------------------------------------------
 
-enum class Result {
-    Success = 0,
-    ErrorUnknown,
-    ErrorPlatformInit,
-    ErrorWindowCreation,
-    ErrorGraphicsInit,
-    ErrorNotSupported,
-    ErrorInvalidParameter,
-    ErrorOutOfMemory,
-    ErrorDeviceLost
-};
-
-enum class Backend {
-    Auto = 0,   // Auto-select best backend for platform
-    OpenGL,
-    Vulkan,
-    D3D11,
-    D3D12,
-    Metal
-};
-
-// Swap chain presentation mode
-enum class SwapMode : uint8_t {
-    Fifo = 0,           // VSync ON - wait for vertical blank (default, no tearing)
-    FifoRelaxed,        // Adaptive VSync - like Fifo but may tear if frame is late
-    Mailbox,            // Triple buffering - low latency, no tearing (if supported)
-    Immediate,          // VSync OFF - no waiting, lowest latency, may tear
-    Auto                // Auto-select based on vsync preference
-};
-
-// SwapMode string conversion
-const char* swap_mode_to_string(SwapMode mode);
-bool parse_swap_mode(const char* value, SwapMode* out);
+// Note: Result, Backend, SwapMode, TextureFormat are defined in graphics_api.hpp
 
 // Standard cursor types supported across platforms
 enum class CursorType : uint8_t {
@@ -428,19 +399,10 @@ using DpiChangeCallback = std::function<void(const DpiChangeEvent& event)>;
 using DropFileCallback = std::function<void(const DropFileEvent& event)>;
 
 //-----------------------------------------------------------------------------
-// Constants
-//-----------------------------------------------------------------------------
-
-static const int MAX_DEVICE_NAME_LENGTH = 256;
-static const int MAX_DEVICES = 16;
-static const int MAX_MONITORS = 16;
-static const int MAX_DISPLAY_MODES = 256;
-
-//-----------------------------------------------------------------------------
 // Forward Declarations
 //-----------------------------------------------------------------------------
 
-class Graphics;
+// Note: Graphics class is defined in graphics_api.hpp
 
 namespace input {
     class IMouseHandler;
@@ -453,58 +415,8 @@ namespace input {
 // Structures
 //-----------------------------------------------------------------------------
 
-//-----------------------------------------------------------------------------
-// Graphics Device and Display Mode Enumeration
-//-----------------------------------------------------------------------------
-
-// Information about a graphics device (GPU)
-struct GraphicsDeviceInfo {
-    char name[MAX_DEVICE_NAME_LENGTH] = {};     // Device name (e.g., "NVIDIA GeForce RTX 3080")
-    char vendor[MAX_DEVICE_NAME_LENGTH] = {};   // Vendor name (e.g., "NVIDIA")
-    uint32_t device_id = 0;                     // Unique device identifier
-    uint32_t vendor_id = 0;                     // Vendor identifier
-    uint64_t dedicated_video_memory = 0;        // Dedicated VRAM in bytes
-    uint64_t dedicated_system_memory = 0;       // Dedicated system memory in bytes
-    uint64_t shared_system_memory = 0;          // Shared system memory in bytes
-    Backend backend = Backend::Auto;            // Which backend this device is for
-    int device_index = 0;                       // Index for selection
-    bool is_default = false;                    // True if this is the system default device
-};
-
-// Display mode (resolution + refresh rate)
-struct DisplayMode {
-    int width = 0;
-    int height = 0;
-    int refresh_rate = 0;       // In Hz (e.g., 60, 120, 144)
-    int bits_per_pixel = 32;    // Color depth
-    bool is_native = false;     // True if this is the monitor's native resolution
-};
-
-// Information about a monitor/display
-struct MonitorInfo {
-    char name[MAX_DEVICE_NAME_LENGTH] = {};     // Monitor name
-    int x = 0;                                  // Position X
-    int y = 0;                                  // Position Y
-    int width = 0;                              // Current width
-    int height = 0;                             // Current height
-    int refresh_rate = 0;                       // Current refresh rate
-    bool is_primary = false;                    // True if primary monitor
-    int monitor_index = 0;                      // Index for selection
-
-    DisplayMode modes[MAX_DISPLAY_MODES] = {};  // Available display modes
-    int mode_count = 0;                         // Number of available modes
-};
-
-// Enumeration results
-struct DeviceEnumeration {
-    GraphicsDeviceInfo devices[MAX_DEVICES] = {};
-    int device_count = 0;
-};
-
-struct MonitorEnumeration {
-    MonitorInfo monitors[MAX_MONITORS] = {};
-    int monitor_count = 0;
-};
+// Note: GraphicsDeviceInfo, DisplayMode, MonitorInfo, DeviceEnumeration,
+//       MonitorEnumeration are defined in graphics_api.hpp
 
 //-----------------------------------------------------------------------------
 // Configuration (saveable/loadable, supports multi-window)
@@ -586,91 +498,7 @@ struct Config {
 // Backward compatibility typedef
 using GraphicsConfig = Config;
 
-//-----------------------------------------------------------------------------
-// External Window Configuration
-//-----------------------------------------------------------------------------
-
-// Configuration for attaching graphics to an existing external window
-struct ExternalWindowConfig {
-    // Native window handle (required)
-    // Win32: HWND
-    // X11: Window (unsigned long)
-    // Wayland: wl_surface*
-    // macOS: NSView*
-    // iOS: UIView*
-    // Android: ANativeWindow*
-    void* native_handle = nullptr;
-
-    // Native display handle (required for X11/Wayland, optional for others)
-    // X11: Display*
-    // Wayland: wl_display*
-    // Others: nullptr
-    void* native_display = nullptr;
-
-    // Window dimensions (required - used for swapchain/viewport setup)
-    int width = 0;
-    int height = 0;
-
-    // Graphics settings
-    SwapMode swap_mode = SwapMode::Auto;  // Swap chain presentation mode
-    bool vsync = true;      // Used when swap_mode is Auto
-    int samples = 1;        // MSAA samples (1 = disabled)
-    int red_bits = 8;
-    int green_bits = 8;
-    int blue_bits = 8;
-    int alpha_bits = 8;
-    int depth_bits = 24;
-    int stencil_bits = 8;
-    int back_buffers = 2;
-
-    // Graphics backend selection
-    Backend backend = Backend::Auto;
-
-    // Shared context for resource sharing
-    Graphics* shared_graphics = nullptr;
-};
-
-//-----------------------------------------------------------------------------
-// Graphics Context
-//-----------------------------------------------------------------------------
-
-class Graphics {
-public:
-    virtual ~Graphics() = default;
-
-    // Create graphics context for an existing external window
-    // Use this when you have your own window (e.g., from Qt, wxWidgets, SDL, GLFW, etc.)
-    // The caller is responsible for:
-    //   - Managing the window lifetime (don't destroy window while Graphics exists)
-    //   - Calling resize() when the window size changes
-    //   - Presenting/swapping buffers using native APIs or present()
-    static Graphics* create(const ExternalWindowConfig& config, Result* out_result = nullptr);
-
-    // Destroy this graphics context (call instead of delete)
-    void destroy();
-
-    // Backend info
-    virtual Backend get_backend() const = 0;
-    virtual const char* get_backend_name() const = 0;
-    virtual const char* get_device_name() const = 0;
-
-    // Resize swapchain (call when external window is resized)
-    virtual bool resize(int width, int height) = 0;
-
-    // Present/swap buffers (convenience method, can also use native APIs directly)
-    virtual void present() = 0;
-
-    // Make this context current (for OpenGL)
-    virtual void make_current() = 0;
-
-    // Native handles
-    virtual void* native_device() const = 0;
-    virtual void* native_context() const = 0;
-    virtual void* native_swapchain() const = 0;
-
-protected:
-    Graphics() = default;
-};
+// Note: ExternalWindowConfig and Graphics class are defined in graphics_api.hpp
 
 //-----------------------------------------------------------------------------
 // Window
@@ -799,10 +627,8 @@ private:
 // Utility Functions
 //-----------------------------------------------------------------------------
 
-const char* result_to_string(Result result);
-const char* backend_to_string(Backend backend);
-bool is_backend_supported(Backend backend);
-Backend get_default_backend();
+// Note: result_to_string, backend_to_string, is_backend_supported,
+//       get_default_backend are defined in graphics_api.hpp
 
 // Cursor utilities
 const char* cursor_type_to_string(CursorType type);
@@ -813,24 +639,7 @@ const char* key_to_string(Key key);
 const char* mouse_button_to_string(MouseButton button);
 const char* event_type_to_string(EventType type);
 
-//-----------------------------------------------------------------------------
-// Device and Display Enumeration
-//-----------------------------------------------------------------------------
-
-// Enumerate available graphics devices for a specific backend (or all backends if Auto)
-// Returns the number of devices found
-int enumerate_devices(Backend backend, DeviceEnumeration* out_devices);
-
-// Enumerate available monitors and their display modes
-// Returns the number of monitors found
-int enumerate_monitors(MonitorEnumeration* out_monitors);
-
-// Find the best matching display mode for a monitor
-// Returns true if a matching mode was found
-bool find_display_mode(const MonitorInfo& monitor, int width, int height, int refresh_rate, DisplayMode* out_mode);
-
-// Get the primary monitor info
-bool get_primary_monitor(MonitorInfo* out_monitor);
+// Note: Device and display enumeration functions are defined in graphics_api.hpp
 
 //-----------------------------------------------------------------------------
 // Internal Window Creation

@@ -30,6 +30,16 @@ option(WINDOW_ENABLE_MP3_DECODER "Enable MP3 decoder (minimp3)" OFF)
 option(WINDOW_ENABLE_VORBIS_DECODER "Enable OGG Vorbis decoder (stb_vorbis)" OFF)
 option(WINDOW_ENABLE_FLAC_DECODER "Enable FLAC decoder (dr_flac)" OFF)
 
+# GUI options
+option(WINDOW_ENABLE_GUI "Enable GUI interface support" ON)
+
+# Virtual keyboard options
+option(WINDOW_ENABLE_VIRTUAL_KEYBOARD "Enable virtual keyboard support" ON)
+
+# Font options
+option(WINDOW_ENABLE_FONT "Enable font rendering support" ON)
+option(WINDOW_ENABLE_FREETYPE "Enable FreeType2 font backend" OFF)
+
 #=============================================================================
 # FetchContent Configuration (git progress always enabled)
 #=============================================================================
@@ -442,6 +452,105 @@ else()
     message(STATUS "Audio support disabled")
 endif()
 
+#=============================================================================
+# GUI Support
+#=============================================================================
+
+if(WINDOW_ENABLE_GUI)
+    list(APPEND WINDOW_SOURCES gui/gui.cpp)
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_GUI)
+    message(STATUS "GUI support enabled")
+else()
+    message(STATUS "GUI support disabled")
+endif()
+
+#=============================================================================
+# Virtual Keyboard Support
+#=============================================================================
+
+if(WINDOW_ENABLE_VIRTUAL_KEYBOARD)
+    list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard.cpp)
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VIRTUAL_KEYBOARD)
+
+    # Platform-specific virtual keyboard implementation
+    if(WINDOW_PLATFORM STREQUAL "WIN32")
+        list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard_win32.cpp)
+        list(APPEND WINDOW_LIBS ole32 shell32)
+    elseif(WINDOW_PLATFORM STREQUAL "MACOS")
+        list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard_apple.mm)
+        list(APPEND WINDOW_LIBS "-framework Carbon")
+    elseif(WINDOW_PLATFORM STREQUAL "IOS")
+        list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard_apple.mm)
+    elseif(WINDOW_PLATFORM STREQUAL "ANDROID")
+        list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard_android.cpp)
+    elseif(WINDOW_PLATFORM STREQUAL "WASM")
+        list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard_stub.cpp)
+    elseif(WINDOW_PLATFORM STREQUAL "X11" OR WINDOW_PLATFORM STREQUAL "WAYLAND")
+        list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard_linux.cpp)
+    else()
+        list(APPEND WINDOW_SOURCES gui/vk/virtual_keyboard_stub.cpp)
+    endif()
+
+    message(STATUS "Virtual keyboard support enabled")
+else()
+    message(STATUS "Virtual keyboard support disabled")
+endif()
+
+#=============================================================================
+# Font Rendering Support
+#=============================================================================
+
+if(WINDOW_ENABLE_FONT)
+    list(APPEND WINDOW_SOURCES gui/font/font.cpp)
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_FONT)
+
+    # FreeType backend (cross-platform)
+    if(WINDOW_ENABLE_FREETYPE)
+        find_package(Freetype QUIET)
+        if(FREETYPE_FOUND)
+            list(APPEND WINDOW_SOURCES gui/font/font_freetype.cpp)
+            list(APPEND WINDOW_LIBS ${FREETYPE_LIBRARIES})
+            include_directories(${FREETYPE_INCLUDE_DIRS})
+            list(APPEND WINDOW_DEFINES FONT_SUPPORT_FREETYPE)
+            message(STATUS "Font backend: FreeType2")
+        else()
+            message(STATUS "FreeType2 not found - FreeType backend disabled")
+        endif()
+    endif()
+
+    # Platform-specific native font implementation
+    if(WINDOW_PLATFORM STREQUAL "WIN32")
+        list(APPEND WINDOW_SOURCES gui/font/font_win32.cpp)
+        list(APPEND WINDOW_LIBS dwrite d2d1 windowscodecs)
+        message(STATUS "Font backend: DirectWrite")
+    elseif(WINDOW_PLATFORM STREQUAL "MACOS")
+        list(APPEND WINDOW_SOURCES gui/font/font_apple.mm)
+        list(APPEND WINDOW_LIBS "-framework CoreText" "-framework CoreGraphics")
+        message(STATUS "Font backend: Core Text")
+    elseif(WINDOW_PLATFORM STREQUAL "IOS")
+        list(APPEND WINDOW_SOURCES gui/font/font_apple.mm)
+        list(APPEND WINDOW_LIBS "-framework CoreText" "-framework CoreGraphics")
+        message(STATUS "Font backend: Core Text")
+    elseif(WINDOW_PLATFORM STREQUAL "X11" OR WINDOW_PLATFORM STREQUAL "WAYLAND")
+        list(APPEND WINDOW_SOURCES gui/font/font_linux.cpp)
+        # Try to find fontconfig
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(FONTCONFIG fontconfig)
+            if(FONTCONFIG_FOUND)
+                list(APPEND WINDOW_LIBS ${FONTCONFIG_LIBRARIES})
+                include_directories(${FONTCONFIG_INCLUDE_DIRS})
+                list(APPEND WINDOW_DEFINES FONT_SUPPORT_FONTCONFIG)
+                message(STATUS "Font backend: Fontconfig + FreeType")
+            endif()
+        endif()
+    endif()
+
+    message(STATUS "Font support enabled")
+else()
+    message(STATUS "Font support disabled")
+endif()
+
 # Platform-specific dependencies
 if(WINDOW_PLATFORM STREQUAL "WIN32")
     list(APPEND WINDOW_LIBS user32 gdi32)
@@ -592,6 +701,18 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         if(WINDOW_ENABLE_AUDIO AND "WINDOW_SUPPORT_AUDIO" IN_LIST WINDOW_DEFINES)
             add_executable(example_audio examples/audio.cpp)
             target_link_libraries(example_audio PRIVATE window)
+        endif()
+
+        # Font rendering example
+        if(WINDOW_ENABLE_FONT AND "WINDOW_SUPPORT_FONT" IN_LIST WINDOW_DEFINES)
+            add_executable(example_font examples/font.cpp)
+            target_link_libraries(example_font PRIVATE window)
+        endif()
+
+        # Virtual keyboard example
+        if(WINDOW_ENABLE_FONT AND "WINDOW_SUPPORT_FONT" IN_LIST WINDOW_DEFINES)
+            add_executable(example_virtual_keyboard examples/virtual_keyboard.cpp)
+            target_link_libraries(example_virtual_keyboard PRIVATE window)
         endif()
     endif()
 
