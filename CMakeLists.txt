@@ -40,6 +40,11 @@ option(WINDOW_ENABLE_VIRTUAL_KEYBOARD "Enable virtual keyboard support" ON)
 option(WINDOW_ENABLE_FONT "Enable font rendering support" ON)
 option(WINDOW_ENABLE_FREETYPE "Enable FreeType2 font backend" OFF)
 
+# SIMD math acceleration options
+option(WINDOW_MATH_SSE "Enable SSE SIMD acceleration for math (x86/x64)" ON)
+option(WINDOW_MATH_NEON "Enable NEON SIMD acceleration for math (ARM)" ON)
+option(WINDOW_MATH_SVE "Enable SVE SIMD acceleration for math (ARM)" OFF)
+
 #=============================================================================
 # FetchContent Configuration (git progress always enabled)
 #=============================================================================
@@ -629,6 +634,34 @@ target_include_directories(window PUBLIC
 
 target_compile_definitions(window PUBLIC ${WINDOW_DEFINES})
 target_link_libraries(window PUBLIC ${WINDOW_LIBS})
+
+# SIMD math acceleration
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86|x86_64|AMD64|i[3-6]86")
+    if(WINDOW_MATH_SSE)
+        target_compile_definitions(window PUBLIC WINDOW_MATH_SSE=1)
+        if(NOT MSVC)
+            target_compile_options(window PUBLIC -msse4.1)
+        endif()
+        message(STATUS "Math SIMD: SSE4.1")
+    endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64|armv[78]")
+    if(WINDOW_MATH_NEON)
+        target_compile_definitions(window PUBLIC WINDOW_MATH_NEON=1)
+        if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "armv7")
+            target_compile_options(window PUBLIC -mfpu=neon)
+        endif()
+        message(STATUS "Math SIMD: NEON")
+    endif()
+    if(WINDOW_MATH_SVE)
+        target_compile_definitions(window PUBLIC WINDOW_MATH_SVE=1)
+        if(NOT MSVC)
+            target_compile_options(window PUBLIC -march=armv8.2-a+sve)
+        endif()
+        message(STATUS "Math SIMD: SVE")
+    endif()
+else()
+    message(STATUS "Math SIMD: None (scalar fallback)")
+endif()
 
 # Add Boost include directories (geometry and property_tree are header-only)
 if(BOOST_FETCHED)
