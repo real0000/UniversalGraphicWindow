@@ -48,8 +48,8 @@ public:
 
     KeyboardState get_state() const override { return state_; }
     bool is_visible() const override;
-    Rect get_frame() const override { return frame_; }
-    float get_height() const override { return frame_.height; }
+    Box get_frame() const override { return frame_; }
+    float get_height() const override { return window::math::box_height(frame_); }
 
     void set_config(const KeyboardConfig& config) override { config_ = config; }
     KeyboardConfig get_config() const override { return config_; }
@@ -83,7 +83,7 @@ private:
 
     bool initialized_ = false;
     KeyboardState state_ = KeyboardState::Hidden;
-    Rect frame_;
+    Box frame_;
     KeyboardConfig config_;
     ITextInputDelegate* text_delegate_ = nullptr;
     IVirtualKeyboardEventHandler* event_handler_ = nullptr;
@@ -252,7 +252,7 @@ void VirtualKeyboardAndroid::on_keyboard_height_changed(float height) {
     KeyboardState old_state = state_;
 
     if (height > 0) {
-        frame_.height = height;
+        frame_ = window::math::make_box(0, 0, 0, height);
         state_ = KeyboardState::Visible;
 
         if (old_state != KeyboardState::Visible && event_handler_) {
@@ -263,7 +263,7 @@ void VirtualKeyboardAndroid::on_keyboard_height_changed(float height) {
             event_handler_->on_keyboard_did_show(data);
         }
     } else {
-        frame_.height = 0;
+        frame_ = Box(window::math::Vec2(0,0), window::math::Vec2(0,0));
         state_ = KeyboardState::Hidden;
 
         if (old_state != KeyboardState::Hidden && event_handler_) {
@@ -422,7 +422,7 @@ Result VirtualKeyboardAndroid::get_available_layouts(KeyboardLayoutList* out_lis
         return Result::ErrorInvalidParameter;
     }
 
-    out_list->count = 0;
+    out_list->layouts.clear();
 
     JNIEnv* env = get_jni_env();
     if (!env || !g_activity) {
@@ -456,10 +456,11 @@ Result VirtualKeyboardAndroid::get_available_layouts(KeyboardLayoutList* out_lis
 
         int count = env->CallIntMethod(input_methods, size_method);
 
-        for (int i = 0; i < count && out_list->count < MAX_KEYBOARD_LAYOUTS; ++i) {
+        for (int i = 0; i < count; ++i) {
             jobject input_method = env->CallObjectMethod(input_methods, get_method, i);
 
             if (input_method) {
+                KeyboardLayoutInfo info;
                 jclass im_class = env->GetObjectClass(input_method);
 
                 // Get ID
@@ -467,8 +468,7 @@ Result VirtualKeyboardAndroid::get_available_layouts(KeyboardLayoutList* out_lis
                 jstring id_str = (jstring)env->CallObjectMethod(input_method, get_id);
                 if (id_str) {
                     const char* id = env->GetStringUTFChars(id_str, nullptr);
-                    strncpy(out_list->layouts[out_list->count].identifier, id,
-                            sizeof(out_list->layouts[out_list->count].identifier) - 1);
+                    info.identifier = id;
                     env->ReleaseStringUTFChars(id_str, id);
                     env->DeleteLocalRef(id_str);
                 }
@@ -491,8 +491,7 @@ Result VirtualKeyboardAndroid::get_available_layouts(KeyboardLayoutList* out_lis
 
                         if (label_str) {
                             const char* name = env->GetStringUTFChars(label_str, nullptr);
-                            strncpy(out_list->layouts[out_list->count].display_name, name,
-                                    sizeof(out_list->layouts[out_list->count].display_name) - 1);
+                            info.display_name = name;
                             env->ReleaseStringUTFChars(label_str, name);
                             env->DeleteLocalRef(label_str);
                         }
@@ -507,7 +506,7 @@ Result VirtualKeyboardAndroid::get_available_layouts(KeyboardLayoutList* out_lis
                 env->DeleteLocalRef(im_class);
                 env->DeleteLocalRef(input_method);
 
-                out_list->count++;
+                out_list->layouts.push_back(std::move(info));
             }
         }
 

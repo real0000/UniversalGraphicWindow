@@ -19,13 +19,14 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <vector>
+
+#include "../../math_util.hpp"
 
 namespace vkeyboard {
 
-// ============================================================================
-// Constants
-// ============================================================================
-static constexpr int MAX_KEYBOARD_LAYOUTS = 32;
+// Import math types
+using Box = window::math::Box;
 
 // ============================================================================
 // Enums
@@ -113,15 +114,6 @@ enum class TextInputAction : uint8_t {
 // ============================================================================
 // Basic Types
 // ============================================================================
-
-struct Rect {
-    float x = 0.0f;
-    float y = 0.0f;
-    float width = 0.0f;
-    float height = 0.0f;
-
-    bool is_empty() const { return width <= 0.0f || height <= 0.0f; }
-};
 
 struct TextRange {
     int start = 0;
@@ -235,7 +227,7 @@ struct TextInputContext {
     bool has_composition = false;
 
     // Hint for keyboard about the text field's position (for keyboard avoidance)
-    Rect text_field_frame;
+    Box text_field_frame;
 
     // Context around cursor (for better predictions)
     std::string text_before_cursor;
@@ -248,7 +240,7 @@ struct TextInputContext {
 
 struct KeyboardEventData {
     KeyboardState state = KeyboardState::Hidden;
-    Rect frame;                     // Keyboard frame in screen coordinates
+    Box frame;                     // Keyboard frame in screen coordinates
     float animation_duration = 0.0f; // Animation duration in seconds
 
     // For state transitions
@@ -342,8 +334,7 @@ struct KeyboardLayoutInfo {
 };
 
 struct KeyboardLayoutList {
-    KeyboardLayoutInfo layouts[MAX_KEYBOARD_LAYOUTS];
-    int count = 0;
+    std::vector<KeyboardLayoutInfo> layouts;
 };
 
 // ============================================================================
@@ -372,7 +363,7 @@ public:
     // State queries
     virtual KeyboardState get_state() const = 0;
     virtual bool is_visible() const = 0;
-    virtual Rect get_frame() const = 0;     // Keyboard frame in screen coordinates
+    virtual Box get_frame() const = 0;      // Keyboard frame in screen coordinates
     virtual float get_height() const = 0;   // Convenience: keyboard height
 
     // Configuration

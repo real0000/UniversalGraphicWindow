@@ -27,8 +27,7 @@ namespace font {
 
 // Extended find_system_font that uses fontconfig
 bool find_system_font_fontconfig(const FontDescriptor& descriptor,
-                                  char* out_path, int path_size) {
-    if (!out_path || path_size <= 0) return false;
+                                  std::string& out_path) {
 
     FcConfig* config = FcInitLoadConfigAndFonts();
     if (!config) return false;
@@ -41,7 +40,7 @@ bool find_system_font_fontconfig(const FontDescriptor& descriptor,
     }
 
     // Add family name
-    FcPatternAddString(pattern, FC_FAMILY, reinterpret_cast<const FcChar8*>(descriptor.family));
+    FcPatternAddString(pattern, FC_FAMILY, reinterpret_cast<const FcChar8*>(descriptor.family.c_str()));
 
     // Add weight
     int fc_weight = FC_WEIGHT_REGULAR;
@@ -81,8 +80,7 @@ bool find_system_font_fontconfig(const FontDescriptor& descriptor,
     // Get file path
     FcChar8* file = nullptr;
     if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch && file) {
-        strncpy(out_path, reinterpret_cast<const char*>(file), path_size - 1);
-        out_path[path_size - 1] = '\0';
+        out_path = reinterpret_cast<const char*>(file);
         FcPatternDestroy(match);
         FcConfigDestroy(config);
         return true;
@@ -116,9 +114,10 @@ void enumerate_system_fonts_fontconfig(std::vector<FontDescriptor>& out_fonts) {
         FcChar8* family = nullptr;
         if (FcPatternGetString(fonts->fonts[i], FC_FAMILY, 0, &family) == FcResultMatch && family) {
             // Check if we already have this family
+            const char* family_str = reinterpret_cast<const char*>(family);
             bool duplicate = false;
             for (size_t j = 0; j < out_fonts.size(); ++j) {
-                if (strcmp(out_fonts[j].family, reinterpret_cast<const char*>(family)) == 0) {
+                if (out_fonts[j].family == family_str) {
                     duplicate = true;
                     break;
                 }
@@ -126,8 +125,7 @@ void enumerate_system_fonts_fontconfig(std::vector<FontDescriptor>& out_fonts) {
 
             if (!duplicate) {
                 FontDescriptor desc;
-                strncpy(desc.family, reinterpret_cast<const char*>(family), MAX_FONT_FAMILY_LENGTH - 1);
-                desc.family[MAX_FONT_FAMILY_LENGTH - 1] = '\0';
+                desc.family = family_str;
                 desc.size = 12.0f;
                 desc.weight = FontWeight::Regular;
                 desc.style = FontStyle::Normal;
@@ -204,7 +202,7 @@ public:
     void destroy_font(IFontFace* face) override { delete face; }
 
     void enumerate_system_fonts(std::vector<FontDescriptor>&) const override {}
-    bool find_system_font(const FontDescriptor&, char*, int) const override { return false; }
+    bool find_system_font(const FontDescriptor&, std::string&) const override { return false; }
 
     IFontFace* get_default_font(float, Result* r) override {
         if (r) *r = Result::ErrorBackendNotSupported;

@@ -28,17 +28,14 @@
 
 // Include graphics API types (TextureFormat, etc.)
 #include "../../graphics_api.hpp"
+#include "../../math_util.hpp"
 
 namespace font {
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-static constexpr int MAX_FONT_FAMILY_LENGTH = 256;
-static constexpr int MAX_FONT_PATH_LENGTH = 1024;
-static constexpr int MAX_FONT_FACES = 64;
-static constexpr int MAX_GLYPH_CACHE_SIZE = 4096;
+// Import math types
+using Vec2 = window::math::Vec2;
+using Vec4 = window::math::Vec4;
+using Box = window::math::Box;
 
 // ============================================================================
 // Enums
@@ -133,37 +130,6 @@ enum class PixelFormat : uint8_t {
 // Basic Types
 // ============================================================================
 
-struct Point {
-    float x = 0.0f;
-    float y = 0.0f;
-};
-
-struct Size {
-    float width = 0.0f;
-    float height = 0.0f;
-};
-
-struct Rect {
-    float x = 0.0f;
-    float y = 0.0f;
-    float width = 0.0f;
-    float height = 0.0f;
-};
-
-struct Color {
-    uint8_t r = 255;
-    uint8_t g = 255;
-    uint8_t b = 255;
-    uint8_t a = 255;
-
-    Color() = default;
-    Color(uint8_t r_, uint8_t g_, uint8_t b_, uint8_t a_ = 255)
-        : r(r_), g(g_), b(b_), a(a_) {}
-
-    static Color white() { return Color(255, 255, 255, 255); }
-    static Color black() { return Color(0, 0, 0, 255); }
-};
-
 // ============================================================================
 // Font Descriptor
 // ============================================================================
@@ -256,7 +222,7 @@ struct TextLayoutOptions {
 };
 
 struct TextLayoutResult {
-    Rect bounds;                    // Bounding rectangle of laid out text
+    Box bounds;                     // Bounding box of laid out text
     int line_count = 0;             // Number of lines
     int char_count = 0;             // Number of characters laid out
     bool truncated = false;         // True if text was truncated
@@ -357,7 +323,7 @@ public:
 
     // Find best matching system font
     virtual bool find_system_font(const FontDescriptor& descriptor,
-                                   char* out_path, int path_size) const = 0;
+                                   std::string& out_path) const = 0;
 
     // Get default system font
     virtual IFontFace* get_default_font(float size, Result* out_result = nullptr) = 0;
@@ -386,7 +352,7 @@ public:
                                           const TextLayoutOptions& options) = 0;
 
     // Measure text without rendering
-    virtual Size measure_text(IFontFace* font, const char* text, int text_length,
+    virtual Vec2 measure_text(IFontFace* font, const char* text, int text_length,
                               const TextLayoutOptions& options = TextLayoutOptions()) = 0;
 
     // Get caret positions for text
@@ -410,14 +376,14 @@ public:
     // Render text to a new bitmap
     // Caller must free the returned pixels with free_bitmap()
     virtual Result render_text(IFontFace* font, const char* text, int text_length,
-                                const Color& color, const RenderOptions& render_opts,
+                                const Vec4& color, const RenderOptions& render_opts,
                                 const TextLayoutOptions& layout_opts,
                                 void** out_pixels, int* out_width, int* out_height,
                                 PixelFormat* out_format) = 0;
 
     // Render text to existing bitmap
     virtual Result render_text_to_bitmap(IFontFace* font, const char* text, int text_length,
-                                          const Color& color, const RenderOptions& render_opts,
+                                          const Vec4& color, const RenderOptions& render_opts,
                                           const TextLayoutOptions& layout_opts,
                                           void* bitmap, int bitmap_width, int bitmap_height,
                                           int bitmap_pitch, PixelFormat bitmap_format,
@@ -425,7 +391,7 @@ public:
 
     // Render pre-shaped glyphs
     virtual Result render_glyphs(IFontFace* font, const PositionedGlyph* glyphs, int glyph_count,
-                                  const Color& color, const RenderOptions& render_opts,
+                                  const Vec4& color, const RenderOptions& render_opts,
                                   void* bitmap, int bitmap_width, int bitmap_height,
                                   int bitmap_pitch, PixelFormat bitmap_format,
                                   int x, int y) = 0;
@@ -501,7 +467,7 @@ public:
     //       },
     //       &out_desc);
     virtual Result render_text_to_texture(IFontFace* font, const char* text, int text_length,
-                                           const Color& color, const RenderOptions& render_opts,
+                                           const Vec4& color, const RenderOptions& render_opts,
                                            const TextLayoutOptions& layout_opts,
                                            window::TextureFormat texture_format,
                                            const TextureCreateCallback& create_callback,
@@ -511,7 +477,7 @@ public:
     // Render pre-shaped glyphs directly to a GPU texture
     virtual Result render_glyphs_to_texture(IFontFace* font,
                                              const PositionedGlyph* glyphs, int glyph_count,
-                                             const Color& color, const RenderOptions& render_opts,
+                                             const Vec4& color, const RenderOptions& render_opts,
                                              window::TextureFormat texture_format,
                                              const TextureCreateCallback& create_callback,
                                              const TextureUploadCallback& upload_callback,
@@ -570,8 +536,8 @@ public:
     // Convenience methods
     virtual IFontFace* load_font(const char* filepath, float size, Result* out_result = nullptr) = 0;
     virtual IFontFace* load_system_font(const char* family, float size, Result* out_result = nullptr) = 0;
-    virtual Size measure_text(IFontFace* font, const char* text) = 0;
-    virtual Result render_text(IFontFace* font, const char* text, const Color& color,
+    virtual Vec2 measure_text(IFontFace* font, const char* text) = 0;
+    virtual Result render_text(IFontFace* font, const char* text, const Vec4& color,
                                 void** out_pixels, int* out_width, int* out_height) = 0;
 };
 
@@ -590,7 +556,7 @@ ITextShaper* create_text_shaper(IFontLibrary* library, Result* out_result = null
 IFontRenderer* create_font_renderer(IFontLibrary* library, Result* out_result = nullptr);
 
 // Create glyph cache
-IGlyphCache* create_glyph_cache(int max_glyphs = MAX_GLYPH_CACHE_SIZE);
+IGlyphCache* create_glyph_cache(int max_glyphs = 4096);
 
 // Create complete font system
 FontSystem* create_font_system(FontBackend backend = FontBackend::Auto,

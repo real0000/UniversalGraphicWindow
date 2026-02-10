@@ -50,8 +50,8 @@ public:
 
     KeyboardState get_state() const override { return state_; }
     bool is_visible() const override { return state_ == KeyboardState::Visible; }
-    Rect get_frame() const override { return frame_; }
-    float get_height() const override { return frame_.height; }
+    Box get_frame() const override { return frame_; }
+    float get_height() const override { return window::math::box_height(frame_); }
 
     void set_config(const KeyboardConfig& config) override { config_ = config; }
     KeyboardConfig get_config() const override { return config_; }
@@ -84,7 +84,7 @@ private:
 
     bool initialized_ = false;
     KeyboardState state_ = KeyboardState::Hidden;
-    Rect frame_;
+    Box frame_;
     KeyboardConfig config_;
     ITextInputDelegate* text_delegate_ = nullptr;
     IVirtualKeyboardEventHandler* event_handler_ = nullptr;
@@ -367,7 +367,7 @@ Result VirtualKeyboardLinux::get_available_layouts(KeyboardLayoutList* out_list)
         return Result::ErrorInvalidParameter;
     }
 
-    out_list->count = 0;
+    out_list->layouts.clear();
 
     // Try to get keyboard layouts using setxkbmap
     FILE* pipe = popen("setxkbmap -query 2>/dev/null | grep layout | awk '{print $2}'", "r");
@@ -379,13 +379,13 @@ Result VirtualKeyboardLinux::get_available_layouts(KeyboardLayoutList* out_list)
 
             // Split by comma
             char* token = strtok(layouts, ",");
-            while (token && out_list->count < MAX_KEYBOARD_LAYOUTS) {
-                KeyboardLayoutInfo& info = out_list->layouts[out_list->count];
-                strncpy(info.identifier, token, sizeof(info.identifier) - 1);
-                strncpy(info.language_code, token, MAX_LANGUAGE_CODE_LENGTH - 1);
-                strncpy(info.display_name, token, sizeof(info.display_name) - 1);
-                info.is_current = (out_list->count == 0); // First is current
-                out_list->count++;
+            while (token) {
+                KeyboardLayoutInfo info;
+                info.identifier = token;
+                info.language_code = token;
+                info.display_name = token;
+                info.is_current = out_list->layouts.empty(); // First is current
+                out_list->layouts.push_back(std::move(info));
                 token = strtok(nullptr, ",");
             }
         }
@@ -393,18 +393,18 @@ Result VirtualKeyboardLinux::get_available_layouts(KeyboardLayoutList* out_list)
     }
 
     // Fallback: try localectl
-    if (out_list->count == 0) {
+    if (out_list->layouts.empty()) {
         pipe = popen("localectl list-x11-keymap-layouts 2>/dev/null | head -32", "r");
         if (pipe) {
             char line[128];
-            while (fgets(line, sizeof(line), pipe) && out_list->count < MAX_KEYBOARD_LAYOUTS) {
+            while (fgets(line, sizeof(line), pipe)) {
                 line[strcspn(line, "\n")] = 0;
                 if (strlen(line) > 0) {
-                    KeyboardLayoutInfo& info = out_list->layouts[out_list->count];
-                    strncpy(info.identifier, line, sizeof(info.identifier) - 1);
-                    strncpy(info.language_code, line, MAX_LANGUAGE_CODE_LENGTH - 1);
-                    strncpy(info.display_name, line, sizeof(info.display_name) - 1);
-                    out_list->count++;
+                    KeyboardLayoutInfo info;
+                    info.identifier = line;
+                    info.language_code = line;
+                    info.display_name = line;
+                    out_list->layouts.push_back(std::move(info));
                 }
             }
             pclose(pipe);
@@ -430,9 +430,9 @@ Result VirtualKeyboardLinux::get_current_layout(KeyboardLayoutInfo* out_info) co
             char* comma = strchr(layout, ',');
             if (comma) *comma = 0;
 
-            strncpy(out_info->identifier, layout, sizeof(out_info->identifier) - 1);
-            strncpy(out_info->language_code, layout, MAX_LANGUAGE_CODE_LENGTH - 1);
-            strncpy(out_info->display_name, layout, sizeof(out_info->display_name) - 1);
+            out_info->identifier = layout;
+            out_info->language_code = layout;
+            out_info->display_name = layout;
             out_info->is_current = true;
 
             pclose(pipe);

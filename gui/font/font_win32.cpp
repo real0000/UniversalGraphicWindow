@@ -41,8 +41,8 @@ public:
 
     const FontDescriptor& get_descriptor() const override { return descriptor_; }
     const FontMetrics& get_metrics() const override { return metrics_; }
-    const char* get_family_name() const override { return family_name_; }
-    const char* get_style_name() const override { return style_name_; }
+    const char* get_family_name() const override { return family_name_.c_str(); }
+    const char* get_style_name() const override { return style_name_.c_str(); }
 
     uint32_t get_glyph_index(uint32_t codepoint) const override;
     bool get_glyph_metrics(uint32_t glyph_index, GlyphMetrics* out_metrics) const override;
@@ -67,8 +67,8 @@ private:
     IDWriteFont* font_ = nullptr;
     FontDescriptor descriptor_;
     FontMetrics metrics_;
-    char family_name_[MAX_FONT_FAMILY_LENGTH] = {};
-    char style_name_[128] = {};
+    std::string family_name_;
+    std::string style_name_;
     float size_ = 12.0f;
     DWRITE_FONT_METRICS dw_metrics_ = {};
     std::vector<uint8_t> glyph_buffer_;
@@ -90,7 +90,7 @@ DirectWriteFontFace::DirectWriteFontFace(IDWriteFontFace* face, IDWriteFont* fon
             if (SUCCEEDED(family->GetFamilyNames(&names))) {
                 wchar_t name[256];
                 names->GetString(0, name, 256);
-                internal::wide_to_utf8(name, family_name_, MAX_FONT_FAMILY_LENGTH);
+                family_name_ = internal::wide_to_utf8(name);
                 names->Release();
             }
             family->Release();
@@ -101,7 +101,7 @@ DirectWriteFontFace::DirectWriteFontFace(IDWriteFontFace* face, IDWriteFont* fon
         if (SUCCEEDED(font_->GetFaceNames(&face_names))) {
             wchar_t name[128];
             face_names->GetString(0, name, 128);
-            internal::wide_to_utf8(name, style_name_, sizeof(style_name_));
+            style_name_ = internal::wide_to_utf8(name);
             face_names->Release();
         }
     }
@@ -392,7 +392,7 @@ public:
 
     void enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const override;
     bool find_system_font(const FontDescriptor& descriptor,
-                           char* out_path, int path_size) const override;
+                           std::string& out_path) const override;
 
     IFontFace* get_default_font(float size, Result* out_result) override;
 
@@ -604,12 +604,11 @@ void DirectWriteFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>&
 }
 
 bool DirectWriteFontLibrary::find_system_font(const FontDescriptor& descriptor,
-                                               char* out_path, int path_size) const {
+                                               std::string& out_path) const {
     // DirectWrite doesn't expose font file paths directly
     // This would require additional work with the font collection
     (void)descriptor;
     (void)out_path;
-    (void)path_size;
     return false;
 }
 

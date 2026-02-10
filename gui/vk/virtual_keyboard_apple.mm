@@ -30,7 +30,7 @@ namespace vkeyboard {
 @interface VKeyboardObserver : NSObject
 @property (nonatomic, assign) IVirtualKeyboardEventHandler* eventHandler;
 @property (nonatomic, assign) KeyboardState* keyboardState;
-@property (nonatomic, assign) Rect* keyboardFrame;
+@property (nonatomic, assign) Box* keyboardFrame;
 @end
 
 @implementation VKeyboardObserver
@@ -68,10 +68,8 @@ namespace vkeyboard {
     NSDictionary* userInfo = notification.userInfo;
 
     CGRect frame = [userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    data.frame.x = frame.origin.x;
-    data.frame.y = frame.origin.y;
-    data.frame.width = frame.size.width;
-    data.frame.height = frame.size.height;
+    data.frame = window::math::make_box(frame.origin.x, frame.origin.y,
+                                         frame.size.width, frame.size.height);
 
     NSNumber* duration = userInfo[UIKeyboardAnimationDurationUserInfoKey];
     data.animation_duration = duration ? duration.floatValue : 0.25f;
@@ -155,8 +153,8 @@ public:
 
     KeyboardState get_state() const override { return state_; }
     bool is_visible() const override { return state_ == KeyboardState::Visible; }
-    Rect get_frame() const override { return frame_; }
-    float get_height() const override { return frame_.height; }
+    Box get_frame() const override { return frame_; }
+    float get_height() const override { return window::math::box_height(frame_); }
 
     void set_config(const KeyboardConfig& config) override { config_ = config; }
     KeyboardConfig get_config() const override { return config_; }
@@ -182,7 +180,7 @@ public:
 private:
     bool initialized_ = false;
     KeyboardState state_ = KeyboardState::Hidden;
-    Rect frame_;
+    Box frame_;
     KeyboardConfig config_;
     ITextInputDelegate* text_delegate_ = nullptr;
     IVirtualKeyboardEventHandler* event_handler_ = nullptr;
@@ -270,30 +268,28 @@ Result VirtualKeyboardIOS::get_available_layouts(KeyboardLayoutList* out_list) c
         return Result::ErrorInvalidParameter;
     }
 
-    out_list->count = 0;
+    out_list->layouts.clear();
 
     // Get active input modes
     NSArray* inputModes = [[UITextInputMode activeInputModes] copy];
 
     for (UITextInputMode* mode in inputModes) {
-        if (out_list->count >= MAX_KEYBOARD_LAYOUTS) break;
-
-        KeyboardLayoutInfo& info = out_list->layouts[out_list->count];
+        KeyboardLayoutInfo info;
 
         NSString* identifier = mode.primaryLanguage;
         if (identifier) {
-            strncpy(info.identifier, [identifier UTF8String], sizeof(info.identifier) - 1);
-            strncpy(info.language_code, [identifier UTF8String], MAX_LANGUAGE_CODE_LENGTH - 1);
+            info.identifier = [identifier UTF8String];
+            info.language_code = [identifier UTF8String];
 
             // Get localized display name
             NSLocale* locale = [NSLocale currentLocale];
             NSString* displayName = [locale localizedStringForLanguageCode:identifier];
             if (displayName) {
-                strncpy(info.display_name, [displayName UTF8String], sizeof(info.display_name) - 1);
+                info.display_name = [displayName UTF8String];
             }
 
             info.is_current = (mode == [UITextInputMode currentInputMode]);
-            out_list->count++;
+            out_list->layouts.push_back(std::move(info));
         }
     }
 
@@ -312,13 +308,13 @@ Result VirtualKeyboardIOS::get_current_layout(KeyboardLayoutInfo* out_info) cons
 
     NSString* identifier = current.primaryLanguage;
     if (identifier) {
-        strncpy(out_info->identifier, [identifier UTF8String], sizeof(out_info->identifier) - 1);
-        strncpy(out_info->language_code, [identifier UTF8String], MAX_LANGUAGE_CODE_LENGTH - 1);
+        out_info->identifier = [identifier UTF8String];
+        out_info->language_code = [identifier UTF8String];
 
         NSLocale* locale = [NSLocale currentLocale];
         NSString* displayName = [locale localizedStringForLanguageCode:identifier];
         if (displayName) {
-            strncpy(out_info->display_name, [displayName UTF8String], sizeof(out_info->display_name) - 1);
+            out_info->display_name = [displayName UTF8String];
         }
 
         out_info->is_current = true;
@@ -366,7 +362,7 @@ public:
 
     KeyboardState get_state() const override { return state_; }
     bool is_visible() const override;
-    Rect get_frame() const override;
+    Box get_frame() const override;
     float get_height() const override;
 
     void set_config(const KeyboardConfig& config) override { config_ = config; }
@@ -494,10 +490,10 @@ bool VirtualKeyboardMacOS::is_accessibility_keyboard_visible() const {
     return false;
 }
 
-Rect VirtualKeyboardMacOS::get_frame() const {
+Box VirtualKeyboardMacOS::get_frame() const {
     // macOS virtual keyboard doesn't have a fixed frame like mobile
-    // Return an empty rect
-    return Rect{};
+    // Return an empty box
+    return Box(window::math::Vec2(0,0), window::math::Vec2(0,0));
 }
 
 float VirtualKeyboardMacOS::get_height() const {
@@ -528,7 +524,7 @@ Result VirtualKeyboardMacOS::get_available_layouts(KeyboardLayoutList* out_list)
         return Result::ErrorInvalidParameter;
     }
 
-    out_list->count = 0;
+    out_list->layouts.clear();
 
     // Get input sources
     CFArrayRef sources = TISCreateInputSourceList(nullptr, false);
@@ -541,7 +537,7 @@ Result VirtualKeyboardMacOS::get_available_layouts(KeyboardLayoutList* out_list)
         (CFStringRef)TISGetInputSourceProperty(currentSource, kTISPropertyInputSourceID) : nullptr;
 
     CFIndex count = CFArrayGetCount(sources);
-    for (CFIndex i = 0; i < count && out_list->count < MAX_KEYBOARD_LAYOUTS; ++i) {
+    for (CFIndex i = 0; i < count; ++i) {
         TISInputSourceRef source = (TISInputSourceRef)CFArrayGetValueAtIndex(sources, i);
 
         // Only include keyboard layouts
@@ -550,31 +546,34 @@ Result VirtualKeyboardMacOS::get_available_layouts(KeyboardLayoutList* out_list)
             continue;
         }
 
-        KeyboardLayoutInfo& info = out_list->layouts[out_list->count];
+        KeyboardLayoutInfo info;
+        char buf[256];
 
         // Get identifier
         CFStringRef sourceID = (CFStringRef)TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
-        if (sourceID) {
-            CFStringGetCString(sourceID, info.identifier, sizeof(info.identifier), kCFStringEncodingUTF8);
+        if (sourceID && CFStringGetCString(sourceID, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+            info.identifier = buf;
         }
 
         // Get display name
         CFStringRef localizedName = (CFStringRef)TISGetInputSourceProperty(source, kTISPropertyLocalizedName);
-        if (localizedName) {
-            CFStringGetCString(localizedName, info.display_name, sizeof(info.display_name), kCFStringEncodingUTF8);
+        if (localizedName && CFStringGetCString(localizedName, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+            info.display_name = buf;
         }
 
         // Get language
         CFArrayRef languages = (CFArrayRef)TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages);
         if (languages && CFArrayGetCount(languages) > 0) {
             CFStringRef lang = (CFStringRef)CFArrayGetValueAtIndex(languages, 0);
-            CFStringGetCString(lang, info.language_code, MAX_LANGUAGE_CODE_LENGTH, kCFStringEncodingUTF8);
+            if (CFStringGetCString(lang, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                info.language_code = buf;
+            }
         }
 
         // Check if current
         info.is_current = (currentID && sourceID && CFEqual(sourceID, currentID));
 
-        out_list->count++;
+        out_list->layouts.push_back(std::move(info));
     }
 
     if (currentSource) {
@@ -595,23 +594,27 @@ Result VirtualKeyboardMacOS::get_current_layout(KeyboardLayoutInfo* out_info) co
         return Result::ErrorUnknown;
     }
 
+    char buf[256];
+
     // Get identifier
     CFStringRef sourceID = (CFStringRef)TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
-    if (sourceID) {
-        CFStringGetCString(sourceID, out_info->identifier, sizeof(out_info->identifier), kCFStringEncodingUTF8);
+    if (sourceID && CFStringGetCString(sourceID, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+        out_info->identifier = buf;
     }
 
     // Get display name
     CFStringRef localizedName = (CFStringRef)TISGetInputSourceProperty(source, kTISPropertyLocalizedName);
-    if (localizedName) {
-        CFStringGetCString(localizedName, out_info->display_name, sizeof(out_info->display_name), kCFStringEncodingUTF8);
+    if (localizedName && CFStringGetCString(localizedName, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+        out_info->display_name = buf;
     }
 
     // Get language
     CFArrayRef languages = (CFArrayRef)TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages);
     if (languages && CFArrayGetCount(languages) > 0) {
         CFStringRef lang = (CFStringRef)CFArrayGetValueAtIndex(languages, 0);
-        CFStringGetCString(lang, out_info->language_code, MAX_LANGUAGE_CODE_LENGTH, kCFStringEncodingUTF8);
+        if (CFStringGetCString(lang, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+            out_info->language_code = buf;
+        }
     }
 
     out_info->is_current = true;

@@ -35,8 +35,8 @@ public:
 
     const FontDescriptor& get_descriptor() const override { return descriptor_; }
     const FontMetrics& get_metrics() const override { return metrics_; }
-    const char* get_family_name() const override { return family_name_; }
-    const char* get_style_name() const override { return style_name_; }
+    const char* get_family_name() const override { return family_name_.c_str(); }
+    const char* get_style_name() const override { return style_name_.c_str(); }
 
     uint32_t get_glyph_index(uint32_t codepoint) const override;
     bool get_glyph_metrics(uint32_t glyph_index, GlyphMetrics* out_metrics) const override;
@@ -59,8 +59,8 @@ private:
     CTFontRef ct_font_ = nullptr;
     FontDescriptor descriptor_;
     FontMetrics metrics_;
-    char family_name_[MAX_FONT_FAMILY_LENGTH] = {};
-    char style_name_[128] = {};
+    std::string family_name_;
+    std::string style_name_;
     std::vector<uint8_t> glyph_buffer_;
 };
 
@@ -72,14 +72,20 @@ CoreTextFontFace::CoreTextFontFace(CTFontRef font, const FontDescriptor& desc)
         // Get family name
         CFStringRef family = CTFontCopyFamilyName(ct_font_);
         if (family) {
-            CFStringGetCString(family, family_name_, MAX_FONT_FAMILY_LENGTH, kCFStringEncodingUTF8);
+            char buf[256];
+            if (CFStringGetCString(family, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                family_name_ = buf;
+            }
             CFRelease(family);
         }
 
         // Get style name
         CFStringRef style = CTFontCopyName(ct_font_, kCTFontStyleNameKey);
         if (style) {
-            CFStringGetCString(style, style_name_, sizeof(style_name_), kCFStringEncodingUTF8);
+            char buf[128];
+            if (CFStringGetCString(style, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                style_name_ = buf;
+            }
             CFRelease(style);
         }
 
@@ -321,7 +327,7 @@ public:
 
     void enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const override;
     bool find_system_font(const FontDescriptor& descriptor,
-                           char* out_path, int path_size) const override;
+                           std::string& out_path) const override;
 
     IFontFace* get_default_font(float size, Result* out_result) override;
 
@@ -526,7 +532,10 @@ void CoreTextFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>& ou
         CFStringRef family = (CFStringRef)CTFontDescriptorCopyAttribute(desc, kCTFontFamilyNameAttribute);
         if (family) {
             FontDescriptor font_desc;
-            CFStringGetCString(family, font_desc.family, MAX_FONT_FAMILY_LENGTH, kCFStringEncodingUTF8);
+            char buf[256];
+            if (CFStringGetCString(family, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                font_desc.family = buf;
+            }
             font_desc.size = 12.0f;
             font_desc.weight = FontWeight::Regular;
             font_desc.style = FontStyle::Normal;
@@ -539,8 +548,8 @@ void CoreTextFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>& ou
 }
 
 bool CoreTextFontLibrary::find_system_font(const FontDescriptor& descriptor,
-                                            char* out_path, int path_size) const {
-    if (!initialized_ || !out_path || path_size <= 0) return false;
+                                            std::string& out_path) const {
+    if (!initialized_) return false;
 
     // Create font to get its URL
     IFontFace* face = const_cast<CoreTextFontLibrary*>(this)->load_system_font(descriptor, nullptr);
@@ -562,9 +571,13 @@ bool CoreTextFontLibrary::find_system_font(const FontDescriptor& descriptor,
 
     if (!path) return false;
 
-    bool success = CFStringGetCString(path, out_path, path_size, kCFStringEncodingUTF8);
+    char buf[1024];
+    bool success = CFStringGetCString(path, buf, sizeof(buf), kCFStringEncodingUTF8);
     CFRelease(path);
 
+    if (success) {
+        out_path = buf;
+    }
     return success;
 }
 

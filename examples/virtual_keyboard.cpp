@@ -366,17 +366,18 @@ public:
 class KeyboardEventHandler : public vkeyboard::IVirtualKeyboardEventHandler {
 public:
     bool keyboard_visible = false;
-    vkeyboard::Rect keyboard_frame;
+    vkeyboard::Box keyboard_frame;
 
     void on_keyboard_will_show(const vkeyboard::KeyboardEventData& data) override {
-        printf("  [Event] Keyboard will show (height: %.0f)\n", data.frame.height);
+        printf("  [Event] Keyboard will show (height: %.0f)\n", window::math::box_height(data.frame));
     }
 
     void on_keyboard_did_show(const vkeyboard::KeyboardEventData& data) override {
         keyboard_visible = true;
         keyboard_frame = data.frame;
         printf("  [Event] Keyboard did show (frame: %.0f,%.0f %.0fx%.0f)\n",
-               data.frame.x, data.frame.y, data.frame.width, data.frame.height);
+               window::math::x(data.frame.min_corner()), window::math::y(data.frame.min_corner()),
+               window::math::box_width(data.frame), window::math::box_height(data.frame));
     }
 
     void on_keyboard_will_hide(const vkeyboard::KeyboardEventData& data) override {
@@ -386,7 +387,7 @@ public:
 
     void on_keyboard_did_hide(const vkeyboard::KeyboardEventData& data) override {
         keyboard_visible = false;
-        keyboard_frame = {};
+        keyboard_frame = vkeyboard::Box(window::math::Vec2(0,0), window::math::Vec2(0,0));
         printf("  [Event] Keyboard did hide\n");
         (void)data;
     }
@@ -441,7 +442,7 @@ struct TextTexture {
 };
 
 static bool render_text_to_texture(font::IFontRenderer* renderer, font::IFontFace* font,
-                                    const char* text, const font::Color& color,
+                                    const char* text, const font::Vec4& color,
                                     TextTexture* out_texture) {
     if (!text || text[0] == '\0') {
         out_texture->id = 0;
@@ -598,9 +599,9 @@ int main() {
     // Get available keyboard layouts
     vkeyboard::KeyboardLayoutList layouts;
     if (vk->get_available_layouts(&layouts) == vkeyboard::Result::Success) {
-        printf("Available keyboard layouts: %d\n", layouts.count);
-        for (int i = 0; i < layouts.count && i < 5; i++) {
-            printf("  [%d] %s (%s)%s\n", i,
+        printf("Available keyboard layouts: %zu\n", layouts.layouts.size());
+        for (size_t i = 0; i < layouts.layouts.size() && i < 5; i++) {
+            printf("  [%zu] %s (%s)%s\n", i,
                    layouts.layouts[i].display_name.c_str(),
                    layouts.layouts[i].language_code.c_str(),
                    layouts.layouts[i].is_current ? " [current]" : "");
@@ -644,16 +645,16 @@ int main() {
 
     // Button textures
     TextTexture btn_textures[4];
-    render_text_to_texture(font_renderer, font_ui, "Show KB", font::Color(255, 255, 255, 255), &btn_textures[0]);
-    render_text_to_texture(font_renderer, font_ui, "Hide KB", font::Color(255, 255, 255, 255), &btn_textures[1]);
-    render_text_to_texture(font_renderer, font_ui, "Clear", font::Color(255, 255, 255, 255), &btn_textures[2]);
-    render_text_to_texture(font_renderer, font_ui, "Exit", font::Color(255, 255, 255, 255), &btn_textures[3]);
+    render_text_to_texture(font_renderer, font_ui, "Show KB", font::Vec4(1, 1, 1, 1), &btn_textures[0]);
+    render_text_to_texture(font_renderer, font_ui, "Hide KB", font::Vec4(1, 1, 1, 1), &btn_textures[1]);
+    render_text_to_texture(font_renderer, font_ui, "Clear", font::Vec4(1, 1, 1, 1), &btn_textures[2]);
+    render_text_to_texture(font_renderer, font_ui, "Exit", font::Vec4(1, 1, 1, 1), &btn_textures[3]);
 
     // Render static text
     render_text_to_texture(font_renderer, font_ui, "Virtual Keyboard Test",
-                           font::Color(255, 255, 0, 255), &title_tex);
+                           font::Vec4(1, 1, 0, 1), &title_tex);
     render_text_to_texture(font_renderer, font_ui, "Click buttons below to control keyboard",
-                           font::Color(180, 180, 180, 255), &help_tex);
+                           font::Vec4(180/255.0f, 180/255.0f, 180/255.0f, 1.0f), &help_tex);
 
     // Main loop
     while (!win->should_close()) {
@@ -715,7 +716,7 @@ int main() {
                 display_text += "_";  // Cursor
             }
             render_text_to_texture(font_renderer, font_ui, display_text.c_str(),
-                                   font::Color(255, 255, 255, 255), &input_tex);
+                                   font::Vec4(1, 1, 1, 1), &input_tex);
         }
 
         // Update status
@@ -729,7 +730,7 @@ int main() {
         if (status != last_status) {
             last_status = status;
             render_text_to_texture(font_renderer, font_ui, status.c_str(),
-                                   font::Color(0, 255, 0, 255), &status_tex);
+                                   font::Vec4(0, 1, 0, 1), &status_tex);
         }
 
         // Render
@@ -808,9 +809,9 @@ int main() {
 
         // Draw keyboard indicator if visible
         if (event_handler.keyboard_visible) {
-            float kb_y = static_cast<float>(win_height) - event_handler.keyboard_frame.height;
-            renderer.draw_rect(0, kb_y, static_cast<float>(win_width),
-                               event_handler.keyboard_frame.height,
+            float kb_h = window::math::box_height(event_handler.keyboard_frame);
+            float kb_y = static_cast<float>(win_height) - kb_h;
+            renderer.draw_rect(0, kb_y, static_cast<float>(win_width), kb_h,
                                0.1f, 0.3f, 0.5f, 0.3f);
         }
 

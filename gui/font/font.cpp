@@ -500,18 +500,17 @@ public:
 
         if (x > max_x) max_x = x;
 
-        result.bounds.width = max_x;
-        result.bounds.height = y + (metrics.line_height - metrics.ascender);
+        result.bounds = window::math::make_box(0, 0, max_x, y + (metrics.line_height - metrics.ascender));
         result.line_count = line_count;
 
         return result;
     }
 
-    Size measure_text(IFontFace* font, const char* text, int text_length,
+    Vec2 measure_text(IFontFace* font, const char* text, int text_length,
                       const TextLayoutOptions& options) override {
         std::vector<PositionedGlyph> glyphs;
         TextLayoutResult result = layout_text(font, text, text_length, glyphs, options);
-        return Size{result.bounds.width, result.bounds.height};
+        return Vec2(window::math::box_width(result.bounds), window::math::box_height(result.bounds));
     }
 
     void get_caret_positions(IFontFace* font, const char* text, int text_length,
@@ -621,7 +620,7 @@ public:
     }
 
     Result render_text(IFontFace* font, const char* text, int text_length,
-                        const Color& color, const RenderOptions& render_opts,
+                        const Vec4& color, const RenderOptions& render_opts,
                         const TextLayoutOptions& layout_opts,
                         void** out_pixels, int* out_width, int* out_height,
                         PixelFormat* out_format) override {
@@ -653,8 +652,8 @@ public:
         int glyph_count = static_cast<int>(glyphs.size());
 
         // Calculate bitmap dimensions
-        int bitmap_width = static_cast<int>(std::ceil(layout.bounds.width)) + 2;
-        int bitmap_height = static_cast<int>(std::ceil(layout.bounds.height)) + 2;
+        int bitmap_width = static_cast<int>(std::ceil(window::math::box_width(layout.bounds))) + 2;
+        int bitmap_height = static_cast<int>(std::ceil(window::math::box_height(layout.bounds))) + 2;
 
         if (bitmap_width <= 0 || bitmap_height <= 0) {
             *out_pixels = nullptr;
@@ -694,7 +693,7 @@ public:
     }
 
     Result render_text_to_bitmap(IFontFace* font, const char* text, int text_length,
-                                  const Color& color, const RenderOptions& render_opts,
+                                  const Vec4& color, const RenderOptions& render_opts,
                                   const TextLayoutOptions& layout_opts,
                                   void* bitmap, int bitmap_width, int bitmap_height,
                                   int bitmap_pitch, PixelFormat bitmap_format,
@@ -720,7 +719,7 @@ public:
     }
 
     Result render_glyphs(IFontFace* font, const PositionedGlyph* glyphs, int glyph_count,
-                          const Color& color, const RenderOptions& render_opts,
+                          const Vec4& color, const RenderOptions& render_opts,
                           void* bitmap, int bitmap_width, int bitmap_height,
                           int bitmap_pitch, PixelFormat bitmap_format,
                           int x, int y) override {
@@ -770,7 +769,7 @@ public:
     // ========================================================================
 
     Result render_text_to_texture(IFontFace* font, const char* text, int text_length,
-                                   const Color& color, const RenderOptions& render_opts,
+                                   const Vec4& color, const RenderOptions& render_opts,
                                    const TextLayoutOptions& layout_opts,
                                    window::TextureFormat texture_format,
                                    const TextureCreateCallback& create_callback,
@@ -839,7 +838,7 @@ public:
 
     Result render_glyphs_to_texture(IFontFace* font,
                                      const PositionedGlyph* glyphs, int glyph_count,
-                                     const Color& color, const RenderOptions& render_opts,
+                                     const Vec4& color, const RenderOptions& render_opts,
                                      window::TextureFormat texture_format,
                                      const TextureCreateCallback& create_callback,
                                      const TextureUploadCallback& upload_callback,
@@ -999,7 +998,7 @@ private:
     // Blend a glyph bitmap into the destination
     void blend_glyph(void* dst_bitmap, int dst_width, int dst_height, int dst_pitch,
                      PixelFormat dst_format, int dst_x, int dst_y,
-                     const GlyphBitmap* glyph, const Color& color) {
+                     const GlyphBitmap* glyph, const Vec4& color) {
         if (!glyph || !glyph->pixels) return;
 
         // Calculate clipping
@@ -1065,7 +1064,7 @@ private:
 
                 if (dst_format == PixelFormat::A8) {
                     // Alpha-only destination
-                    uint8_t src_a = (alpha * color.a) / 255;
+                    uint8_t src_a = static_cast<uint8_t>(alpha * color.w);
                     uint8_t dst_a = dst_pixel[0];
                     dst_pixel[0] = dst_a + ((255 - dst_a) * src_a) / 255;
                 }
@@ -1085,61 +1084,62 @@ private:
         }
     }
 
-    // Blend RGBA pixel
-    static void blend_pixel_rgba(uint8_t* dst, const Color& color, uint8_t alpha) {
-        uint8_t src_a = (alpha * color.a) / 255;
+    // Blend RGBA pixel (color is Vec4 with floats 0-1: x=r, y=g, z=b, w=a)
+    static void blend_pixel_rgba(uint8_t* dst, const Vec4& color, uint8_t alpha) {
+        uint8_t cr = static_cast<uint8_t>(color.x * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(color.y * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(color.z * 255.0f);
+        uint8_t src_a = static_cast<uint8_t>(alpha * color.w);
         if (src_a == 0) return;
 
-        uint8_t dst_r = dst[0];
-        uint8_t dst_g = dst[1];
-        uint8_t dst_b = dst[2];
-        uint8_t dst_a = dst[3];
-
-        // Alpha blend: out = src * src_a + dst * (1 - src_a)
         uint8_t inv_alpha = 255 - src_a;
-        dst[0] = (color.r * src_a + dst_r * inv_alpha) / 255;
-        dst[1] = (color.g * src_a + dst_g * inv_alpha) / 255;
-        dst[2] = (color.b * src_a + dst_b * inv_alpha) / 255;
-        dst[3] = src_a + (dst_a * inv_alpha) / 255;
+        dst[0] = (cr * src_a + dst[0] * inv_alpha) / 255;
+        dst[1] = (cg * src_a + dst[1] * inv_alpha) / 255;
+        dst[2] = (cb * src_a + dst[2] * inv_alpha) / 255;
+        dst[3] = src_a + (dst[3] * inv_alpha) / 255;
     }
 
     // Blend BGRA pixel
-    static void blend_pixel_bgra(uint8_t* dst, const Color& color, uint8_t alpha) {
-        uint8_t src_a = (alpha * color.a) / 255;
+    static void blend_pixel_bgra(uint8_t* dst, const Vec4& color, uint8_t alpha) {
+        uint8_t cr = static_cast<uint8_t>(color.x * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(color.y * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(color.z * 255.0f);
+        uint8_t src_a = static_cast<uint8_t>(alpha * color.w);
         if (src_a == 0) return;
 
-        uint8_t dst_b = dst[0];
-        uint8_t dst_g = dst[1];
-        uint8_t dst_r = dst[2];
-        uint8_t dst_a = dst[3];
-
         uint8_t inv_alpha = 255 - src_a;
-        dst[0] = (color.b * src_a + dst_b * inv_alpha) / 255;
-        dst[1] = (color.g * src_a + dst_g * inv_alpha) / 255;
-        dst[2] = (color.r * src_a + dst_r * inv_alpha) / 255;
-        dst[3] = src_a + (dst_a * inv_alpha) / 255;
+        dst[0] = (cb * src_a + dst[0] * inv_alpha) / 255;
+        dst[1] = (cg * src_a + dst[1] * inv_alpha) / 255;
+        dst[2] = (cr * src_a + dst[2] * inv_alpha) / 255;
+        dst[3] = src_a + (dst[3] * inv_alpha) / 255;
     }
 
     // Blend RGB pixel (no alpha channel)
-    static void blend_pixel_rgb(uint8_t* dst, const Color& color, uint8_t alpha) {
-        uint8_t src_a = (alpha * color.a) / 255;
+    static void blend_pixel_rgb(uint8_t* dst, const Vec4& color, uint8_t alpha) {
+        uint8_t cr = static_cast<uint8_t>(color.x * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(color.y * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(color.z * 255.0f);
+        uint8_t src_a = static_cast<uint8_t>(alpha * color.w);
         if (src_a == 0) return;
 
         uint8_t inv_alpha = 255 - src_a;
-        dst[0] = (color.r * src_a + dst[0] * inv_alpha) / 255;
-        dst[1] = (color.g * src_a + dst[1] * inv_alpha) / 255;
-        dst[2] = (color.b * src_a + dst[2] * inv_alpha) / 255;
+        dst[0] = (cr * src_a + dst[0] * inv_alpha) / 255;
+        dst[1] = (cg * src_a + dst[1] * inv_alpha) / 255;
+        dst[2] = (cb * src_a + dst[2] * inv_alpha) / 255;
     }
 
     // Blend BGR pixel (no alpha channel)
-    static void blend_pixel_bgr(uint8_t* dst, const Color& color, uint8_t alpha) {
-        uint8_t src_a = (alpha * color.a) / 255;
+    static void blend_pixel_bgr(uint8_t* dst, const Vec4& color, uint8_t alpha) {
+        uint8_t cr = static_cast<uint8_t>(color.x * 255.0f);
+        uint8_t cg = static_cast<uint8_t>(color.y * 255.0f);
+        uint8_t cb = static_cast<uint8_t>(color.z * 255.0f);
+        uint8_t src_a = static_cast<uint8_t>(alpha * color.w);
         if (src_a == 0) return;
 
         uint8_t inv_alpha = 255 - src_a;
-        dst[0] = (color.b * src_a + dst[0] * inv_alpha) / 255;
-        dst[1] = (color.g * src_a + dst[1] * inv_alpha) / 255;
-        dst[2] = (color.r * src_a + dst[2] * inv_alpha) / 255;
+        dst[0] = (cb * src_a + dst[0] * inv_alpha) / 255;
+        dst[1] = (cg * src_a + dst[1] * inv_alpha) / 255;
+        dst[2] = (cr * src_a + dst[2] * inv_alpha) / 255;
     }
 };
 

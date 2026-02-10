@@ -35,8 +35,8 @@ public:
 
     const FontDescriptor& get_descriptor() const override { return descriptor_; }
     const FontMetrics& get_metrics() const override { return metrics_; }
-    const char* get_family_name() const override { return family_name_; }
-    const char* get_style_name() const override { return style_name_; }
+    const char* get_family_name() const override { return family_name_.c_str(); }
+    const char* get_style_name() const override { return style_name_.c_str(); }
 
     uint32_t get_glyph_index(uint32_t codepoint) const override;
     bool get_glyph_metrics(uint32_t glyph_index, GlyphMetrics* out_metrics) const override;
@@ -62,8 +62,8 @@ private:
     FT_Face face_ = nullptr;
     FontDescriptor descriptor_;
     FontMetrics metrics_;
-    char family_name_[MAX_FONT_FAMILY_LENGTH] = {};
-    char style_name_[128] = {};
+    std::string family_name_;
+    std::string style_name_;
     std::vector<uint8_t> font_data_;  // Keep font data alive
     std::vector<uint8_t> glyph_buffer_;
     bool has_kerning_ = false;
@@ -76,10 +76,10 @@ FreeTypeFontFace::FreeTypeFontFace(FT_Library library, FT_Face face,
 
     if (face_) {
         if (face_->family_name) {
-            strncpy(family_name_, face_->family_name, MAX_FONT_FAMILY_LENGTH - 1);
+            family_name_ = face_->family_name;
         }
         if (face_->style_name) {
-            strncpy(style_name_, face_->style_name, sizeof(style_name_) - 1);
+            style_name_ = face_->style_name;
         }
 
         has_kerning_ = FT_HAS_KERNING(face_);
@@ -382,7 +382,7 @@ public:
 
     void enumerate_system_fonts(std::vector<FontDescriptor>& out_fonts) const override;
     bool find_system_font(const FontDescriptor& descriptor,
-                           char* out_path, int path_size) const override;
+                           std::string& out_path) const override;
 
     IFontFace* get_default_font(float size, Result* out_result) override;
 
@@ -454,7 +454,7 @@ IFontFace* FreeTypeFontLibrary::load_font_file(const char* filepath, int face_in
 
     FontDescriptor desc;
     if (face->family_name) {
-        strncpy(desc.family, face->family_name, MAX_FONT_FAMILY_LENGTH - 1);
+        desc.family = face->family_name;
     }
     desc.size = 12.0f;
 
@@ -484,7 +484,7 @@ IFontFace* FreeTypeFontLibrary::load_font_memory(const void* data, size_t size,
 
     FontDescriptor desc;
     if (face->family_name) {
-        strncpy(desc.family, face->family_name, MAX_FONT_FAMILY_LENGTH - 1);
+        desc.family = face->family_name;
     }
     desc.size = 12.0f;
 
@@ -495,9 +495,9 @@ IFontFace* FreeTypeFontLibrary::load_font_memory(const void* data, size_t size,
 IFontFace* FreeTypeFontLibrary::load_system_font(const FontDescriptor& descriptor,
                                                   Result* out_result) {
     // Try to find the font file
-    char path[MAX_FONT_PATH_LENGTH];
-    if (find_system_font(descriptor, path, MAX_FONT_PATH_LENGTH)) {
-        return load_font_file(path, 0, out_result);
+    std::string path;
+    if (find_system_font(descriptor, path)) {
+        return load_font_file(path.c_str(), 0, out_result);
     }
 
     if (out_result) *out_result = Result::ErrorFileNotFound;
@@ -515,8 +515,7 @@ void FreeTypeFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>& ou
 }
 
 bool FreeTypeFontLibrary::find_system_font(const FontDescriptor& descriptor,
-                                            char* out_path, int path_size) const {
-    if (!out_path || path_size <= 0) return false;
+                                            std::string& out_path) const {
 
     // Platform-specific font search paths
 #ifdef _WIN32
@@ -544,26 +543,15 @@ bool FreeTypeFontLibrary::find_system_font(const FontDescriptor& descriptor,
     const char* extensions[] = {".ttf", ".otf", ".ttc", nullptr};
 #endif
 
-    // Try common variations of the family name
-    const char* name_variations[] = {
-        descriptor.family,
-        nullptr
-    };
-
     for (int p = 0; search_paths[p]; ++p) {
-        for (int n = 0; name_variations[n]; ++n) {
-            for (int e = 0; extensions[e]; ++e) {
-                char test_path[MAX_FONT_PATH_LENGTH];
-                snprintf(test_path, MAX_FONT_PATH_LENGTH, "%s%s%s",
-                         search_paths[p], name_variations[n], extensions[e]);
+        for (int e = 0; extensions[e]; ++e) {
+            std::string test_path = std::string(search_paths[p]) + descriptor.family + extensions[e];
 
-                // Check if file exists
-                std::ifstream file(test_path);
-                if (file.good()) {
-                    strncpy(out_path, test_path, path_size - 1);
-                    out_path[path_size - 1] = '\0';
-                    return true;
-                }
+            // Check if file exists
+            std::ifstream file(test_path);
+            if (file.good()) {
+                out_path = std::move(test_path);
+                return true;
             }
         }
     }

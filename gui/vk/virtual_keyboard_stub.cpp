@@ -34,7 +34,7 @@ public:
 
     KeyboardState get_state() const override { return KeyboardState::Hidden; }
     bool is_visible() const override { return false; }
-    Rect get_frame() const override { return Rect{}; }
+    Box get_frame() const override { return Box(window::math::Vec2(0,0), window::math::Vec2(0,0)); }
     float get_height() const override { return 0.0f; }
 
     void set_config(const KeyboardConfig& config) override { (void)config; }
@@ -51,7 +51,7 @@ public:
     void set_event_handler(IVirtualKeyboardEventHandler* handler) override { (void)handler; }
 
     Result get_available_layouts(KeyboardLayoutList* out_list) const override {
-        if (out_list) out_list->count = 0;
+        if (out_list) out_list->layouts.clear();
         return Result::ErrorNotSupported;
     }
 
@@ -113,8 +113,8 @@ public:
 
     KeyboardState get_state() const override { return state_; }
     bool is_visible() const override { return state_ == KeyboardState::Visible; }
-    Rect get_frame() const override { return frame_; }
-    float get_height() const override { return frame_.height; }
+    Box get_frame() const override { return frame_; }
+    float get_height() const override { return window::math::box_height(frame_); }
 
     void set_config(const KeyboardConfig& config) override { config_ = config; }
     KeyboardConfig get_config() const override { return config_; }
@@ -146,7 +146,7 @@ private:
 
     bool initialized_ = false;
     KeyboardState state_ = KeyboardState::Hidden;
-    Rect frame_;
+    Box frame_;
     KeyboardConfig config_;
     ITextInputDelegate* text_delegate_ = nullptr;
     IVirtualKeyboardEventHandler* event_handler_ = nullptr;
@@ -332,7 +332,7 @@ void VirtualKeyboardWasm::update() {
 
 Result VirtualKeyboardWasm::get_available_layouts(KeyboardLayoutList* out_list) const {
     if (out_list) {
-        out_list->count = 0;
+        out_list->layouts.clear();
     }
     // Browser controls keyboard layout
     return Result::ErrorNotSupported;

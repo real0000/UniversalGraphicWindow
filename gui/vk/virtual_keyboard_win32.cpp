@@ -65,7 +65,7 @@ public:
 
     KeyboardState get_state() const override { return state_; }
     bool is_visible() const override;
-    Rect get_frame() const override;
+    Box get_frame() const override;
     float get_height() const override;
 
     void set_config(const KeyboardConfig& config) override { config_ = config; }
@@ -95,7 +95,7 @@ private:
     bool close_touch_keyboard();
     HWND find_keyboard_window() const;
     bool is_keyboard_window_visible() const;
-    Rect get_keyboard_window_rect() const;
+    Box get_keyboard_window_rect() const;
     void update_keyboard_state();
     void notify_state_change(KeyboardState old_state, KeyboardState new_state);
 
@@ -108,7 +108,7 @@ private:
     bool text_input_active_ = false;
 
     // Cached keyboard frame
-    Rect cached_frame_;
+    Box cached_frame_;
 
     // IFrameworkInputPane for Windows 8+ keyboard tracking
     IFrameworkInputPane* input_pane_ = nullptr;
@@ -388,13 +388,12 @@ bool VirtualKeyboardWin32::is_visible() const {
     return is_keyboard_window_visible();
 }
 
-Rect VirtualKeyboardWin32::get_frame() const {
+Box VirtualKeyboardWin32::get_frame() const {
     return get_keyboard_window_rect();
 }
 
 float VirtualKeyboardWin32::get_height() const {
-    Rect frame = get_frame();
-    return frame.height;
+    return window::math::box_height(get_frame());
 }
 
 void VirtualKeyboardWin32::begin_text_input() {
@@ -421,16 +420,19 @@ Result VirtualKeyboardWin32::get_available_layouts(KeyboardLayoutList* out_list)
         return Result::ErrorInvalidParameter;
     }
 
-    out_list->count = 0;
+    out_list->layouts.clear();
 
     // Get keyboard layouts
-    HKL layouts[MAX_KEYBOARD_LAYOUTS];
-    int count = GetKeyboardLayoutList(MAX_KEYBOARD_LAYOUTS, layouts);
+    int count = GetKeyboardLayoutList(0, nullptr);
+    if (count <= 0) return Result::Success;
+
+    std::vector<HKL> layouts(count);
+    count = GetKeyboardLayoutList(count, layouts.data());
 
     HKL current_layout = GetKeyboardLayout(0);
 
-    for (int i = 0; i < count && i < MAX_KEYBOARD_LAYOUTS; ++i) {
-        KeyboardLayoutInfo& info = out_list->layouts[out_list->count];
+    for (int i = 0; i < count; ++i) {
+        KeyboardLayoutInfo info;
 
         // Get layout identifier
         LANGID lang_id = LOWORD(reinterpret_cast<uintptr_t>(layouts[i]));
@@ -451,7 +453,7 @@ Result VirtualKeyboardWin32::get_available_layouts(KeyboardLayoutList* out_list)
         }
 
         info.is_current = (layouts[i] == current_layout);
-        out_list->count++;
+        out_list->layouts.push_back(std::move(info));
     }
 
     return Result::Success;
@@ -516,9 +518,8 @@ void VirtualKeyboardWin32::update() {
     }
 
     // Update cached frame
-    Rect new_frame = get_keyboard_window_rect();
-    if (new_frame.width != cached_frame_.width || new_frame.height != cached_frame_.height ||
-        new_frame.x != cached_frame_.x || new_frame.y != cached_frame_.y) {
+    Box new_frame = get_keyboard_window_rect();
+    if (!boost::geometry::equals(new_frame, cached_frame_)) {
 
         cached_frame_ = new_frame;
 
@@ -690,21 +691,19 @@ bool VirtualKeyboardWin32::is_keyboard_window_visible() const {
     return false;
 }
 
-Rect VirtualKeyboardWin32::get_keyboard_window_rect() const {
-    Rect result;
-
+Box VirtualKeyboardWin32::get_keyboard_window_rect() const {
     HWND hwnd = find_keyboard_window();
     if (hwnd) {
         RECT rect;
         if (GetWindowRect(hwnd, &rect)) {
-            result.x = static_cast<float>(rect.left);
-            result.y = static_cast<float>(rect.top);
-            result.width = static_cast<float>(rect.right - rect.left);
-            result.height = static_cast<float>(rect.bottom - rect.top);
+            return window::math::make_box(
+                static_cast<float>(rect.left),
+                static_cast<float>(rect.top),
+                static_cast<float>(rect.right - rect.left),
+                static_cast<float>(rect.bottom - rect.top));
         }
     }
-
-    return result;
+    return Box(window::math::Vec2(0, 0), window::math::Vec2(0, 0));
 }
 
 void VirtualKeyboardWin32::update_keyboard_state() {
