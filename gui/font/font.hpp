@@ -32,11 +32,6 @@
 
 namespace font {
 
-// Import math types
-using Vec2 = window::math::Vec2;
-using Vec4 = window::math::Vec4;
-using Box = window::math::Box;
-
 // ============================================================================
 // Enums
 // ============================================================================
@@ -222,7 +217,7 @@ struct TextLayoutOptions {
 };
 
 struct TextLayoutResult {
-    Box bounds;                     // Bounding box of laid out text
+    window::math::Box bounds;                     // Bounding box of laid out text
     int line_count = 0;             // Number of lines
     int char_count = 0;             // Number of characters laid out
     bool truncated = false;         // True if text was truncated
@@ -352,7 +347,7 @@ public:
                                           const TextLayoutOptions& options) = 0;
 
     // Measure text without rendering
-    virtual Vec2 measure_text(IFontFace* font, const char* text, int text_length,
+    virtual window::math::Vec2 measure_text(IFontFace* font, const char* text, int text_length,
                               const TextLayoutOptions& options = TextLayoutOptions()) = 0;
 
     // Get caret positions for text
@@ -376,14 +371,14 @@ public:
     // Render text to a new bitmap
     // Caller must free the returned pixels with free_bitmap()
     virtual Result render_text(IFontFace* font, const char* text, int text_length,
-                                const Vec4& color, const RenderOptions& render_opts,
+                                const window::math::Vec4& color, const RenderOptions& render_opts,
                                 const TextLayoutOptions& layout_opts,
                                 void** out_pixels, int* out_width, int* out_height,
                                 PixelFormat* out_format) = 0;
 
     // Render text to existing bitmap
     virtual Result render_text_to_bitmap(IFontFace* font, const char* text, int text_length,
-                                          const Vec4& color, const RenderOptions& render_opts,
+                                          const window::math::Vec4& color, const RenderOptions& render_opts,
                                           const TextLayoutOptions& layout_opts,
                                           void* bitmap, int bitmap_width, int bitmap_height,
                                           int bitmap_pitch, PixelFormat bitmap_format,
@@ -391,7 +386,7 @@ public:
 
     // Render pre-shaped glyphs
     virtual Result render_glyphs(IFontFace* font, const PositionedGlyph* glyphs, int glyph_count,
-                                  const Vec4& color, const RenderOptions& render_opts,
+                                  const window::math::Vec4& color, const RenderOptions& render_opts,
                                   void* bitmap, int bitmap_width, int bitmap_height,
                                   int bitmap_pitch, PixelFormat bitmap_format,
                                   int x, int y) = 0;
@@ -467,7 +462,7 @@ public:
     //       },
     //       &out_desc);
     virtual Result render_text_to_texture(IFontFace* font, const char* text, int text_length,
-                                           const Vec4& color, const RenderOptions& render_opts,
+                                           const window::math::Vec4& color, const RenderOptions& render_opts,
                                            const TextLayoutOptions& layout_opts,
                                            window::TextureFormat texture_format,
                                            const TextureCreateCallback& create_callback,
@@ -477,7 +472,7 @@ public:
     // Render pre-shaped glyphs directly to a GPU texture
     virtual Result render_glyphs_to_texture(IFontFace* font,
                                              const PositionedGlyph* glyphs, int glyph_count,
-                                             const Vec4& color, const RenderOptions& render_opts,
+                                             const window::math::Vec4& color, const RenderOptions& render_opts,
                                              window::TextureFormat texture_format,
                                              const TextureCreateCallback& create_callback,
                                              const TextureUploadCallback& upload_callback,
@@ -536,8 +531,8 @@ public:
     // Convenience methods
     virtual IFontFace* load_font(const char* filepath, float size, Result* out_result = nullptr) = 0;
     virtual IFontFace* load_system_font(const char* family, float size, Result* out_result = nullptr) = 0;
-    virtual Vec2 measure_text(IFontFace* font, const char* text) = 0;
-    virtual Result render_text(IFontFace* font, const char* text, const Vec4& color,
+    virtual window::math::Vec2 measure_text(IFontFace* font, const char* text) = 0;
+    virtual Result render_text(IFontFace* font, const char* text, const window::math::Vec4& color,
                                 void** out_pixels, int* out_width, int* out_height) = 0;
 };
 

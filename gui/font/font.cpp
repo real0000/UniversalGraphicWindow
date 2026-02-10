@@ -13,6 +13,10 @@
 
 namespace font {
 
+using Vec2 = window::math::Vec2;
+using Vec4 = window::math::Vec4;
+using Box = window::math::Box;
+
 // ============================================================================
 // String Conversion Functions
 // ============================================================================

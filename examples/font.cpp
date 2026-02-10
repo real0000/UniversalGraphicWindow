@@ -256,7 +256,7 @@ struct TextTexture {
 
 // Create OpenGL texture from rendered text
 static bool create_text_texture(font::IFontRenderer* renderer, font::IFontFace* font,
-                                 const char* text, const font::Vec4& color,
+                                 const char* text, const window::math::Vec4& color,
                                  const font::TextLayoutOptions& layout_opts,
                                  TextTexture* out_texture) {
     font::RenderOptions render_opts;
@@ -415,25 +415,25 @@ int main() {
 
     // Title (yellow)
     if (create_text_texture(font_renderer, font_title, "Hello World!",
-                            font::Vec4(1, 1, 0, 1), layout, &tex)) {
+                            window::math::Vec4(1, 1, 0, 1), layout, &tex)) {
         textures.push_back(tex);
     }
 
     // Subtitle (white)
     if (create_text_texture(font_renderer, font_body, "Font Rendering Demo",
-                            font::Vec4(1, 1, 1, 1), layout, &tex)) {
+                            window::math::Vec4(1, 1, 1, 1), layout, &tex)) {
         textures.push_back(tex);
     }
 
     // Cyan text
     if (create_text_texture(font_renderer, font_body, "The quick brown fox jumps over the lazy dog.",
-                            font::Vec4(0, 1, 1, 1), layout, &tex)) {
+                            window::math::Vec4(0, 1, 1, 1), layout, &tex)) {
         textures.push_back(tex);
     }
 
     // Green text
     if (create_text_texture(font_renderer, font_body, "OpenGL + DirectWrite Text Rendering",
-                            font::Vec4(0, 1, 0, 1), layout, &tex)) {
+                            window::math::Vec4(0, 1, 0, 1), layout, &tex)) {
         textures.push_back(tex);
     }
 

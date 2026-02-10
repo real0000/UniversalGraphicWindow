@@ -25,9 +25,6 @@
 
 namespace vkeyboard {
 
-// Import math types
-using Box = window::math::Box;
-
 // ============================================================================
 // Enums
 // ============================================================================
@@ -227,7 +224,7 @@ struct TextInputContext {
     bool has_composition = false;
 
     // Hint for keyboard about the text field's position (for keyboard avoidance)
-    Box text_field_frame;
+    window::math::Box text_field_frame;
 
     // Context around cursor (for better predictions)
     std::string text_before_cursor;
@@ -240,7 +237,7 @@ struct TextInputContext {
 
 struct KeyboardEventData {
     KeyboardState state = KeyboardState::Hidden;
-    Box frame;                     // Keyboard frame in screen coordinates
+    window::math::Box frame;                     // Keyboard frame in screen coordinates
     float animation_duration = 0.0f; // Animation duration in seconds
 
     // For state transitions
@@ -363,7 +360,7 @@ public:
     // State queries
     virtual KeyboardState get_state() const = 0;
     virtual bool is_visible() const = 0;
-    virtual Box get_frame() const = 0;      // Keyboard frame in screen coordinates
+    virtual window::math::Box get_frame() const = 0;      // Keyboard frame in screen coordinates
     virtual float get_height() const = 0;   // Convenience: keyboard height
 
     // Configuration

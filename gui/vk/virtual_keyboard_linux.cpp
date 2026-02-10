@@ -19,6 +19,8 @@
 
 namespace vkeyboard {
 
+using Box = window::math::Box;
+
 // Known virtual keyboard applications on Linux
 static const char* VIRTUAL_KEYBOARD_APPS[] = {
     "onboard",              // GNOME on-screen keyboard

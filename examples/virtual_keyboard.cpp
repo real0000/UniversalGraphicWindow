@@ -366,7 +366,7 @@ public:
 class KeyboardEventHandler : public vkeyboard::IVirtualKeyboardEventHandler {
 public:
     bool keyboard_visible = false;
-    vkeyboard::Box keyboard_frame;
+    window::math::Box keyboard_frame;
 
     void on_keyboard_will_show(const vkeyboard::KeyboardEventData& data) override {
         printf("  [Event] Keyboard will show (height: %.0f)\n", window::math::box_height(data.frame));
@@ -387,7 +387,7 @@ public:
 
     void on_keyboard_did_hide(const vkeyboard::KeyboardEventData& data) override {
         keyboard_visible = false;
-        keyboard_frame = vkeyboard::Box(window::math::Vec2(0,0), window::math::Vec2(0,0));
+        keyboard_frame = window::math::Box(window::math::Vec2(0,0), window::math::Vec2(0,0));
         printf("  [Event] Keyboard did hide\n");
         (void)data;
     }
@@ -442,7 +442,7 @@ struct TextTexture {
 };
 
 static bool render_text_to_texture(font::IFontRenderer* renderer, font::IFontFace* font,
-                                    const char* text, const font::Vec4& color,
+                                    const char* text, const window::math::Vec4& color,
                                     TextTexture* out_texture) {
     if (!text || text[0] == '\0') {
         out_texture->id = 0;
@@ -645,16 +645,16 @@ int main() {
 
     // Button textures
     TextTexture btn_textures[4];
-    render_text_to_texture(font_renderer, font_ui, "Show KB", font::Vec4(1, 1, 1, 1), &btn_textures[0]);
-    render_text_to_texture(font_renderer, font_ui, "Hide KB", font::Vec4(1, 1, 1, 1), &btn_textures[1]);
-    render_text_to_texture(font_renderer, font_ui, "Clear", font::Vec4(1, 1, 1, 1), &btn_textures[2]);
-    render_text_to_texture(font_renderer, font_ui, "Exit", font::Vec4(1, 1, 1, 1), &btn_textures[3]);
+    render_text_to_texture(font_renderer, font_ui, "Show KB", window::math::Vec4(1, 1, 1, 1), &btn_textures[0]);
+    render_text_to_texture(font_renderer, font_ui, "Hide KB", window::math::Vec4(1, 1, 1, 1), &btn_textures[1]);
+    render_text_to_texture(font_renderer, font_ui, "Clear", window::math::Vec4(1, 1, 1, 1), &btn_textures[2]);
+    render_text_to_texture(font_renderer, font_ui, "Exit", window::math::Vec4(1, 1, 1, 1), &btn_textures[3]);
 
     // Render static text
     render_text_to_texture(font_renderer, font_ui, "Virtual Keyboard Test",
-                           font::Vec4(1, 1, 0, 1), &title_tex);
+                           window::math::Vec4(1, 1, 0, 1), &title_tex);
     render_text_to_texture(font_renderer, font_ui, "Click buttons below to control keyboard",
-                           font::Vec4(180/255.0f, 180/255.0f, 180/255.0f, 1.0f), &help_tex);
+                           window::math::Vec4(180/255.0f, 180/255.0f, 180/255.0f, 1.0f), &help_tex);
 
     // Main loop
     while (!win->should_close()) {
@@ -716,7 +716,7 @@ int main() {
                 display_text += "_";  // Cursor
             }
             render_text_to_texture(font_renderer, font_ui, display_text.c_str(),
-                                   font::Vec4(1, 1, 1, 1), &input_tex);
+                                   window::math::Vec4(1, 1, 1, 1), &input_tex);
         }
 
         // Update status
@@ -730,7 +730,7 @@ int main() {
         if (status != last_status) {
             last_status = status;
             render_text_to_texture(font_renderer, font_ui, status.c_str(),
-                                   font::Vec4(0, 1, 0, 1), &status_tex);
+                                   window::math::Vec4(0, 1, 0, 1), &status_tex);
         }
 
         // Render

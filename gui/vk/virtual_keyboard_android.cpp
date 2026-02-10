@@ -19,6 +19,8 @@
 
 namespace vkeyboard {
 
+using Box = window::math::Box;
+
 // Global reference to JNI environment (set by application)
 static JavaVM* g_java_vm = nullptr;
 static jobject g_activity = nullptr;

@@ -15,6 +15,8 @@
 
 namespace vkeyboard {
 
+using Box = window::math::Box;
+
 class VirtualKeyboardStub : public IVirtualKeyboard {
 public:
     VirtualKeyboardStub() {}
@@ -93,6 +95,8 @@ void destroy_virtual_keyboard(IVirtualKeyboard* keyboard) {
 #include <cstring>
 
 namespace vkeyboard {
+
+using Box = window::math::Box;
 
 class VirtualKeyboardWasm : public IVirtualKeyboard {
 public:
