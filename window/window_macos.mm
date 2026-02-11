@@ -13,6 +13,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Carbon/Carbon.h>  // For key codes
 #include <string>
+#include <thread>
 #include <mach/mach_time.h>
 
 //=============================================================================
@@ -1268,6 +1269,146 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
 void Graphics::destroy() {
     delete this;
+}
+
+//=============================================================================
+// Message Box
+//=============================================================================
+
+static NSAlertStyle map_message_box_icon_to_ns(MessageBoxIcon icon) {
+    switch (icon) {
+        case MessageBoxIcon::Warning:  return NSAlertStyleCritical;
+        case MessageBoxIcon::Error:    return NSAlertStyleCritical;
+        case MessageBoxIcon::Info:     return NSAlertStyleInformational;
+        case MessageBoxIcon::Question: return NSAlertStyleInformational;
+        default:                       return NSAlertStyleInformational;
+    }
+}
+
+static NSAlert* create_ns_alert(const char* title, const char* message,
+                                MessageBoxType type, MessageBoxIcon icon) {
+    NSAlert* alert = [[NSAlert alloc] init];
+    [alert setMessageText:[NSString stringWithUTF8String:(title ? title : "")]];
+    [alert setInformativeText:[NSString stringWithUTF8String:(message ? message : "")]];
+    [alert setAlertStyle:map_message_box_icon_to_ns(icon)];
+
+    switch (type) {
+        case MessageBoxType::Ok:
+            [alert addButtonWithTitle:@"OK"];
+            break;
+        case MessageBoxType::OkCancel:
+            [alert addButtonWithTitle:@"OK"];
+            [alert addButtonWithTitle:@"Cancel"];
+            break;
+        case MessageBoxType::YesNo:
+            [alert addButtonWithTitle:@"Yes"];
+            [alert addButtonWithTitle:@"No"];
+            break;
+        case MessageBoxType::YesNoCancel:
+            [alert addButtonWithTitle:@"Yes"];
+            [alert addButtonWithTitle:@"No"];
+            [alert addButtonWithTitle:@"Cancel"];
+            break;
+        case MessageBoxType::RetryCancel:
+            [alert addButtonWithTitle:@"Retry"];
+            [alert addButtonWithTitle:@"Cancel"];
+            break;
+        case MessageBoxType::AbortRetryIgnore:
+            [alert addButtonWithTitle:@"Abort"];
+            [alert addButtonWithTitle:@"Retry"];
+            [alert addButtonWithTitle:@"Ignore"];
+            break;
+    }
+
+    return alert;
+}
+
+static MessageBoxButton map_ns_response(NSModalResponse response, MessageBoxType type) {
+    int index = static_cast<int>(response - NSAlertFirstButtonReturn);
+
+    switch (type) {
+        case MessageBoxType::Ok:
+            return MessageBoxButton::Ok;
+        case MessageBoxType::OkCancel:
+            return (index == 0) ? MessageBoxButton::Ok : MessageBoxButton::Cancel;
+        case MessageBoxType::YesNo:
+            return (index == 0) ? MessageBoxButton::Yes : MessageBoxButton::No;
+        case MessageBoxType::YesNoCancel:
+            if (index == 0) return MessageBoxButton::Yes;
+            if (index == 1) return MessageBoxButton::No;
+            return MessageBoxButton::Cancel;
+        case MessageBoxType::RetryCancel:
+            return (index == 0) ? MessageBoxButton::Retry : MessageBoxButton::Cancel;
+        case MessageBoxType::AbortRetryIgnore:
+            if (index == 0) return MessageBoxButton::Abort;
+            if (index == 1) return MessageBoxButton::Retry;
+            return MessageBoxButton::Ignore;
+        default:
+            return MessageBoxButton::None;
+    }
+}
+
+MessageBoxButton Window::show_message_box(
+    const char* title,
+    const char* message,
+    MessageBoxType type,
+    MessageBoxIcon icon,
+    Window* parent)
+{
+    @autoreleasepool {
+        NSAlert* alert = create_ns_alert(title, message, type, icon);
+        NSModalResponse response;
+
+        if (parent && parent->impl && parent->impl->ns_window) {
+            __block NSModalResponse sheetResponse = NSAlertFirstButtonReturn;
+
+            [alert beginSheetModalForWindow:parent->impl->ns_window
+                          completionHandler:^(NSModalResponse returnCode) {
+                sheetResponse = returnCode;
+                [NSApp stopModal];
+            }];
+
+            [NSApp runModalForWindow:[alert window]];
+            response = sheetResponse;
+        } else {
+            response = [alert runModal];
+        }
+
+        return map_ns_response(response, type);
+    }
+}
+
+void Window::show_message_box_async(
+    const char* title,
+    const char* message,
+    MessageBoxType type,
+    MessageBoxIcon icon,
+    Window* parent,
+    MessageBoxCallback callback)
+{
+    if (!callback) return;
+
+    @autoreleasepool {
+        if (parent && parent->impl && parent->impl->ns_window) {
+            NSAlert* alert = create_ns_alert(title, message, type, icon);
+            MessageBoxType captured_type = type;
+
+            [alert beginSheetModalForWindow:parent->impl->ns_window
+                          completionHandler:^(NSModalResponse returnCode) {
+                MessageBoxButton result = map_ns_response(returnCode, captured_type);
+                callback(result);
+            }];
+        } else {
+            std::string title_copy = title ? title : "";
+            std::string message_copy = message ? message : "";
+
+            std::thread([title_copy, message_copy, type, icon, parent, callback]() {
+                MessageBoxButton result = Window::show_message_box(
+                    title_copy.c_str(), message_copy.c_str(), type, icon, parent);
+                callback(result);
+            }).detach();
+        }
+    }
 }
 
 } // namespace window

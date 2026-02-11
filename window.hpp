@@ -400,6 +400,44 @@ using DpiChangeCallback = std::function<void(const DpiChangeEvent& event)>;
 using DropFileCallback = std::function<void(const DropFileEvent& event)>;
 
 //-----------------------------------------------------------------------------
+// Message Box
+//-----------------------------------------------------------------------------
+
+// Button configuration for message boxes
+enum class MessageBoxType : uint8_t {
+    Ok = 0,             // Single "OK" button
+    OkCancel,           // "OK" and "Cancel" buttons
+    YesNo,              // "Yes" and "No" buttons
+    YesNoCancel,        // "Yes", "No", and "Cancel" buttons
+    RetryCancel,        // "Retry" and "Cancel" buttons
+    AbortRetryIgnore    // "Abort", "Retry", and "Ignore" buttons
+};
+
+// Icon displayed in the message box
+enum class MessageBoxIcon : uint8_t {
+    None = 0,           // No icon
+    Info,               // Informational
+    Warning,            // Warning
+    Error,              // Error
+    Question            // Question
+};
+
+// Return value indicating which button was pressed
+enum class MessageBoxButton : uint8_t {
+    None = 0,           // No button pressed / dialog dismissed
+    Ok,
+    Cancel,
+    Yes,
+    No,
+    Retry,
+    Abort,
+    Ignore
+};
+
+// Callback for asynchronous message box results
+using MessageBoxCallback = std::function<void(MessageBoxButton result)>;
+
+//-----------------------------------------------------------------------------
 // Forward Declarations
 //-----------------------------------------------------------------------------
 
@@ -550,6 +588,30 @@ public:
     void poll_events();
 
     //-------------------------------------------------------------------------
+    // Message Box
+    //-------------------------------------------------------------------------
+    // Show a native message box dialog.
+    // If 'parent' is nullptr, the dialog is application-modal.
+    // If 'parent' is a valid Window*, the dialog is window-modal.
+
+    // Blocking - blocks calling thread until user responds
+    static MessageBoxButton show_message_box(
+        const char* title,
+        const char* message,
+        MessageBoxType type = MessageBoxType::Ok,
+        MessageBoxIcon icon = MessageBoxIcon::None,
+        Window* parent = nullptr);
+
+    // Async - returns immediately, callback invoked when user responds
+    static void show_message_box_async(
+        const char* title,
+        const char* message,
+        MessageBoxType type,
+        MessageBoxIcon icon,
+        Window* parent,
+        MessageBoxCallback callback);
+
+    //-------------------------------------------------------------------------
     // Event Callbacks
     //-------------------------------------------------------------------------
     // Set callbacks for specific event types. Pass empty std::function to remove callback.
@@ -638,6 +700,11 @@ CursorType string_to_cursor_type(const char* str);
 const char* key_to_string(Key key);
 const char* mouse_button_to_string(MouseButton button);
 const char* event_type_to_string(EventType type);
+
+// Message box utilities
+const char* message_box_type_to_string(MessageBoxType type);
+const char* message_box_icon_to_string(MessageBoxIcon icon);
+const char* message_box_button_to_string(MessageBoxButton button);
 
 // Note: Device and display enumeration functions are defined in graphics_api.hpp
 

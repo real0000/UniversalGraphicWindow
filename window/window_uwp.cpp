@@ -959,6 +959,40 @@ void Graphics::destroy() {
     delete this;
 }
 
+//=============================================================================
+// Message Box (stub)
+//=============================================================================
+
+static MessageBoxButton msgbox_default_button(MessageBoxType type) {
+    switch (type) {
+        case MessageBoxType::Ok:               return MessageBoxButton::Ok;
+        case MessageBoxType::OkCancel:         return MessageBoxButton::Ok;
+        case MessageBoxType::YesNo:            return MessageBoxButton::Yes;
+        case MessageBoxType::YesNoCancel:      return MessageBoxButton::Yes;
+        case MessageBoxType::RetryCancel:      return MessageBoxButton::Cancel;
+        case MessageBoxType::AbortRetryIgnore: return MessageBoxButton::Abort;
+        default:                               return MessageBoxButton::None;
+    }
+}
+
+MessageBoxButton Window::show_message_box(
+    const char* title, const char* message,
+    MessageBoxType type, MessageBoxIcon icon, Window* parent)
+{
+    (void)title; (void)message; (void)icon; (void)parent;
+    return msgbox_default_button(type);
+}
+
+void Window::show_message_box_async(
+    const char* title, const char* message,
+    MessageBoxType type, MessageBoxIcon icon,
+    Window* parent, MessageBoxCallback callback)
+{
+    if (callback) {
+        callback(show_message_box(title, message, type, icon, parent));
+    }
+}
+
 } // namespace window
 
 #endif // WINDOW_PLATFORM_UWP

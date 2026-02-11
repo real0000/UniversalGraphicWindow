@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <ctime>
 #include <string>
+#include <thread>
+#include <algorithm>
 
 //=============================================================================
 // Backend Configuration (use CMake-defined macros)
@@ -1231,6 +1233,490 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
 void Graphics::destroy() {
     delete this;
+}
+
+//=============================================================================
+// Message Box
+//=============================================================================
+
+namespace {
+
+struct X11MsgBoxButton {
+    std::string label;
+    MessageBoxButton result;
+    int x, y, width, height;
+    bool hovered;
+    bool pressed;
+};
+
+struct X11MsgBoxState {
+    Display* display;
+    ::Window dialog;
+    GC gc;
+    XFontStruct* font;
+
+    std::vector<std::string> message_lines;
+    std::vector<X11MsgBoxButton> buttons;
+
+    int dialog_width;
+    int dialog_height;
+    int icon_size;
+    int text_x;
+    int button_y;
+    int default_button;
+    int cancel_button;
+    MessageBoxIcon icon;
+
+    MessageBoxButton result;
+    bool done;
+    Atom wm_delete_window;
+    Atom wm_protocols;
+};
+
+static void x11_msgbox_compute_layout(X11MsgBoxState& s, const char* message, MessageBoxType type) {
+    const int padding = 20;
+    const int btn_height = 28;
+    const int btn_pad = 12;
+    const int btn_spacing = 10;
+    const int icon_dim = 32;
+    const int icon_text_gap = 12;
+    const int text_btn_gap = 20;
+    const int min_btn_width = 80;
+    const int line_spacing = 4;
+
+    int font_height = s.font->ascent + s.font->descent;
+
+    // Split message into lines
+    s.message_lines.clear();
+    std::string msg = message ? message : "";
+    size_t pos;
+    while ((pos = msg.find('\n')) != std::string::npos) {
+        s.message_lines.push_back(msg.substr(0, pos));
+        msg = msg.substr(pos + 1);
+    }
+    if (!msg.empty() || s.message_lines.empty()) {
+        s.message_lines.push_back(msg);
+    }
+
+    // Text width
+    int max_text_width = 0;
+    for (const auto& line : s.message_lines) {
+        int w = XTextWidth(s.font, line.c_str(), (int)line.size());
+        if (w > max_text_width) max_text_width = w;
+    }
+
+    bool has_icon = (s.icon != MessageBoxIcon::None);
+    s.icon_size = has_icon ? icon_dim : 0;
+    s.text_x = padding + (has_icon ? (icon_dim + icon_text_gap) : 0);
+
+    int text_area_height = (int)s.message_lines.size() * (font_height + line_spacing);
+
+    // Build buttons
+    s.buttons.clear();
+    s.default_button = 0;
+    s.cancel_button = -1;
+
+    auto add_btn = [&](const char* label, MessageBoxButton result) {
+        X11MsgBoxButton btn;
+        btn.label = label;
+        btn.result = result;
+        btn.width = std::max(min_btn_width,
+            XTextWidth(s.font, label, (int)strlen(label)) + btn_pad * 2);
+        btn.height = btn_height;
+        btn.hovered = false;
+        btn.pressed = false;
+        s.buttons.push_back(btn);
+    };
+
+    switch (type) {
+        case MessageBoxType::Ok:
+            add_btn("OK", MessageBoxButton::Ok);
+            s.cancel_button = 0;
+            break;
+        case MessageBoxType::OkCancel:
+            add_btn("OK", MessageBoxButton::Ok);
+            add_btn("Cancel", MessageBoxButton::Cancel);
+            s.cancel_button = 1;
+            break;
+        case MessageBoxType::YesNo:
+            add_btn("Yes", MessageBoxButton::Yes);
+            add_btn("No", MessageBoxButton::No);
+            s.cancel_button = 1;
+            break;
+        case MessageBoxType::YesNoCancel:
+            add_btn("Yes", MessageBoxButton::Yes);
+            add_btn("No", MessageBoxButton::No);
+            add_btn("Cancel", MessageBoxButton::Cancel);
+            s.cancel_button = 2;
+            break;
+        case MessageBoxType::RetryCancel:
+            add_btn("Retry", MessageBoxButton::Retry);
+            add_btn("Cancel", MessageBoxButton::Cancel);
+            s.cancel_button = 1;
+            break;
+        case MessageBoxType::AbortRetryIgnore:
+            add_btn("Abort", MessageBoxButton::Abort);
+            add_btn("Retry", MessageBoxButton::Retry);
+            add_btn("Ignore", MessageBoxButton::Ignore);
+            s.cancel_button = -1;
+            break;
+    }
+
+    // Total button row width
+    int total_btn_width = 0;
+    for (auto& btn : s.buttons) {
+        total_btn_width += btn.width;
+    }
+    total_btn_width += btn_spacing * ((int)s.buttons.size() - 1);
+
+    // Dialog size
+    int content_width = std::max(max_text_width + s.text_x - padding, total_btn_width);
+    s.dialog_width = content_width + padding * 2;
+    s.dialog_width = std::max(s.dialog_width, 300);
+
+    s.button_y = padding + std::max(text_area_height, s.icon_size) + text_btn_gap;
+    s.dialog_height = s.button_y + btn_height + padding;
+
+    // Position buttons centered
+    int btn_x = (s.dialog_width - total_btn_width) / 2;
+    for (auto& btn : s.buttons) {
+        btn.x = btn_x;
+        btn.y = s.button_y;
+        btn_x += btn.width + btn_spacing;
+    }
+}
+
+static void x11_msgbox_draw_icon(X11MsgBoxState& s) {
+    if (s.icon == MessageBoxIcon::None) return;
+
+    int cx = 20 + 16;
+    int cy = 20 + 16;
+
+    switch (s.icon) {
+        case MessageBoxIcon::Info: {
+            XSetForeground(s.display, s.gc, 0x3366CC);
+            XFillArc(s.display, s.dialog, s.gc, cx - 14, cy - 14, 28, 28, 0, 360 * 64);
+            XSetForeground(s.display, s.gc, 0xFFFFFF);
+            XDrawString(s.display, s.dialog, s.gc, cx - 2, cy + 5, "i", 1);
+            break;
+        }
+        case MessageBoxIcon::Warning: {
+            XPoint tri[3] = {{(short)cx, (short)(cy - 14)},
+                             {(short)(cx - 14), (short)(cy + 12)},
+                             {(short)(cx + 14), (short)(cy + 12)}};
+            XSetForeground(s.display, s.gc, 0xFFAA00);
+            XFillPolygon(s.display, s.dialog, s.gc, tri, 3, Convex, CoordModeOrigin);
+            XSetForeground(s.display, s.gc, 0x000000);
+            XDrawString(s.display, s.dialog, s.gc, cx - 2, cy + 8, "!", 1);
+            break;
+        }
+        case MessageBoxIcon::Error: {
+            XSetForeground(s.display, s.gc, 0xCC3333);
+            XFillArc(s.display, s.dialog, s.gc, cx - 14, cy - 14, 28, 28, 0, 360 * 64);
+            XSetForeground(s.display, s.gc, 0xFFFFFF);
+            XDrawString(s.display, s.dialog, s.gc, cx - 3, cy + 5, "X", 1);
+            break;
+        }
+        case MessageBoxIcon::Question: {
+            XSetForeground(s.display, s.gc, 0x3366CC);
+            XFillArc(s.display, s.dialog, s.gc, cx - 14, cy - 14, 28, 28, 0, 360 * 64);
+            XSetForeground(s.display, s.gc, 0xFFFFFF);
+            XDrawString(s.display, s.dialog, s.gc, cx - 3, cy + 5, "?", 1);
+            break;
+        }
+        default: break;
+    }
+}
+
+static void x11_msgbox_draw(X11MsgBoxState& s) {
+    // Background
+    XSetForeground(s.display, s.gc, 0xF0F0F0);
+    XFillRectangle(s.display, s.dialog, s.gc, 0, 0, s.dialog_width, s.dialog_height);
+
+    // Icon
+    x11_msgbox_draw_icon(s);
+
+    // Message text
+    int font_height = s.font->ascent + s.font->descent;
+    int line_spacing = 4;
+    XSetForeground(s.display, s.gc, 0x000000);
+    for (size_t i = 0; i < s.message_lines.size(); i++) {
+        int text_y = 20 + s.font->ascent + (int)i * (font_height + line_spacing);
+        XDrawString(s.display, s.dialog, s.gc,
+                    s.text_x, text_y,
+                    s.message_lines[i].c_str(), (int)s.message_lines[i].size());
+    }
+
+    // Buttons
+    for (size_t i = 0; i < s.buttons.size(); i++) {
+        auto& btn = s.buttons[i];
+
+        unsigned long bg;
+        if (btn.pressed) {
+            bg = 0xA0A0A0;
+        } else if (btn.hovered) {
+            bg = 0xD8D8D8;
+        } else if ((int)i == s.default_button) {
+            bg = 0x4488CC;
+        } else {
+            bg = 0xE0E0E0;
+        }
+
+        XSetForeground(s.display, s.gc, bg);
+        XFillRectangle(s.display, s.dialog, s.gc, btn.x, btn.y, btn.width, btn.height);
+
+        XSetForeground(s.display, s.gc, 0x888888);
+        XDrawRectangle(s.display, s.dialog, s.gc, btn.x, btn.y, btn.width - 1, btn.height - 1);
+
+        unsigned long text_color = ((int)i == s.default_button && !btn.pressed)
+                                   ? 0xFFFFFF : 0x000000;
+        XSetForeground(s.display, s.gc, text_color);
+        int tw = XTextWidth(s.font, btn.label.c_str(), (int)btn.label.size());
+        int tx = btn.x + (btn.width - tw) / 2;
+        int ty = btn.y + (btn.height + s.font->ascent - s.font->descent) / 2;
+        XDrawString(s.display, s.dialog, s.gc, tx, ty,
+                    btn.label.c_str(), (int)btn.label.size());
+    }
+}
+
+} // anonymous namespace
+
+MessageBoxButton Window::show_message_box(
+    const char* title,
+    const char* message,
+    MessageBoxType type,
+    MessageBoxIcon icon,
+    Window* parent)
+{
+    Display* display = XOpenDisplay(nullptr);
+    if (!display) return MessageBoxButton::None;
+
+    int screen = DefaultScreen(display);
+
+    X11MsgBoxState s;
+    s.display = display;
+    s.icon = icon;
+    s.result = MessageBoxButton::None;
+    s.done = false;
+
+    // Load font
+    s.font = XLoadQueryFont(display, "-*-helvetica-medium-r-*-*-14-*-*-*-*-*-*-*");
+    if (!s.font) s.font = XLoadQueryFont(display, "-*-fixed-medium-r-*-*-14-*-*-*-*-*-*-*");
+    if (!s.font) s.font = XLoadQueryFont(display, "fixed");
+    if (!s.font) {
+        XCloseDisplay(display);
+        return MessageBoxButton::None;
+    }
+
+    // Compute layout
+    x11_msgbox_compute_layout(s, message, type);
+
+    // Position: center on parent or screen
+    int pos_x, pos_y;
+    ::Window parent_xwin = 0;
+    if (parent && parent->impl) {
+        parent_xwin = parent->impl->xwindow;
+    }
+
+    if (parent_xwin) {
+        XWindowAttributes parent_attrs;
+        XGetWindowAttributes(display, parent_xwin, &parent_attrs);
+        int parent_x, parent_y;
+        ::Window child;
+        XTranslateCoordinates(display, parent_xwin, RootWindow(display, screen),
+                              0, 0, &parent_x, &parent_y, &child);
+        pos_x = parent_x + (parent_attrs.width - s.dialog_width) / 2;
+        pos_y = parent_y + (parent_attrs.height - s.dialog_height) / 2;
+    } else {
+        pos_x = (DisplayWidth(display, screen) - s.dialog_width) / 2;
+        pos_y = (DisplayHeight(display, screen) - s.dialog_height) / 2;
+    }
+
+    // Create dialog window
+    XSetWindowAttributes attrs = {};
+    attrs.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
+                       ButtonReleaseMask | PointerMotionMask | StructureNotifyMask;
+    attrs.background_pixel = WhitePixel(display, screen);
+
+    s.dialog = XCreateWindow(
+        display, RootWindow(display, screen),
+        pos_x, pos_y, s.dialog_width, s.dialog_height,
+        0, DefaultDepth(display, screen),
+        InputOutput, DefaultVisual(display, screen),
+        CWBackPixel | CWEventMask, &attrs);
+
+    // Set title
+    XStoreName(display, s.dialog, title ? title : "");
+    Atom net_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
+    Atom utf8_string = XInternAtom(display, "UTF8_STRING", False);
+    if (title) {
+        XChangeProperty(display, s.dialog, net_wm_name, utf8_string, 8,
+                        PropModeReplace, (unsigned char*)title, (int)strlen(title));
+    }
+
+    // Set dialog window type
+    Atom net_wm_window_type = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+    Atom dialog_type = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DIALOG", False);
+    XChangeProperty(display, s.dialog, net_wm_window_type, XA_ATOM, 32,
+                    PropModeReplace, (unsigned char*)&dialog_type, 1);
+
+    // Transient for parent
+    if (parent_xwin) {
+        XSetTransientForHint(display, s.dialog, parent_xwin);
+    }
+
+    // Fixed size
+    XSizeHints* size_hints = XAllocSizeHints();
+    size_hints->flags = PMinSize | PMaxSize | PPosition;
+    size_hints->min_width = size_hints->max_width = s.dialog_width;
+    size_hints->min_height = size_hints->max_height = s.dialog_height;
+    size_hints->x = pos_x;
+    size_hints->y = pos_y;
+    XSetWMNormalHints(display, s.dialog, size_hints);
+    XFree(size_hints);
+
+    // Handle WM_DELETE_WINDOW
+    s.wm_protocols = XInternAtom(display, "WM_PROTOCOLS", False);
+    s.wm_delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(display, s.dialog, &s.wm_delete_window, 1);
+
+    // Create GC
+    s.gc = XCreateGC(display, s.dialog, 0, nullptr);
+    XSetFont(display, s.gc, s.font->fid);
+
+    // Show
+    XMapRaised(display, s.dialog);
+    XFlush(display);
+
+    // Event loop
+    while (!s.done) {
+        XEvent event;
+        XNextEvent(display, &event);
+
+        if (event.xany.window != s.dialog) continue;
+
+        switch (event.type) {
+            case Expose:
+                if (event.xexpose.count == 0) {
+                    x11_msgbox_draw(s);
+                }
+                break;
+
+            case ButtonPress: {
+                int mx = event.xbutton.x;
+                int my = event.xbutton.y;
+                for (auto& btn : s.buttons) {
+                    if (mx >= btn.x && mx < btn.x + btn.width &&
+                        my >= btn.y && my < btn.y + btn.height) {
+                        btn.pressed = true;
+                        x11_msgbox_draw(s);
+                        XFlush(display);
+                    }
+                }
+                break;
+            }
+
+            case ButtonRelease: {
+                int mx = event.xbutton.x;
+                int my = event.xbutton.y;
+                for (auto& btn : s.buttons) {
+                    if (btn.pressed &&
+                        mx >= btn.x && mx < btn.x + btn.width &&
+                        my >= btn.y && my < btn.y + btn.height) {
+                        s.result = btn.result;
+                        s.done = true;
+                    }
+                    btn.pressed = false;
+                }
+                if (!s.done) {
+                    x11_msgbox_draw(s);
+                    XFlush(display);
+                }
+                break;
+            }
+
+            case MotionNotify: {
+                int mx = event.xmotion.x;
+                int my = event.xmotion.y;
+                bool needs_redraw = false;
+                for (auto& btn : s.buttons) {
+                    bool in_btn = (mx >= btn.x && mx < btn.x + btn.width &&
+                                   my >= btn.y && my < btn.y + btn.height);
+                    if (in_btn != btn.hovered) {
+                        btn.hovered = in_btn;
+                        needs_redraw = true;
+                    }
+                }
+                if (needs_redraw) {
+                    x11_msgbox_draw(s);
+                    XFlush(display);
+                }
+                break;
+            }
+
+            case KeyPress: {
+                KeySym keysym = XLookupKeysym(&event.xkey, 0);
+                if (keysym == XK_Return || keysym == XK_KP_Enter) {
+                    if (s.default_button >= 0 && s.default_button < (int)s.buttons.size()) {
+                        s.result = s.buttons[s.default_button].result;
+                        s.done = true;
+                    }
+                } else if (keysym == XK_Escape) {
+                    if (s.cancel_button >= 0 && s.cancel_button < (int)s.buttons.size()) {
+                        s.result = s.buttons[s.cancel_button].result;
+                        s.done = true;
+                    }
+                } else if (keysym == XK_Tab) {
+                    s.default_button = (s.default_button + 1) % (int)s.buttons.size();
+                    x11_msgbox_draw(s);
+                    XFlush(display);
+                }
+                break;
+            }
+
+            case ClientMessage:
+                if ((Atom)event.xclient.data.l[0] == s.wm_delete_window) {
+                    if (s.cancel_button >= 0 && s.cancel_button < (int)s.buttons.size()) {
+                        s.result = s.buttons[s.cancel_button].result;
+                    } else {
+                        s.result = MessageBoxButton::None;
+                    }
+                    s.done = true;
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    // Cleanup
+    XFreeGC(display, s.gc);
+    XFreeFont(display, s.font);
+    XDestroyWindow(display, s.dialog);
+    XCloseDisplay(display);
+
+    return s.result;
+}
+
+void Window::show_message_box_async(
+    const char* title,
+    const char* message,
+    MessageBoxType type,
+    MessageBoxIcon icon,
+    Window* parent,
+    MessageBoxCallback callback)
+{
+    if (!callback) return;
+
+    std::string title_copy = title ? title : "";
+    std::string message_copy = message ? message : "";
+
+    std::thread([title_copy, message_copy, type, icon, parent, callback]() {
+        MessageBoxButton result = Window::show_message_box(
+            title_copy.c_str(), message_copy.c_str(), type, icon, parent);
+        callback(result);
+    }).detach();
 }
 
 } // namespace window

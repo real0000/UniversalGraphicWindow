@@ -22,6 +22,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <thread>
 #include "../internal/utf8_util.hpp"
 
 //=============================================================================
@@ -1194,6 +1195,87 @@ Graphics* Graphics::create(const ExternalWindowConfig& config, Result* out_resul
 
 void Graphics::destroy() {
     delete this;
+}
+
+//=============================================================================
+// Message Box
+//=============================================================================
+
+static UINT map_message_box_type(MessageBoxType type) {
+    switch (type) {
+        case MessageBoxType::Ok:               return MB_OK;
+        case MessageBoxType::OkCancel:         return MB_OKCANCEL;
+        case MessageBoxType::YesNo:            return MB_YESNO;
+        case MessageBoxType::YesNoCancel:      return MB_YESNOCANCEL;
+        case MessageBoxType::RetryCancel:      return MB_RETRYCANCEL;
+        case MessageBoxType::AbortRetryIgnore: return MB_ABORTRETRYIGNORE;
+        default:                               return MB_OK;
+    }
+}
+
+static UINT map_message_box_icon(MessageBoxIcon icon) {
+    switch (icon) {
+        case MessageBoxIcon::Info:     return MB_ICONINFORMATION;
+        case MessageBoxIcon::Warning:  return MB_ICONWARNING;
+        case MessageBoxIcon::Error:    return MB_ICONERROR;
+        case MessageBoxIcon::Question: return MB_ICONQUESTION;
+        default:                       return 0;
+    }
+}
+
+static MessageBoxButton map_win32_msgbox_result(int result) {
+    switch (result) {
+        case IDOK:     return MessageBoxButton::Ok;
+        case IDCANCEL: return MessageBoxButton::Cancel;
+        case IDYES:    return MessageBoxButton::Yes;
+        case IDNO:     return MessageBoxButton::No;
+        case IDRETRY:  return MessageBoxButton::Retry;
+        case IDABORT:  return MessageBoxButton::Abort;
+        case IDIGNORE: return MessageBoxButton::Ignore;
+        default:       return MessageBoxButton::None;
+    }
+}
+
+MessageBoxButton Window::show_message_box(
+    const char* title,
+    const char* message,
+    MessageBoxType type,
+    MessageBoxIcon icon,
+    Window* parent)
+{
+    HWND parent_hwnd = nullptr;
+    if (parent && parent->impl) {
+        parent_hwnd = parent->impl->hwnd;
+    }
+
+    UINT flags = map_message_box_type(type) | map_message_box_icon(icon);
+    flags |= parent_hwnd ? MB_APPLMODAL : MB_TASKMODAL;
+
+    std::wstring wide_title = internal::utf8_to_wide(title ? title : "");
+    std::wstring wide_message = internal::utf8_to_wide(message ? message : "");
+
+    int result = MessageBoxW(parent_hwnd, wide_message.c_str(), wide_title.c_str(), flags);
+    return map_win32_msgbox_result(result);
+}
+
+void Window::show_message_box_async(
+    const char* title,
+    const char* message,
+    MessageBoxType type,
+    MessageBoxIcon icon,
+    Window* parent,
+    MessageBoxCallback callback)
+{
+    if (!callback) return;
+
+    std::string title_copy = title ? title : "";
+    std::string message_copy = message ? message : "";
+
+    std::thread([title_copy, message_copy, type, icon, parent, callback]() {
+        MessageBoxButton result = Window::show_message_box(
+            title_copy.c_str(), message_copy.c_str(), type, icon, parent);
+        callback(result);
+    }).detach();
 }
 
 } // namespace window

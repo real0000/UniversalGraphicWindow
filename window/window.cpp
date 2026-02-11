@@ -191,4 +191,45 @@ const char* window_style_flag_to_string(WindowStyle flag) {
     }
 }
 
+//=============================================================================
+// Message Box Utilities
+//=============================================================================
+
+const char* message_box_type_to_string(MessageBoxType type) {
+    switch (type) {
+        case MessageBoxType::Ok:               return "Ok";
+        case MessageBoxType::OkCancel:         return "OkCancel";
+        case MessageBoxType::YesNo:            return "YesNo";
+        case MessageBoxType::YesNoCancel:      return "YesNoCancel";
+        case MessageBoxType::RetryCancel:      return "RetryCancel";
+        case MessageBoxType::AbortRetryIgnore: return "AbortRetryIgnore";
+        default:                               return "Unknown";
+    }
+}
+
+const char* message_box_icon_to_string(MessageBoxIcon icon) {
+    switch (icon) {
+        case MessageBoxIcon::None:     return "None";
+        case MessageBoxIcon::Info:     return "Info";
+        case MessageBoxIcon::Warning:  return "Warning";
+        case MessageBoxIcon::Error:    return "Error";
+        case MessageBoxIcon::Question: return "Question";
+        default:                       return "Unknown";
+    }
+}
+
+const char* message_box_button_to_string(MessageBoxButton button) {
+    switch (button) {
+        case MessageBoxButton::None:   return "None";
+        case MessageBoxButton::Ok:     return "Ok";
+        case MessageBoxButton::Cancel: return "Cancel";
+        case MessageBoxButton::Yes:    return "Yes";
+        case MessageBoxButton::No:     return "No";
+        case MessageBoxButton::Retry:  return "Retry";
+        case MessageBoxButton::Abort:  return "Abort";
+        case MessageBoxButton::Ignore: return "Ignore";
+        default:                       return "Unknown";
+    }
+}
+
 } // namespace window
