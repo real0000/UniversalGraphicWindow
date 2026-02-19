@@ -477,7 +477,23 @@ endif()
 #=============================================================================
 
 if(WINDOW_ENABLE_GUI)
-    list(APPEND WINDOW_SOURCES gui/gui.cpp)
+    list(APPEND WINDOW_SOURCES
+        gui/gui.cpp
+        gui/gui_context.cpp
+        gui/gui_label.cpp
+        gui/gui_controls.cpp
+        gui/gui_scroll.cpp
+        gui/gui_list.cpp
+        gui/gui_tree.cpp
+        gui/gui_tab.cpp
+        gui/gui_property.cpp
+        gui/gui_dialog.cpp
+        gui/gui_menu.cpp
+        gui/gui_toolbar.cpp
+        gui/gui_page.cpp
+        gui/gui_panel.cpp
+        gui/gui_animation.cpp
+    )
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_GUI)
     message(STATUS "GUI support enabled")
 else()
@@ -712,6 +728,13 @@ if(WINDOW_BUILD_TESTS)
     target_link_libraries(test_window PRIVATE window)
 
     add_test(NAME test_window COMMAND test_window)
+
+    # GUI unit tests (headless, no display required)
+    if(WINDOW_ENABLE_GUI)
+        add_executable(test_gui tests/test_gui.cpp)
+        target_link_libraries(test_gui PRIVATE window)
+        add_test(NAME test_gui COMMAND test_gui)
+    endif()
 endif()
 
 #=============================================================================
@@ -727,6 +750,7 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
     if(WINDOW_ENABLE_OPENGL AND "WINDOW_SUPPORT_OPENGL" IN_LIST WINDOW_DEFINES)
         add_executable(example_opengl examples/opengl.cpp)
         target_link_libraries(example_opengl PRIVATE window)
+
     endif()
 
     # Vulkan example
@@ -785,6 +809,12 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
             add_executable(example_virtual_keyboard examples/virtual_keyboard.cpp)
             target_link_libraries(example_virtual_keyboard PRIVATE window)
         endif()
+    endif()
+
+    # GUI example (headless, no display required)
+    if(WINDOW_ENABLE_GUI)
+        add_executable(example_gui examples/gui.cpp)
+        target_link_libraries(example_gui PRIVATE window)
     endif()
 
     # Metal example (macOS only)

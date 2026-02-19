@@ -306,6 +306,21 @@ public:
     virtual int get_visible_dock_panels(DockPanelRenderInfo* out_items, int max_items) const = 0;
 };
 
+// ============================================================================
+// String Conversion Functions
+// ============================================================================
+
+const char* split_orientation_to_string(SplitOrientation orientation);
+const char* dock_zone_to_string(DockZone zone);
+const char* dock_panel_state_to_string(DockPanelState state);
+
+// ============================================================================
+// Factory Functions
+// ============================================================================
+
+IGuiSplitPanel* create_split_panel(SplitOrientation orientation);
+IGuiDockPanel* create_dock_panel();
+
 } // namespace gui
 } // namespace window
 

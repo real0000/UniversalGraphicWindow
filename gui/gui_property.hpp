@@ -81,6 +81,10 @@ struct PropertyGridRenderInfo {
     int visible_row_count = 0;
     int selected_property = -1;
     float scroll_offset_y = 0.0f;
+
+    // Editing state
+    int editing_property = -1;      // property_id being edited, -1 = none
+    const char* edit_buffer = "";   // Current text being edited
 };
 
 class IPropertyGridEventHandler {

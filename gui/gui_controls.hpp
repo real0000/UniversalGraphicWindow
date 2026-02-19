@@ -343,6 +343,10 @@ struct ColorPickerRenderInfo {
     bool show_alpha = true;
     bool show_hex_input = true;
     bool show_preview = true;
+
+    // Editing state for RGBA input fields
+    int editing_channel = -1;       // -1=none, 0=R, 1=G, 2=B, 3=A
+    const char* edit_buffer = "";   // Current text being edited
 };
 
 class IColorPickerEventHandler {
