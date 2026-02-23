@@ -55,8 +55,33 @@ public:
     void get_selected_items(std::vector<int>& out) const override { out=multi_sel_; }
     void set_selected_items(const std::vector<int>& ids) override { multi_sel_=ids; }
     void clear_selection() override { selected_=-1; multi_sel_.clear(); }
-    void scroll_to_item(int) override {}
-    void ensure_item_visible(int) override {}
+    float get_scroll_offset() const override { return scroll_y_; }
+    void set_scroll_offset(float offset) override {
+        float max_scroll = get_total_content_height() - math::box_height(base_.get_bounds());
+        if (max_scroll < 0) max_scroll = 0;
+        scroll_y_ = std::max(0.0f, std::min(offset, max_scroll));
+    }
+    float get_total_content_height() const override {
+        return (float)items_.size() * style_.row_height;
+    }
+    bool handle_mouse_scroll(float, float dy) override {
+        float step = style_.row_height * 2;
+        set_scroll_offset(scroll_y_ - dy * step);
+        return true;
+    }
+    void scroll_to_item(int id) override {
+        int i = find_idx(id);
+        if (i >= 0) set_scroll_offset((float)i * style_.row_height);
+    }
+    void ensure_item_visible(int id) override {
+        int i = find_idx(id);
+        if (i < 0) return;
+        float item_top = (float)i * style_.row_height;
+        float item_bot = item_top + style_.row_height;
+        float view_h = math::box_height(base_.get_bounds());
+        if (item_top < scroll_y_) set_scroll_offset(item_top);
+        else if (item_bot > scroll_y_ + view_h) set_scroll_offset(item_bot - view_h);
+    }
     void set_item_user_data(int id,void* d) override { int i=find_idx(id); if(i>=0) items_[i].user_data=d; }
     void* get_item_user_data(int id) const override { int i=find_idx(id); return i>=0?items_[i].user_data:nullptr; }
     void sort_items(bool asc) override {

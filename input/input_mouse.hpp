@@ -51,22 +51,12 @@ struct MouseState {
     bool buttons[MAX_MOUSE_BUTTONS] = {};  // Button states (indexed by MouseButton)
     int x = 0;                              // Current X position
     int y = 0;                              // Current Y position
-    int last_x = 0;                         // Previous X position
-    int last_y = 0;                         // Previous Y position
-    float scroll_x = 0.0f;                  // Accumulated horizontal scroll
-    float scroll_y = 0.0f;                  // Accumulated vertical scroll
 
     // Check if any button is pressed
     bool any_button_down() const;
 
-    // Get delta movement since last update
-    void get_delta(int* dx, int* dy) const;
-
-    // Update position (also updates last position)
+    // Update position
     void set_position(int new_x, int new_y);
-
-    // Reset scroll accumulators
-    void reset_scroll();
 
     // Reset all state
     void reset();

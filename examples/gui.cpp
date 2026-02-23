@@ -1,8 +1,11 @@
 /*
- * gui.cpp - Visual GUI Widget Showcase (OpenGL)
+ * gui.cpp - Complex Widget Tree Showcase (OpenGL)
  *
- * Opens a window and renders all GUI widget types with native font rendering.
- * Demonstrates mouse interaction with hover/click state changes.
+ * Demonstrates a deeply nested GUI widget tree with:
+ *   - Nested split panels (sidebar | center, tree / propgrid, tabs / output)
+ *   - Tab control with real content in each tab (editor, controls, color picker)
+ *   - IDE-like layout: menubar, toolbar, sidebar, editor area, output panel
+ *   - Context menus, modal dialogs, scrollbars
  */
 
 #include "window.hpp"
@@ -206,6 +209,17 @@ public:
 
 static QuadRenderer* g_renderer = nullptr;
 static float g_time = 0; // for cursor blink
+static int g_window_h = 720; // for glScissor Y-flip
+
+// Scissor helper: enable scissor rect (top-left origin, flipped for OpenGL)
+static void push_scissor(float sx, float sy, float sw, float sh) {
+    glEnable(GL_SCISSOR_TEST);
+    int gl_y = g_window_h - (int)(sy + sh);
+    glScissor((int)sx, gl_y, (int)sw, (int)sh);
+}
+static void pop_scissor() {
+    glDisable(GL_SCISSOR_TEST);
+}
 
 // ============================================================================
 // Drawing Helpers (delegate to QuadRenderer)
@@ -372,35 +386,45 @@ static void render_button(IGuiButton* btn) {
             break;
     }
 
-    // Background
-    draw_rect_v4(px, py, pw, ph, bg_color);
+    bool is_radio = btn->get_button_type() == ButtonType::Radio;
+    bool is_check = btn->get_button_type() == ButtonType::Checkbox;
 
-    // Border
-    draw_rect_outline(px, py, pw, ph, s.border_color.x, s.border_color.y, s.border_color.z);
+    if (is_radio || is_check) {
+        // Radio/Checkbox: no rectangular background — only indicator + text
 
-    // Focus border
-    if (btn->has_focus()) {
-        draw_rect_outline(px - 1, py - 1, pw + 2, ph + 2,
-                          s.focus_border_color.x, s.focus_border_color.y,
-                          s.focus_border_color.z);
-    }
-
-    // Checkbox indicator
-    if (btn->get_button_type() == ButtonType::Checkbox) {
-        float cx = px + 4, cy = py + ph/2 - 6;
-        draw_rect_outline(cx, cy, 12, 12, s.text_color.x, s.text_color.y, s.text_color.z);
-        if (btn->is_checked()) {
-            draw_rect(cx + 3, cy + 3, 6, 6, s.checked_color.x, s.checked_color.y, s.checked_color.z);
+        // Focus indicator (dotted-style outline around whole widget)
+        if (btn->has_focus()) {
+            draw_rect_outline(px, py, pw, ph,
+                              s.focus_border_color.x, s.focus_border_color.y,
+                              s.focus_border_color.z);
         }
-    }
 
-    // Radio indicator
-    if (btn->get_button_type() == ButtonType::Radio) {
-        float cx = px + 10, cy = py + ph/2;
-        draw_circle(cx, cy, 6, s.border_color.x, s.border_color.y, s.border_color.z);
-        draw_circle(cx, cy, 5, bg_color.x, bg_color.y, bg_color.z);
-        if (btn->is_checked()) {
-            draw_circle(cx, cy, 3, s.checked_color.x, s.checked_color.y, s.checked_color.z);
+        if (is_check) {
+            float bx = px + 4, by = py + ph/2 - 6;
+            // Checkbox box background
+            draw_rect(bx, by, 12, 12, s.background_color.x, s.background_color.y, s.background_color.z);
+            draw_rect_outline(bx, by, 12, 12, s.border_color.x, s.border_color.y, s.border_color.z);
+            if (btn->is_checked()) {
+                draw_rect(bx + 3, by + 3, 6, 6, s.checked_color.x, s.checked_color.y, s.checked_color.z);
+            }
+        } else {
+            // Radio circle
+            float rcx = px + 10, rcy = py + ph/2;
+            draw_circle(rcx, rcy, 6, s.border_color.x, s.border_color.y, s.border_color.z);
+            draw_circle(rcx, rcy, 5, s.background_color.x, s.background_color.y, s.background_color.z);
+            if (btn->is_checked()) {
+                draw_circle(rcx, rcy, 3, s.checked_color.x, s.checked_color.y, s.checked_color.z);
+            }
+        }
+    } else {
+        // Normal/Toggle button: full rectangular background and border
+        draw_rect_v4(px, py, pw, ph, bg_color);
+        draw_rect_outline(px, py, pw, ph, s.border_color.x, s.border_color.y, s.border_color.z);
+
+        if (btn->has_focus()) {
+            draw_rect_outline(px - 1, py - 1, pw + 2, ph + 2,
+                              s.focus_border_color.x, s.focus_border_color.y,
+                              s.focus_border_color.z);
         }
     }
 
@@ -468,20 +492,84 @@ static void render_progress_bar(IGuiProgressBar* prog) {
     }
 }
 
+// Scrollbar constants
+static const float SB_WIDTH = 10.0f;    // Scrollbar track width (wider for easier clicking)
+static const float SB_MARGIN = 1.0f;    // Margin from widget edge
+
+// Scrollbar hit-test: returns true if pos is in the scrollbar region of a widget
+static bool scrollbar_hit_test(const Box& widget_bounds, float content_h, const Vec2& pos) {
+    float bx = x(box_min(widget_bounds)), by = y(box_min(widget_bounds));
+    float bw = box_width(widget_bounds), bh = box_height(widget_bounds);
+    if (content_h <= bh) return false;  // No scrollbar needed
+    float sb_x = bx + bw - SB_WIDTH - SB_MARGIN;
+    return x(pos) >= sb_x && x(pos) <= bx + bw
+        && y(pos) >= by && y(pos) <= by + bh;
+}
+
+// Compute scroll offset from mouse Y position on the scrollbar track
+static float scrollbar_offset_from_mouse(const Box& widget_bounds, float content_h, float mouse_y) {
+    float by = y(box_min(widget_bounds));
+    float bh = box_height(widget_bounds);
+    float max_scroll = content_h - bh;
+    if (max_scroll <= 0) return 0;
+    float thumb_ratio = bh / content_h;
+    float thumb_h = bh * thumb_ratio;
+    if (thumb_h < 16) thumb_h = 16;
+    float track_range = bh - thumb_h;
+    if (track_range <= 0) return 0;
+    float rel_y = mouse_y - by - thumb_h * 0.5f;  // Center thumb on click
+    float ratio = rel_y / track_range;
+    if (ratio < 0) ratio = 0;
+    if (ratio > 1) ratio = 1;
+    return ratio * max_scroll;
+}
+
+// Scrollbar drag state
+enum class ScrollDragTarget { None, TreeView, PropGrid, ListBox, EditBox, OutputEditBox };
+static ScrollDragTarget g_scroll_drag = ScrollDragTarget::None;
+
+// Auto scrollbar: draw scrollbar track+thumb on right edge when content overflows
+static void draw_auto_scrollbar(float bx, float by, float bw, float bh,
+                                  float scroll_offset, float content_h, float view_h,
+                                  bool dragging = false) {
+    if (content_h <= view_h) return;
+    float sb_w = SB_WIDTH;
+    float sb_x = bx + bw - sb_w - SB_MARGIN;
+    draw_rect(sb_x, by, sb_w, bh, 0.12f, 0.12f, 0.13f, 0.6f);
+    float thumb_ratio = view_h / content_h;
+    float thumb_h = bh * thumb_ratio;
+    if (thumb_h < 16) thumb_h = 16;
+    float track_range = bh - thumb_h;
+    float max_scroll = content_h - view_h;
+    float pos_ratio = (max_scroll > 0) ? scroll_offset / max_scroll : 0;
+    float thumb_y = by + track_range * pos_ratio;
+    // Highlight thumb when dragging
+    if (dragging)
+        draw_rect(sb_x, thumb_y, sb_w, thumb_h, 0.6f, 0.6f, 0.65f, 0.9f);
+    else
+        draw_rect(sb_x, thumb_y, sb_w, thumb_h, 0.4f, 0.4f, 0.42f, 0.7f);
+}
+
 static void render_listbox(IGuiListBox* listbox) {
     auto b = listbox->get_bounds();
     float bx = x(box_min(b)), by = y(box_min(b));
     float bw = box_width(b), bh = box_height(b);
 
     const auto& s = listbox->get_list_box_style();
+    float scroll_y = listbox->get_scroll_offset();
+    float content_h = listbox->get_total_content_height();
 
     draw_rect_v4(bx, by, bw, bh, s.row_background);
+
+    push_scissor(bx, by, bw, bh);
 
     int count = listbox->get_item_count();
     int sel = listbox->get_selected_item();
     float row_h = s.row_height;
-    for (int i = 0; i < count && (i * row_h) < bh; i++) {
-        float ry = by + i * row_h;
+    for (int i = 0; i < count; i++) {
+        float ry = by + i * row_h - scroll_y;
+        if (ry + row_h < by || ry > by + bh) continue;
+
         Vec4 row_bg = (i == sel) ? s.selected_background
                     : (i % 2 == 0) ? s.row_background : s.row_alt_background;
         draw_rect_v4(bx, ry, bw, row_h, row_bg);
@@ -492,6 +580,11 @@ static void render_listbox(IGuiListBox* listbox) {
             draw_text_vc(item_text, bx + s.item_padding, ry, row_h, text_col);
         }
     }
+
+    draw_auto_scrollbar(bx, by, bw, bh, scroll_y, content_h, bh,
+                        g_scroll_drag == ScrollDragTarget::ListBox);
+
+    pop_scissor();
 
     draw_rect_outline(bx, by, bw, bh, 0.25f, 0.25f, 0.27f);
 }
@@ -551,25 +644,40 @@ static void render_treeview(IGuiTreeView* tree) {
     float bw = box_width(b), bh = box_height(b);
 
     const auto& s = tree->get_tree_view_style();
+    float scroll_y = tree->get_scroll_offset();
+    float content_h = tree->get_total_content_height();
 
     draw_rect_v4(bx, by, bw, bh, s.row_background);
 
-    TreeNodeRenderItem items[20];
-    int count = tree->get_visible_tree_items(items, 20);
+    // Scissor clip scrollable content
+    push_scissor(bx, by, bw, bh);
+
+    TreeNodeRenderItem items[64];
+    int count = tree->get_visible_tree_items(items, 64);
     float row_h = s.row_height;
 
-    for (int i = 0; i < count && (i * row_h) < bh; i++) {
-        float ry = by + i * row_h;
+    for (int i = 0; i < count; i++) {
+        float ry = by + i * row_h - scroll_y;
+        if (ry + row_h < by || ry > by + bh) continue;
+
         Vec4 row_bg = items[i].selected ? s.selected_background
                     : items[i].hovered ? s.hover_background : s.row_background;
         draw_rect_v4(bx, ry, bw, row_h, row_bg);
 
         float indent = bx + items[i].depth * s.indent_width + 4;
 
-        // Expand/collapse indicator
+        // Expand/collapse indicator (arrow shape)
         if (items[i].has_children) {
             float ex = indent, ey = ry + row_h/2 - 3;
-            draw_rect(ex, ey, 6, 6, s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.8f);
+            if (items[i].expanded) {
+                draw_rect(ex, ey, 6, 2, s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.8f);
+                draw_rect(ex+1, ey+2, 4, 2, s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.8f);
+                draw_rect(ex+2, ey+4, 2, 2, s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.8f);
+            } else {
+                draw_rect(ex, ey, 2, 6, s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.8f);
+                draw_rect(ex+2, ey+1, 2, 4, s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.8f);
+                draw_rect(ex+4, ey+2, 2, 2, s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.8f);
+            }
         }
 
         // Icon placeholder
@@ -582,6 +690,12 @@ static void render_treeview(IGuiTreeView* tree) {
             draw_text_vc(items[i].text, indent + 24, ry, row_h, text_col, g_font_small);
         }
     }
+
+    // Auto-scrollbar (inside scissor so it clips too)
+    draw_auto_scrollbar(bx, by, bw, bh, scroll_y, content_h, bh,
+                        g_scroll_drag == ScrollDragTarget::TreeView);
+
+    pop_scissor();
 
     draw_rect_outline(bx, by, bw, bh, 0.25f, 0.25f, 0.27f);
 }
@@ -657,22 +771,31 @@ static void render_propertygrid(IGuiPropertyGrid* pg) {
     const auto& s = pg->get_property_grid_style();
     float row_h = pg->get_row_height();
     float name_w = pg->get_name_column_width();
+    float scroll_y = pg->get_scroll_offset();
+    float content_h = pg->get_total_content_height();
 
     PropertyGridRenderInfo pgri;
     pg->get_property_grid_render_info(&pgri);
 
     draw_rect_v4(bx, by, bw, bh, s.row_background);
 
-    PropertyRenderItem items[20];
-    int count = pg->get_visible_property_items(items, 20);
+    // Scissor clip scrollable content
+    push_scissor(bx, by, bw, bh);
 
-    for (int i = 0; i < count && (i * row_h) < bh; i++) {
-        float ry = by + i * row_h;
+    PropertyRenderItem items[32];
+    int count = pg->get_visible_property_items(items, 32);
+
+    for (int i = 0; i < count; i++) {
+        float ry = by + i * row_h - scroll_y;
+        if (ry + row_h < by || ry > by + bh) continue;
 
         if (items[i].is_category_header) {
             draw_rect_v4(bx, ry, bw, row_h, s.category_background);
             if (items[i].name && items[i].name[0]) {
-                draw_text_vc(items[i].name, bx + 8, ry, row_h, s.category_text_color, g_font_small);
+                // Expand/collapse indicator for category
+                const char* arrow = items[i].expanded ? "v" : ">";
+                draw_text_vc(arrow, bx + 2, ry, row_h, s.category_text_color, g_font_small);
+                draw_text_vc(items[i].name, bx + 14, ry, row_h, s.category_text_color, g_font_small);
             }
         } else {
             Vec4 row_bg = items[i].selected ? s.selected_background
@@ -694,7 +817,6 @@ static void render_propertygrid(IGuiPropertyGrid* pg) {
             float val_x = bx + name_w + 2;
             float val_w = bw - name_w - 2;
             if (editing) {
-                // Edit mode: show input background, edit buffer, and cursor
                 draw_rect(val_x, ry + 1, val_w, row_h - 2, 0.10f, 0.10f, 0.10f);
                 draw_rect_outline(val_x, ry + 1, val_w, row_h - 2, 0.0f, 0.48f, 0.8f);
                 draw_text_vc(pgri.edit_buffer, val_x + 6, ry, row_h, s.value_text_color, g_font_small);
@@ -712,7 +834,13 @@ static void render_propertygrid(IGuiPropertyGrid* pg) {
         }
     }
 
-    // Focus border
+    // Auto-scrollbar (inside scissor so it clips too)
+    draw_auto_scrollbar(bx, by, bw, bh, scroll_y, content_h, bh,
+                        g_scroll_drag == ScrollDragTarget::PropGrid);
+
+    pop_scissor();
+
+    // Focus border (outside scissor so it's not clipped)
     if (pg->has_focus()) {
         draw_rect_outline(bx - 1, by - 1, bw + 2, bh + 2, 0.0f, 0.48f, 0.8f);
     }
@@ -1133,7 +1261,7 @@ static TextPosition editbox_position_from_point(IGuiEditBox* editbox, const Vec2
     return {line, col};
 }
 
-static void render_editbox(IGuiEditBox* editbox) {
+static void render_editbox(IGuiEditBox* editbox, bool sb_dragging = false) {
     auto b = editbox->get_bounds();
     float bx = x(box_min(b)), by = y(box_min(b));
     float bw = box_width(b), bh = box_height(b);
@@ -1150,7 +1278,10 @@ static void render_editbox(IGuiEditBox* editbox) {
 
     float line_h = s.font_size * s.line_height;
     int line_count = editbox->get_line_count();
+    int first_vis = editbox->get_first_visible_line();
     float text_x = bx + (editbox->is_line_numbers_visible() ? s.gutter_width + s.padding : s.padding);
+
+    float content_h = line_count * line_h;
 
     // Get selection range (normalized so sel_s <= sel_e)
     TextRange sel_range = editbox->get_selection();
@@ -1159,8 +1290,14 @@ static void render_editbox(IGuiEditBox* editbox) {
         std::swap(sel_s, sel_e);
     bool has_sel = editbox->has_selection();
 
-    for (int i = 0; i < line_count && (i * line_h) < bh; i++) {
-        float ly = by + i * line_h;
+    push_scissor(bx, by, bw, bh);
+
+    int vis_count = (line_h > 0) ? (int)(bh / line_h) + 2 : line_count;
+    int end_line = std::min(first_vis + vis_count, line_count);
+
+    for (int i = first_vis; i < end_line; i++) {
+        float ly = by + (i - first_vis) * line_h;
+        if (ly > by + bh) break;
 
         // Line number
         if (editbox->is_line_numbers_visible()) {
@@ -1178,7 +1315,7 @@ static void render_editbox(IGuiEditBox* editbox) {
             int col_end = (i == sel_e.line) ? sel_e.column : line_len;
             float sx = text_x + measure_text_width_n(line_text ? line_text : "", col_start, g_font_small);
             float ex = text_x + measure_text_width_n(line_text ? line_text : "", col_end, g_font_small);
-            if (col_end == line_len && i != sel_e.line) ex += 6; // extend past line end for multi-line
+            if (col_end == line_len && i != sel_e.line) ex += 6;
             draw_rect_v4(sx, ly, ex - sx, line_h, s.selection_color);
         }
 
@@ -1194,6 +1331,12 @@ static void render_editbox(IGuiEditBox* editbox) {
             draw_rect(cx, ly + 2, 1, line_h - 4, s.text_color.x, s.text_color.y, s.text_color.z);
         }
     }
+
+    // Scrollbar
+    float scroll_offset = first_vis * line_h;
+    draw_auto_scrollbar(bx, by, bw, bh, scroll_offset, content_h, bh, sb_dragging);
+
+    pop_scissor();
 
     // Focus border
     if (editbox->has_focus()) {
@@ -1413,13 +1556,53 @@ static void render_widget(IGuiWidget* w) {
 }
 
 // ============================================================================
-// Widget Setup
+// Widget Setup - Complex Nested Widget Tree
 // ============================================================================
+//
+// Layout:
+//   root
+//   +-- menubar
+//   +-- toolbar
+//   +-- main_split (Horizontal: sidebar | center_area)
+//   |   +-- sidebar_split (Vertical: tree | propgrid)
+//   |   |   +-- tree
+//   |   |   +-- propgrid
+//   |   +-- center_split (Vertical: tabs | bottom_split)
+//   |       +-- tabs (3 tabs, each with real content)
+//   |       |   +-- tab "Editor": editbox
+//   |       |   +-- tab "Controls": buttons, sliders, progress in a panel
+//   |       |   +-- tab "Visuals": color picker + image
+//   |       +-- bottom_split (Horizontal: listbox+combo | output_editbox)
+//   |           +-- list_panel (listbox + combobox)
+//   |           +-- output_editbox
+//   +-- statusbar
+//   +-- dialog (overlay)
+//   +-- context menus (overlay)
+//
 
 struct GuiWidgets {
+    // Chrome
     IGuiMenuBar* menubar;
     IGuiToolbar* toolbar;
     IGuiStatusBar* statusbar;
+
+    // Main layout splits
+    IGuiSplitPanel* main_split;       // sidebar | center
+    IGuiSplitPanel* sidebar_split;    // tree / propgrid
+    IGuiSplitPanel* center_split;     // tabs / bottom
+    IGuiSplitPanel* bottom_split;     // list_panel | output
+
+    // Sidebar
+    IGuiTreeView* tree;
+    IGuiPropertyGrid* propgrid;
+
+    // Tab control with content
+    IGuiTabControl* tabs;
+
+    // Tab "Editor" content
+    IGuiEditBox* editbox;
+
+    // Tab "Controls" content (panel with children)
     IGuiButton* btn_normal;
     IGuiButton* btn_toggle;
     IGuiButton* btn_check;
@@ -1427,25 +1610,29 @@ struct GuiWidgets {
     IGuiButton* radio2;
     IGuiLabel* label;
     IGuiTextInput* text_input;
-    IGuiEditBox* editbox;
     IGuiSlider* slider_h;
     IGuiSlider* slider_v;
     IGuiProgressBar* prog_det;
     IGuiProgressBar* prog_ind;
-    IGuiListBox* listbox;
-    IGuiComboBox* combo;
-    IGuiTreeView* tree;
-    IGuiTabControl* tabs;
-    IGuiScrollBar* scrollbar;
-    IGuiPropertyGrid* propgrid;
+
+    // Tab "Visuals" content
     IGuiColorPicker* picker;
     IGuiImage* image;
-    IGuiSplitPanel* split;
-    IGuiDockPanel* dock;
+
+    // Bottom panel
+    IGuiListBox* listbox;
+    IGuiComboBox* combo;
+    IGuiEditBox* output_editbox;
+    IGuiScrollBar* scrollbar;
+
+    // Overlays
     IGuiDialog* dialog;
     IGuiMenu* editbox_context_menu;
     IGuiMenu* tree_context_menu;
 };
+
+// Active tab index tracked for content layout
+static int g_active_tab = 0;
 
 static GuiWidgets setup_widgets(IGuiContext* ctx) {
     GuiWidgets w = {};
@@ -1466,14 +1653,27 @@ static GuiWidgets setup_widgets(IGuiContext* ctx) {
     IGuiMenu* edit_menu = ctx->create_menu();
     edit_menu->add_item("Undo", nullptr, "Ctrl+Z");
     edit_menu->add_item("Redo", nullptr, "Ctrl+Y");
+    edit_menu->add_separator();
+    edit_menu->add_item("Cut", nullptr, "Ctrl+X");
+    edit_menu->add_item("Copy", nullptr, "Ctrl+C");
+    edit_menu->add_item("Paste", nullptr, "Ctrl+V");
 
     IGuiMenu* view_menu = ctx->create_menu();
     view_menu->add_checkbox_item("Sidebar", true);
+    view_menu->add_checkbox_item("Output Panel", true);
     view_menu->add_checkbox_item("Status Bar", true);
+    view_menu->add_separator();
+    view_menu->add_radio_item("Theme: Dark", 1, true);
+    view_menu->add_radio_item("Theme: Light", 1, false);
+
+    IGuiMenu* help_menu = ctx->create_menu();
+    help_menu->add_item("Documentation", nullptr, "F1");
+    help_menu->add_item("About");
 
     w.menubar->add_menu("File", file_menu);
     w.menubar->add_menu("Edit", edit_menu);
     w.menubar->add_menu("View", view_menu);
+    w.menubar->add_menu("Help", help_menu);
     root->add_child(w.menubar);
 
     // ---- Toolbar ----
@@ -1484,9 +1684,13 @@ static GuiWidgets setup_widgets(IGuiContext* ctx) {
     w.toolbar->add_button("open", "Open");
     w.toolbar->add_button("save", "Save");
     w.toolbar->add_separator();
-    w.toolbar->add_toggle_button("bold", "Bold", false);
-    w.toolbar->add_toggle_button("italic", "Italic", false);
+    w.toolbar->add_button("undo", "Undo");
+    w.toolbar->add_button("redo", "Redo");
     w.toolbar->add_separator();
+    w.toolbar->add_toggle_button("bold", "B", false);
+    w.toolbar->add_toggle_button("italic", "I", false);
+    w.toolbar->add_separator();
+    w.toolbar->add_button("build", "Build");
     w.toolbar->add_button("run", "Run");
     root->add_child(w.toolbar);
 
@@ -1498,190 +1702,244 @@ static GuiWidgets setup_widgets(IGuiContext* ctx) {
     w.statusbar->add_panel("Ln 1, Col 1", StatusBarPanelSizeMode::Auto);
     w.statusbar->add_panel("UTF-8", StatusBarPanelSizeMode::Auto);
     w.statusbar->add_panel("Spaces: 4", StatusBarPanelSizeMode::Auto);
+    w.statusbar->add_panel("C++", StatusBarPanelSizeMode::Auto);
     root->add_child(w.statusbar);
 
-    float col1_x = 15, col2_x = 320, col3_x = 640;
-    float top_y = 68;
+    // ================================================================
+    // Main content area: main_split (sidebar | center)
+    // ================================================================
+    w.main_split = ctx->create_split_panel(SplitOrientation::Horizontal);
+    w.main_split->set_name("main_split");
+    w.main_split->set_split_ratio(0.22f);
+    w.main_split->set_first_min_size(150.0f);
+    w.main_split->set_second_min_size(400.0f);
+    root->add_child(w.main_split);
 
-    // ---- Column 1: Buttons, Label, TextInput, Slider, Progress ----
+    // ---- Sidebar: vertical split (tree / propgrid) ----
+    w.sidebar_split = ctx->create_split_panel(SplitOrientation::Vertical);
+    w.sidebar_split->set_name("sidebar_split");
+    w.sidebar_split->set_split_ratio(0.55f);
+    w.main_split->set_first_panel(w.sidebar_split);
 
+    // Tree view with deep hierarchy
+    w.tree = ctx->create_tree_view();
+    w.tree->set_name("tree");
+    {
+        int proj = w.tree->add_node(-1, "MyProject");
+        int src = w.tree->add_node(proj, "src");
+        int core = w.tree->add_node(src, "core");
+        w.tree->add_node(core, "engine.cpp");
+        w.tree->add_node(core, "engine.hpp");
+        w.tree->add_node(core, "renderer.cpp");
+        int ui = w.tree->add_node(src, "ui");
+        w.tree->add_node(ui, "widget.cpp");
+        w.tree->add_node(ui, "layout.cpp");
+        w.tree->add_node(ui, "style.cpp");
+        int util = w.tree->add_node(src, "util");
+        w.tree->add_node(util, "math.hpp");
+        w.tree->add_node(util, "string.hpp");
+        int inc = w.tree->add_node(proj, "include");
+        w.tree->add_node(inc, "app.hpp");
+        w.tree->add_node(inc, "config.hpp");
+        int res = w.tree->add_node(proj, "resources");
+        int tex = w.tree->add_node(res, "textures");
+        w.tree->add_node(tex, "logo.png");
+        w.tree->add_node(tex, "icons.png");
+        int shd = w.tree->add_node(res, "shaders");
+        w.tree->add_node(shd, "basic.vert");
+        w.tree->add_node(shd, "basic.frag");
+        w.tree->add_node(proj, "CMakeLists.txt");
+        w.tree->add_node(proj, "README.md");
+        w.tree->set_node_expanded(proj, true);
+        w.tree->set_node_expanded(src, true);
+        w.tree->set_node_expanded(core, true);
+        w.tree->set_node_expanded(res, true);
+    }
+    w.sidebar_split->set_first_panel(w.tree);
+
+    // Property grid
+    w.propgrid = ctx->create_property_grid();
+    w.propgrid->set_name("propgrid");
+    w.propgrid->set_name_column_width(120.0f);
+    {
+        int p1 = w.propgrid->add_property("Transform", "Position X", PropertyType::Float);
+        w.propgrid->set_float_value(p1, 128.0f);
+        int p2 = w.propgrid->add_property("Transform", "Position Y", PropertyType::Float);
+        w.propgrid->set_float_value(p2, 256.0f);
+        int p3 = w.propgrid->add_property("Transform", "Scale", PropertyType::Float);
+        w.propgrid->set_float_value(p3, 1.0f);
+        int p4 = w.propgrid->add_property("Transform", "Rotation", PropertyType::Range);
+        w.propgrid->set_range_limits(p4, 0, 360);
+        w.propgrid->set_float_value(p4, 45.0f);
+        int p5 = w.propgrid->add_property("Appearance", "Visible", PropertyType::Bool);
+        w.propgrid->set_bool_value(p5, true);
+        int p6 = w.propgrid->add_property("Appearance", "Opacity", PropertyType::Range);
+        w.propgrid->set_range_limits(p6, 0, 100);
+        w.propgrid->set_float_value(p6, 100.0f);
+        int p7 = w.propgrid->add_property("Appearance", "Color", PropertyType::Color);
+        w.propgrid->set_vec4_value(p7, Vec4(1.0f, 0.5f, 0.0f, 1.0f));
+        int p8 = w.propgrid->add_property("Appearance", "Name", PropertyType::String);
+        w.propgrid->set_string_value(p8, "Sprite01");
+        int p9 = w.propgrid->add_property("Physics", "Mass", PropertyType::Float);
+        w.propgrid->set_float_value(p9, 10.0f);
+        int p10 = w.propgrid->add_property("Physics", "Friction", PropertyType::Range);
+        w.propgrid->set_range_limits(p10, 0, 1);
+        w.propgrid->set_float_value(p10, 0.3f);
+    }
+    w.sidebar_split->set_second_panel(w.propgrid);
+
+    // ================================================================
+    // Center area: vertical split (tabs / bottom_panel)
+    // ================================================================
+    w.center_split = ctx->create_split_panel(SplitOrientation::Vertical);
+    w.center_split->set_name("center_split");
+    w.center_split->set_split_ratio(0.65f);
+    w.center_split->set_second_min_size(100.0f);
+    w.main_split->set_second_panel(w.center_split);
+
+    // ---- Tab control (top of center) ----
+    w.tabs = ctx->create_tab_control(TabPosition::Top);
+    w.tabs->set_name("tabs");
+    w.tabs->set_fixed_tab_width(90.0f);
+    w.tabs->add_tab("Editor");
+    w.tabs->add_tab("Controls");
+    w.tabs->add_tab("Visuals");
+    w.center_split->set_first_panel(w.tabs);
+
+    // Tab "Editor" content: editbox (fills tab content area)
+    w.editbox = ctx->create_editbox();
+    w.editbox->set_name("editbox");
+    w.editbox->set_text(
+        "#include <iostream>\n"
+        "#include \"engine.hpp\"\n"
+        "\n"
+        "int main() {\n"
+        "    Engine engine;\n"
+        "    engine.init(1280, 720);\n"
+        "\n"
+        "    while (engine.running()) {\n"
+        "        engine.poll_events();\n"
+        "        engine.update();\n"
+        "        engine.render();\n"
+        "    }\n"
+        "\n"
+        "    engine.shutdown();\n"
+        "    return 0;\n"
+        "}"
+    );
+    w.editbox->set_line_numbers_visible(true);
+
+    // Tab "Controls" content: buttons, sliders, progress bars
     w.btn_normal = ctx->create_button(ButtonType::Normal);
     w.btn_normal->set_name("btn_normal");
     w.btn_normal->set_text("Normal Button");
-    w.btn_normal->set_bounds(make_box(col1_x, top_y, 130, 28));
-    root->add_child(w.btn_normal);
 
     w.btn_toggle = ctx->create_button(ButtonType::Toggle);
     w.btn_toggle->set_name("btn_toggle");
     w.btn_toggle->set_text("Toggle");
-    w.btn_toggle->set_bounds(make_box(col1_x + 140, top_y, 80, 28));
-    root->add_child(w.btn_toggle);
 
     w.btn_check = ctx->create_button(ButtonType::Checkbox);
     w.btn_check->set_name("btn_check");
-    w.btn_check->set_text("Check Me");
+    w.btn_check->set_text("Enable Feature");
     w.btn_check->set_checked(true);
-    w.btn_check->set_bounds(make_box(col1_x, top_y + 36, 120, 24));
-    root->add_child(w.btn_check);
 
     w.radio1 = ctx->create_button(ButtonType::Radio);
     w.radio1->set_name("radio1");
-    w.radio1->set_text("Option A");
+    w.radio1->set_text("Mode A");
     w.radio1->set_radio_group(1);
     w.radio1->set_checked(true);
-    w.radio1->set_bounds(make_box(col1_x + 130, top_y + 36, 90, 24));
-    root->add_child(w.radio1);
 
     w.radio2 = ctx->create_button(ButtonType::Radio);
     w.radio2->set_name("radio2");
-    w.radio2->set_text("Option B");
+    w.radio2->set_text("Mode B");
     w.radio2->set_radio_group(1);
-    w.radio2->set_bounds(make_box(col1_x + 225, top_y + 36, 90, 24));
-    root->add_child(w.radio2);
 
-    w.label = ctx->create_label("Hello, GUI Widget System!");
+    w.label = ctx->create_label("Adjust parameters below:");
     w.label->set_name("label");
-    w.label->set_bounds(make_box(col1_x, top_y + 72, 280, 20));
-    root->add_child(w.label);
 
-    w.text_input = ctx->create_text_input("Type here...");
+    w.text_input = ctx->create_text_input("Search...");
     w.text_input->set_name("text_input");
-    w.text_input->set_bounds(make_box(col1_x, top_y + 100, 280, 24));
-    root->add_child(w.text_input);
 
     w.slider_h = ctx->create_slider(SliderOrientation::Horizontal);
     w.slider_h->set_name("slider_h");
     w.slider_h->set_range(0, 100);
     w.slider_h->set_value(65);
-    w.slider_h->set_bounds(make_box(col1_x, top_y + 136, 280, 20));
-    root->add_child(w.slider_h);
 
     w.slider_v = ctx->create_slider(SliderOrientation::Vertical);
     w.slider_v->set_name("slider_v");
     w.slider_v->set_range(0, 1);
     w.slider_v->set_value(0.7f);
-    w.slider_v->set_bounds(make_box(col1_x + 285, top_y + 68, 16, 120));
-    root->add_child(w.slider_v);
 
     w.prog_det = ctx->create_progress_bar(ProgressBarMode::Determinate);
     w.prog_det->set_name("prog_det");
     w.prog_det->set_value(0.72f);
-    w.prog_det->set_bounds(make_box(col1_x, top_y + 168, 280, 16));
-    root->add_child(w.prog_det);
 
     w.prog_ind = ctx->create_progress_bar(ProgressBarMode::Indeterminate);
     w.prog_ind->set_name("prog_ind");
-    w.prog_ind->set_bounds(make_box(col1_x, top_y + 192, 280, 10));
-    root->add_child(w.prog_ind);
 
-    // ---- Column 1 lower: EditBox ----
-    w.editbox = ctx->create_editbox();
-    w.editbox->set_name("editbox");
-    w.editbox->set_bounds(make_box(col1_x, top_y + 216, 290, 130));
-    w.editbox->set_text("Line 1: Hello World\nLine 2: Multi-line editor\nLine 3: With line numbers\nLine 4: And syntax highlighting\nLine 5: Scrollable content");
-    w.editbox->set_line_numbers_visible(true);
-    root->add_child(w.editbox);
+    // Tab "Visuals" content: color picker + image
+    w.picker = ctx->create_color_picker(ColorPickerMode::HSVSquare);
+    w.picker->set_name("picker");
+    w.picker->set_color(Vec4(0.2f, 0.6f, 1.0f, 1.0f));
+    w.picker->set_alpha_enabled(true);
 
-    // ---- Column 1 bottom: Image ----
     w.image = ctx->create_image("textures/logo.png");
     w.image->set_name("image");
-    w.image->set_bounds(make_box(col1_x, top_y + 356, 80, 80));
     w.image->set_tint(Vec4(0.4f, 0.7f, 1.0f, 0.9f));
-    root->add_child(w.image);
 
-    // ---- Column 2: ListBox, ComboBox, TreeView ----
+    // ---- Bottom panel: horizontal split (list | output) ----
+    w.bottom_split = ctx->create_split_panel(SplitOrientation::Horizontal);
+    w.bottom_split->set_name("bottom_split");
+    w.bottom_split->set_split_ratio(0.35f);
+    w.bottom_split->set_first_min_size(120.0f);
+    w.center_split->set_second_panel(w.bottom_split);
 
+    // Left of bottom: listbox + combo stacked
     w.listbox = ctx->create_list_box();
     w.listbox->set_name("listbox");
-    w.listbox->set_bounds(make_box(col2_x, top_y, 160, 140));
-    w.listbox->add_item("Apple");
-    w.listbox->add_item("Banana");
-    w.listbox->add_item("Cherry");
-    w.listbox->add_item("Date");
-    w.listbox->add_item("Elderberry");
-    w.listbox->set_selected_item(1);
-    root->add_child(w.listbox);
-
+    w.listbox->add_item("Build Started");
+    w.listbox->add_item("Compiling main.cpp");
+    w.listbox->add_item("Compiling engine.cpp");
+    w.listbox->add_item("Compiling renderer.cpp");
+    w.listbox->add_item("Compiling widget.cpp");
+    w.listbox->add_item("Linking...");
+    w.listbox->add_item("Build Succeeded");
+    w.listbox->set_selected_item(6);
+    // Note: combo is positioned inside the list panel area
     w.combo = ctx->create_combo_box();
     w.combo->set_name("combo");
-    w.combo->set_placeholder("Select...");
-    w.combo->set_bounds(make_box(col2_x + 170, top_y, 150, 26));
-    w.combo->add_item("Red");
-    w.combo->add_item("Green");
-    w.combo->add_item("Blue");
+    w.combo->set_placeholder("Filter...");
+    w.combo->add_item("All");
+    w.combo->add_item("Errors");
+    w.combo->add_item("Warnings");
+    w.combo->add_item("Info");
     w.combo->set_selected_item(0);
-    root->add_child(w.combo);
+    // We'll use listbox as the split panel content, combo overlaid
+    w.bottom_split->set_first_panel(w.listbox);
 
-    w.tree = ctx->create_tree_view();
-    w.tree->set_name("tree");
-    w.tree->set_bounds(make_box(col2_x, top_y + 150, 200, 180));
-    int rn = w.tree->add_node(-1, "Project");
-    int sn = w.tree->add_node(rn, "src");
-    w.tree->add_node(sn, "main.cpp");
-    w.tree->add_node(sn, "utils.cpp");
-    int in = w.tree->add_node(rn, "include");
-    w.tree->add_node(in, "app.hpp");
-    w.tree->add_node(rn, "CMakeLists.txt");
-    w.tree->set_node_expanded(rn, true);
-    w.tree->set_node_expanded(sn, true);
-    root->add_child(w.tree);
+    // Right of bottom: output editbox
+    w.output_editbox = ctx->create_editbox();
+    w.output_editbox->set_name("output_editbox");
+    w.output_editbox->set_text(
+        "[14:32:01] Build started...\n"
+        "[14:32:01] Compiling main.cpp\n"
+        "[14:32:02] Compiling engine.cpp\n"
+        "[14:32:02] Compiling renderer.cpp\n"
+        "[14:32:03] Compiling widget.cpp\n"
+        "[14:32:03] Linking output.exe\n"
+        "[14:32:04] Build succeeded (0 errors, 0 warnings)\n"
+    );
+    w.output_editbox->set_line_numbers_visible(false);
+    w.bottom_split->set_second_panel(w.output_editbox);
 
-    // ---- Column 2 lower: PropertyGrid ----
-    w.propgrid = ctx->create_property_grid();
-    w.propgrid->set_name("propgrid");
-    w.propgrid->set_bounds(make_box(col2_x, top_y + 340, 300, 180));
-    int p1 = w.propgrid->add_property("Transform", "Position X", PropertyType::Float);
-    w.propgrid->set_float_value(p1, 100.0f);
-    int p2 = w.propgrid->add_property("Transform", "Position Y", PropertyType::Float);
-    w.propgrid->set_float_value(p2, 200.0f);
-    int p3 = w.propgrid->add_property("Transform", "Rotation", PropertyType::Range);
-    w.propgrid->set_range_limits(p3, 0, 360);
-    w.propgrid->set_float_value(p3, 45.0f);
-    int p4 = w.propgrid->add_property("Appearance", "Visible", PropertyType::Bool);
-    w.propgrid->set_bool_value(p4, true);
-    int p5 = w.propgrid->add_property("Appearance", "Color", PropertyType::Color);
-    w.propgrid->set_vec4_value(p5, Vec4(1.0f, 0.5f, 0.0f, 1.0f));
-    root->add_child(w.propgrid);
-
-    // ---- Column 3: TabControl ----
-    w.tabs = ctx->create_tab_control(TabPosition::Top);
-    w.tabs->set_name("tabs");
-    w.tabs->set_bounds(make_box(col3_x, top_y, 300, 180));
-    w.tabs->set_fixed_tab_width(80.0f);
-    w.tabs->add_tab("General");
-    w.tabs->add_tab("Advanced");
-    w.tabs->add_tab("About");
-    root->add_child(w.tabs);
-
-    // ---- Column 3: ScrollBar ----
+    // Scrollbar (standalone, next to tabs)
     w.scrollbar = ctx->create_scroll_bar(ScrollBarOrientation::Vertical);
     w.scrollbar->set_name("scrollbar");
-    w.scrollbar->set_bounds(make_box(col3_x + 310, top_y, 14, 180));
     w.scrollbar->set_range(0, 100);
     w.scrollbar->set_value(30);
     w.scrollbar->set_page_size(25);
-    root->add_child(w.scrollbar);
 
-    // ---- Column 3 lower: ColorPicker ----
-    w.picker = ctx->create_color_picker(ColorPickerMode::HSVSquare);
-    w.picker->set_name("picker");
-    w.picker->set_bounds(make_box(col3_x, top_y + 190, 220, 280));
-    w.picker->set_color(Vec4(1.0f, 0.5f, 0.2f, 1.0f));
-    w.picker->set_alpha_enabled(true);
-    root->add_child(w.picker);
-
-    // ---- Column 3: SplitPanel ----
-    w.split = ctx->create_split_panel(SplitOrientation::Horizontal);
-    w.split->set_name("split");
-    w.split->set_bounds(make_box(col3_x, top_y + 480, 300, 100));
-    w.split->set_split_ratio(0.4f);
-    IGuiLabel* split_l = ctx->create_label("Left");
-    IGuiLabel* split_r = ctx->create_label("Right");
-    w.split->set_first_panel(split_l);
-    w.split->set_second_panel(split_r);
-    root->add_child(w.split);
-
-    // ---- EditBox Context Menu ----
+    // ---- Context Menus ----
     w.editbox_context_menu = ctx->create_menu();
     w.editbox_context_menu->set_name("editbox_context_menu");
     w.editbox_context_menu->set_bounds(make_box(0, 0, 180, 200));
@@ -1692,28 +1950,248 @@ static GuiWidgets setup_widgets(IGuiContext* ctx) {
     w.editbox_context_menu->add_item("Select All", nullptr, "Ctrl+A");
     w.editbox_context_menu->add_separator();
     w.editbox_context_menu->add_checkbox_item("Word Wrap", false);
+    w.editbox_context_menu->add_checkbox_item("Line Numbers", true);
 
-    // ---- TreeView Context Menu ----
     w.tree_context_menu = ctx->create_menu();
     w.tree_context_menu->set_name("tree_context_menu");
     w.tree_context_menu->set_bounds(make_box(0, 0, 180, 200));
     w.tree_context_menu->add_item("Expand All");
     w.tree_context_menu->add_item("Collapse All");
     w.tree_context_menu->add_separator();
-    w.tree_context_menu->add_item("Add Node");
-    w.tree_context_menu->add_item("Remove Node");
+    w.tree_context_menu->add_item("New File", nullptr, "Ctrl+N");
+    w.tree_context_menu->add_item("New Folder");
     w.tree_context_menu->add_separator();
     w.tree_context_menu->add_item("Rename", nullptr, "F2");
+    w.tree_context_menu->add_item("Delete", nullptr, "Del");
 
-    // ---- Dialog (shown on demand) ----
+
+    // ---- Dialog ----
     w.dialog = ctx->create_dialog("Save Changes?", DialogButtons::YesNoCancel);
     w.dialog->set_name("dialog");
     w.dialog->set_modal(true);
     w.dialog->set_draggable(true);
-    w.dialog->set_bounds(make_box(400, 240, 300, 160));
+    w.dialog->set_bounds(make_box(400, 240, 320, 160));
     w.dialog->show();
 
     return w;
+}
+
+// ============================================================================
+// Layout update - compute bounds for the nested widget tree
+// ============================================================================
+
+static void layout_widgets(GuiWidgets& w, int sw, int sh) {
+    float top = 58.0f;   // below menubar + toolbar
+    float bot = (float)sh - 24.0f; // above statusbar
+    float content_h = bot - top;
+    float content_w = (float)sw;
+
+    // Chrome
+    w.menubar->set_bounds(make_box(0, 0, (float)sw, 26));
+    w.toolbar->set_bounds(make_box(0, 26, (float)sw, 32));
+    w.statusbar->set_bounds(make_box(0, bot, (float)sw, 24));
+
+    // Main split fills content area
+    w.main_split->set_bounds(make_box(0, top, content_w, content_h));
+
+    // Compute split positions
+    float sidebar_w = content_w * w.main_split->get_split_ratio();
+    float center_w = content_w - sidebar_w - 4; // 4 = splitter
+    float center_x = sidebar_w + 4;
+
+    // Sidebar split
+    w.sidebar_split->set_bounds(make_box(0, top, sidebar_w, content_h));
+    float sidebar_top_h = content_h * w.sidebar_split->get_split_ratio();
+    float sidebar_bot_h = content_h - sidebar_top_h - 4;
+    w.tree->set_bounds(make_box(0, top, sidebar_w, sidebar_top_h));
+    w.propgrid->set_bounds(make_box(0, top + sidebar_top_h + 4, sidebar_w, sidebar_bot_h));
+
+    // Center split
+    w.center_split->set_bounds(make_box(center_x, top, center_w, content_h));
+    float tabs_h = content_h * w.center_split->get_split_ratio();
+    float bottom_h = content_h - tabs_h - 4;
+    float bottom_y = top + tabs_h + 4;
+
+    // Tabs
+    w.tabs->set_bounds(make_box(center_x, top, center_w - 14, tabs_h));
+    w.scrollbar->set_bounds(make_box(center_x + center_w - 14, top, 14, tabs_h));
+
+    // Tab content area (inside tabs, below tab bar)
+    float tab_bar_h = 30.0f;
+    float tc_x = center_x + 4;
+    float tc_y = top + tab_bar_h + 2;
+    float tc_w = center_w - 22; // minus scrollbar and padding
+    float tc_h = tabs_h - tab_bar_h - 6;
+
+    // Layout active tab content; hide inactive tab widgets with zero bounds
+    static const Box HIDDEN = make_box(0, 0, 0, 0);
+    g_active_tab = w.tabs->get_active_tab();
+
+    // Tab 0: Editor
+    if (g_active_tab == 0)
+        w.editbox->set_bounds(make_box(tc_x, tc_y, tc_w, tc_h));
+    else
+        w.editbox->set_bounds(HIDDEN);
+
+    // Tab 1: Controls
+    if (g_active_tab == 1) {
+        float cx = tc_x + 8, cy = tc_y + 4;
+        w.btn_normal->set_bounds(make_box(cx, cy, 130, 28));
+        w.btn_toggle->set_bounds(make_box(cx + 140, cy, 90, 28));
+        w.btn_check->set_bounds(make_box(cx, cy + 36, 140, 24));
+        w.radio1->set_bounds(make_box(cx + 150, cy + 36, 100, 24));
+        w.radio2->set_bounds(make_box(cx + 260, cy + 36, 100, 24));
+        w.label->set_bounds(make_box(cx, cy + 68, tc_w - 16, 20));
+        w.text_input->set_bounds(make_box(cx, cy + 94, tc_w * 0.6f, 24));
+        w.slider_h->set_bounds(make_box(cx, cy + 128, tc_w * 0.7f, 20));
+        w.slider_v->set_bounds(make_box(cx + tc_w * 0.7f + 16, cy + 68, 16, 80));
+        w.prog_det->set_bounds(make_box(cx, cy + 158, tc_w * 0.7f, 16));
+        w.prog_ind->set_bounds(make_box(cx, cy + 182, tc_w * 0.7f, 10));
+    } else {
+        w.btn_normal->set_bounds(HIDDEN);
+        w.btn_toggle->set_bounds(HIDDEN);
+        w.btn_check->set_bounds(HIDDEN);
+        w.radio1->set_bounds(HIDDEN);
+        w.radio2->set_bounds(HIDDEN);
+        w.label->set_bounds(HIDDEN);
+        w.text_input->set_bounds(HIDDEN);
+        w.slider_h->set_bounds(HIDDEN);
+        w.slider_v->set_bounds(HIDDEN);
+        w.prog_det->set_bounds(HIDDEN);
+        w.prog_ind->set_bounds(HIDDEN);
+    }
+
+    // Tab 2: Visuals
+    if (g_active_tab == 2) {
+        float picker_w = std::min(tc_w * 0.55f, 240.0f);
+        float picker_h = std::min(tc_h, 300.0f);
+        w.picker->set_bounds(make_box(tc_x + 4, tc_y + 4, picker_w, picker_h));
+        float img_x = tc_x + picker_w + 12;
+        float img_size = std::min(tc_w - picker_w - 20, tc_h - 8);
+        if (img_size < 40) img_size = 40;
+        w.image->set_bounds(make_box(img_x, tc_y + 4, img_size, img_size));
+    } else {
+        w.picker->set_bounds(HIDDEN);
+        w.image->set_bounds(HIDDEN);
+    }
+
+    // Bottom split
+    w.bottom_split->set_bounds(make_box(center_x, bottom_y, center_w, bottom_h));
+    float list_w = center_w * w.bottom_split->get_split_ratio();
+    float output_w = center_w - list_w - 4;
+    float output_x = center_x + list_w + 4;
+
+    w.listbox->set_bounds(make_box(center_x, bottom_y + 28, list_w, bottom_h - 28));
+    w.combo->set_bounds(make_box(center_x, bottom_y, list_w, 26));
+    w.output_editbox->set_bounds(make_box(output_x, bottom_y, output_w, bottom_h));
+}
+
+// ============================================================================
+// Scroll input - direct WM_MOUSEWHEEL interception via window subclass
+// ============================================================================
+
+#if defined(_WIN32)
+static float g_scroll_accum = 0;
+static WNDPROC g_orig_wndproc = nullptr;
+
+static LRESULT CALLBACK ScrollSubclassProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_MOUSEWHEEL) {
+        float delta = (float)GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
+        g_scroll_accum += delta;
+    }
+    return CallWindowProcW(g_orig_wndproc, hwnd, msg, wparam, lparam);
+}
+#endif
+
+// Forward mouse move to active tab's content widgets for hover state.
+static void dispatch_tab_content_mouse_move(GuiWidgets& w, const Vec2& pos) {
+    int tab = w.tabs->get_active_tab();
+    if (tab == 1) {
+        IGuiWidget* controls[] = {
+            w.btn_normal, w.btn_toggle, w.btn_check,
+            w.radio1, w.radio2, w.label, w.text_input,
+            w.slider_h, w.slider_v, w.prog_det, w.prog_ind
+        };
+        for (auto* c : controls) { if (c) c->handle_mouse_move(pos); }
+    } else if (tab == 2) {
+        IGuiWidget* visuals[] = { w.picker, w.image };
+        for (auto* c : visuals) { if (c) c->handle_mouse_move(pos); }
+    }
+    if (w.scrollbar) w.scrollbar->handle_mouse_move(pos);
+    if (w.combo) w.combo->handle_mouse_move(pos);
+}
+
+// Dispatch mouse button event to active tab's content widgets.
+// Returns true if any widget consumed it.
+static bool dispatch_tab_content_mouse(GuiWidgets& w, gui::MouseButton btn, bool pressed, const Vec2& pos) {
+    int tab = w.tabs->get_active_tab();
+    if (tab == 0) {
+        // Editor tab - editbox handled separately
+        return false;
+    } else if (tab == 1) {
+        // Controls tab
+        IGuiWidget* controls[] = {
+            w.btn_normal, w.btn_toggle, w.btn_check,
+            w.radio1, w.radio2, w.label, w.text_input,
+            w.slider_h, w.slider_v, w.prog_det, w.prog_ind
+        };
+        for (auto* c : controls) {
+            if (c && c->handle_mouse_button(btn, pressed, pos)) {
+                // Enforce radio group mutual exclusion (radios have no shared parent)
+                if (!pressed) {
+                    IGuiButton* radios[] = { w.radio1, w.radio2 };
+                    for (auto* r : radios) {
+                        if (r != c && r->is_checked()) {
+                            // If the clicked widget is a radio in the same group, uncheck others
+                            auto* clicked_btn = (c->get_type() == gui::WidgetType::Button)
+                                ? static_cast<IGuiButton*>(c) : nullptr;
+                            if (clicked_btn && clicked_btn->get_button_type() == gui::ButtonType::Radio
+                                && clicked_btn->get_radio_group() == r->get_radio_group()) {
+                                r->set_checked(false);
+                            }
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+    } else if (tab == 2) {
+        // Visuals tab
+        IGuiWidget* visuals[] = { w.picker, w.image };
+        for (auto* c : visuals) {
+            if (c && c->handle_mouse_button(btn, pressed, pos)) return true;
+        }
+    }
+    // Scrollbar and combo are always checked
+    if (w.scrollbar && w.scrollbar->handle_mouse_button(btn, pressed, pos)) return true;
+    if (w.combo && w.combo->handle_mouse_button(btn, pressed, pos)) return true;
+    return false;
+}
+
+// Editbox scroll helpers: convert between pixel offset and line index
+static float editbox_content_height(IGuiEditBox* eb) {
+    const auto& s = eb->get_editbox_style();
+    return eb->get_line_count() * s.font_size * s.line_height;
+}
+static void editbox_set_scroll_from_pixel(IGuiEditBox* eb, float pixel_offset) {
+    const auto& s = eb->get_editbox_style();
+    float line_h = s.font_size * s.line_height;
+    int line = (line_h > 0) ? (int)(pixel_offset / line_h) : 0;
+    eb->set_first_visible_line(line);
+}
+
+static void forward_scroll_to_widgets(GuiWidgets& widgets, float scroll_dy, const Vec2& mpos) {
+    if (scroll_dy == 0) return;
+    if (widgets.tree->hit_test(mpos))
+        widgets.tree->handle_mouse_scroll(0, scroll_dy);
+    else if (widgets.propgrid->hit_test(mpos))
+        widgets.propgrid->handle_mouse_scroll(0, scroll_dy);
+    else if (widgets.listbox->hit_test(mpos))
+        widgets.listbox->handle_mouse_scroll(0, scroll_dy);
+    else if (widgets.editbox->hit_test(mpos))
+        widgets.editbox->handle_mouse_scroll(0, scroll_dy);
+    else if (widgets.output_editbox->hit_test(mpos))
+        widgets.output_editbox->handle_mouse_scroll(0, scroll_dy);
 }
 
 // ============================================================================
@@ -1761,11 +2239,11 @@ public:
 // ============================================================================
 
 int main() {
-    printf("=== Visual GUI Widget Showcase ===\n");
+    printf("=== Complex Widget Tree Showcase ===\n");
 
     // Create OpenGL window
     Config config;
-    config.windows[0].title = "GUI Widget Showcase";
+    config.windows[0].title = "Complex Widget Tree";
     config.windows[0].width = 1280;
     config.windows[0].height = 720;
     config.backend = Backend::OpenGL;
@@ -1780,6 +2258,11 @@ int main() {
     Window* win = windows[0];
     Graphics* gfx = win->graphics();
     printf("Window created: %s (%s)\n", gfx->get_backend_name(), gfx->get_device_name());
+
+    // Install window subclass for direct WM_MOUSEWHEEL interception
+#if defined(_WIN32)
+    g_orig_wndproc = (WNDPROC)SetWindowLongPtrW((HWND)win->native_handle(), GWLP_WNDPROC, (LONG_PTR)ScrollSubclassProc);
+#endif
 
     // Initialize modern OpenGL renderer
     QuadRenderer renderer;
@@ -1881,6 +2364,7 @@ int main() {
     bool prev_left_down = false;
     bool prev_right_down = false;
     bool editbox_dragging = false;
+    IGuiEditBox* active_drag_editbox = nullptr;
     IGuiMenu* active_context_menu = nullptr;
     auto start_time = std::chrono::high_resolution_clock::now();
     float prev_time = 0;
@@ -1898,25 +2382,94 @@ int main() {
         // Get window size
         int sw, sh;
         win->get_size(&sw, &sh);
+        g_window_h = sh;
 
         // Update viewport on resize
         vp.bounds = make_box(0, 0, (float)sw, (float)sh);
         ctx->update_viewport(vp);
 
-        // Update full-width widgets to track window size
+        // Update nested layout for the entire widget tree
         root->set_bounds(make_box(0, 0, (float)sw, (float)sh));
-        widgets.menubar->set_bounds(make_box(0, 0, (float)sw, 26));
-        widgets.toolbar->set_bounds(make_box(0, 26, (float)sw, 32));
-        widgets.statusbar->set_bounds(make_box(0, (float)sh - 24, (float)sw, 24));
+        layout_widgets(widgets, sw, sh);
 
         // Forward mouse input
         int mx, my;
         win->get_mouse_position(&mx, &my);
         Vec2 mpos = vec2((float)mx, (float)my);
 
+        // Forward accumulated mouse scroll to widgets under cursor
+#if defined(_WIN32)
+        float scroll_dy = g_scroll_accum;
+        g_scroll_accum = 0;
+        forward_scroll_to_widgets(widgets, scroll_dy, mpos);
+#endif
+
         bool dialog_modal = widgets.dialog->is_open() && widgets.dialog->is_modal();
 
+        // Scrollbar drag handling (click and drag on scrollbar track/thumb)
         bool left_down = win->is_mouse_button_down(window::MouseButton::Left);
+        if (left_down && !dialog_modal) {
+            if (g_scroll_drag != ScrollDragTarget::None) {
+                // Continue dragging - update scroll offset from mouse position
+                if (g_scroll_drag == ScrollDragTarget::TreeView) {
+                    float content_h = widgets.tree->get_total_content_height();
+                    float offset = scrollbar_offset_from_mouse(widgets.tree->get_bounds(), content_h, y(mpos));
+                    widgets.tree->set_scroll_offset(offset);
+                } else if (g_scroll_drag == ScrollDragTarget::PropGrid) {
+                    float content_h = widgets.propgrid->get_total_content_height();
+                    float offset = scrollbar_offset_from_mouse(widgets.propgrid->get_bounds(), content_h, y(mpos));
+                    widgets.propgrid->set_scroll_offset(offset);
+                } else if (g_scroll_drag == ScrollDragTarget::ListBox) {
+                    float content_h = widgets.listbox->get_total_content_height();
+                    float offset = scrollbar_offset_from_mouse(widgets.listbox->get_bounds(), content_h, y(mpos));
+                    widgets.listbox->set_scroll_offset(offset);
+                } else if (g_scroll_drag == ScrollDragTarget::EditBox) {
+                    float content_h = editbox_content_height(widgets.editbox);
+                    float offset = scrollbar_offset_from_mouse(widgets.editbox->get_bounds(), content_h, y(mpos));
+                    editbox_set_scroll_from_pixel(widgets.editbox, offset);
+                } else if (g_scroll_drag == ScrollDragTarget::OutputEditBox) {
+                    float content_h = editbox_content_height(widgets.output_editbox);
+                    float offset = scrollbar_offset_from_mouse(widgets.output_editbox->get_bounds(), content_h, y(mpos));
+                    editbox_set_scroll_from_pixel(widgets.output_editbox, offset);
+                }
+            } else if (!prev_left_down) {
+                // Mouse just pressed - check if clicking on a scrollbar
+                float tree_content_h = widgets.tree->get_total_content_height();
+                float prop_content_h = widgets.propgrid->get_total_content_height();
+                float list_content_h = widgets.listbox->get_total_content_height();
+                float edit_content_h = editbox_content_height(widgets.editbox);
+                float out_content_h = editbox_content_height(widgets.output_editbox);
+                if (scrollbar_hit_test(widgets.tree->get_bounds(), tree_content_h, mpos)) {
+                    g_scroll_drag = ScrollDragTarget::TreeView;
+                    float offset = scrollbar_offset_from_mouse(widgets.tree->get_bounds(), tree_content_h, y(mpos));
+                    widgets.tree->set_scroll_offset(offset);
+                } else if (scrollbar_hit_test(widgets.propgrid->get_bounds(), prop_content_h, mpos)) {
+                    g_scroll_drag = ScrollDragTarget::PropGrid;
+                    float offset = scrollbar_offset_from_mouse(widgets.propgrid->get_bounds(), prop_content_h, y(mpos));
+                    widgets.propgrid->set_scroll_offset(offset);
+                } else if (scrollbar_hit_test(widgets.listbox->get_bounds(), list_content_h, mpos)) {
+                    g_scroll_drag = ScrollDragTarget::ListBox;
+                    float offset = scrollbar_offset_from_mouse(widgets.listbox->get_bounds(), list_content_h, y(mpos));
+                    widgets.listbox->set_scroll_offset(offset);
+                } else if (scrollbar_hit_test(widgets.editbox->get_bounds(), edit_content_h, mpos)) {
+                    g_scroll_drag = ScrollDragTarget::EditBox;
+                    float offset = scrollbar_offset_from_mouse(widgets.editbox->get_bounds(), edit_content_h, y(mpos));
+                    editbox_set_scroll_from_pixel(widgets.editbox, offset);
+                } else if (scrollbar_hit_test(widgets.output_editbox->get_bounds(), out_content_h, mpos)) {
+                    g_scroll_drag = ScrollDragTarget::OutputEditBox;
+                    float offset = scrollbar_offset_from_mouse(widgets.output_editbox->get_bounds(), out_content_h, y(mpos));
+                    editbox_set_scroll_from_pixel(widgets.output_editbox, offset);
+                }
+            }
+        }
+        if (!left_down) {
+            g_scroll_drag = ScrollDragTarget::None;
+        }
+
+        // Skip normal click handling if dragging a scrollbar
+        if (left_down && !prev_left_down && g_scroll_drag != ScrollDragTarget::None)
+            goto input_done;
+
         if (left_down && !prev_left_down) {
             if (dialog_modal) {
                 // When modal dialog is open, only handle dialog interactions
@@ -1974,10 +2527,30 @@ int main() {
                 }
                 // Handle menu bar clicks (including open dropdown) before root dispatch
                 bool menu_handled = widgets.menubar->handle_mouse_button(gui::MouseButton::Left, true, mpos);
-                if (!menu_handled)
-                    root->handle_mouse_button(gui::MouseButton::Left, true, mpos);
-                // Set focus on clicked widget
-                IGuiWidget* hit = root->find_widget_at(mpos);
+                if (!menu_handled) {
+                    // Dispatch to active tab content widgets first (they overlap main_split area)
+                    bool tab_handled = dispatch_tab_content_mouse(widgets, gui::MouseButton::Left, true, mpos);
+                    if (!tab_handled)
+                        root->handle_mouse_button(gui::MouseButton::Left, true, mpos);
+                }
+                // Set focus on clicked widget (check tab content widgets first)
+                IGuiWidget* hit = nullptr;
+                {
+                    int atab = widgets.tabs->get_active_tab();
+                    if (atab == 0 && widgets.editbox->hit_test(mpos)) hit = widgets.editbox;
+                    else if (atab == 1) {
+                        IGuiWidget* ctrls[] = {
+                            widgets.btn_normal, widgets.btn_toggle, widgets.btn_check,
+                            widgets.radio1, widgets.radio2, widgets.text_input,
+                            widgets.slider_h, widgets.slider_v
+                        };
+                        for (auto* c : ctrls) { if (c && c->hit_test(mpos)) { hit = c; break; } }
+                    } else if (atab == 2) {
+                        if (widgets.picker->hit_test(mpos)) hit = widgets.picker;
+                        else if (widgets.image->hit_test(mpos)) hit = widgets.image;
+                    }
+                    if (!hit) hit = root->find_widget_at(mpos);
+                }
                 if (hit && hit->is_focusable()) {
                     IGuiWidget* prev_focus = ctx->get_focused_widget();
                     if (prev_focus && prev_focus != hit) prev_focus->set_focus(false);
@@ -1989,32 +2562,44 @@ int main() {
                 }
             }
         }
-        if (!left_down && prev_left_down && !dialog_modal)
+        if (!left_down && prev_left_down && !dialog_modal) {
+            dispatch_tab_content_mouse(widgets, gui::MouseButton::Left, false, mpos);
             root->handle_mouse_button(gui::MouseButton::Left, false, mpos);
-        if (!dialog_modal)
-            root->handle_mouse_move(mpos);
-
-        // Editbox mouse click-to-cursor and drag-select
+        }
         if (!dialog_modal) {
-            if (left_down && !prev_left_down && widgets.editbox->hit_test(mpos)) {
-                // Click: set cursor and start selection
-                TextPosition pos = editbox_position_from_point(widgets.editbox, mpos);
-                widgets.editbox->set_cursor_position(pos);
-                widgets.editbox->clear_selection();
-                TextRange sel; sel.start = pos; sel.end = pos;
-                widgets.editbox->set_selection(sel);
-                editbox_dragging = true;
+            dispatch_tab_content_mouse_move(widgets, mpos);
+            root->handle_mouse_move(mpos);
+        }
+
+        // Editbox mouse click-to-cursor and drag-select (for all editboxes)
+        if (!dialog_modal) {
+            // Determine which editbox was clicked (if any)
+            IGuiEditBox* clicked_editbox = nullptr;
+            if (left_down && !prev_left_down) {
+                if (g_active_tab == 0 && widgets.editbox->hit_test(mpos))
+                    clicked_editbox = widgets.editbox;
+                else if (widgets.output_editbox->hit_test(mpos))
+                    clicked_editbox = widgets.output_editbox;
             }
-            if (left_down && editbox_dragging) {
-                // Drag: extend selection
-                TextPosition pos = editbox_position_from_point(widgets.editbox, mpos);
-                TextRange sel = widgets.editbox->get_selection();
+            if (clicked_editbox) {
+                TextPosition pos = editbox_position_from_point(clicked_editbox, mpos);
+                clicked_editbox->set_cursor_position(pos);
+                clicked_editbox->clear_selection();
+                TextRange sel; sel.start = pos; sel.end = pos;
+                clicked_editbox->set_selection(sel);
+                editbox_dragging = true;
+                active_drag_editbox = clicked_editbox;
+            }
+            if (left_down && editbox_dragging && active_drag_editbox) {
+                TextPosition pos = editbox_position_from_point(active_drag_editbox, mpos);
+                TextRange sel = active_drag_editbox->get_selection();
                 sel.end = pos;
-                widgets.editbox->set_selection(sel);
-                widgets.editbox->set_cursor_position(pos);
+                active_drag_editbox->set_selection(sel);
+                active_drag_editbox->set_cursor_position(pos);
             }
             if (!left_down) {
                 editbox_dragging = false;
+                active_drag_editbox = nullptr;
             }
         }
 
@@ -2025,7 +2610,8 @@ int main() {
         {
             bool right_down = win->is_mouse_button_down(window::MouseButton::Right);
             if (right_down && !prev_right_down && !dialog_modal) {
-                if (widgets.editbox->hit_test(mpos)) {
+                if ((g_active_tab == 0 && widgets.editbox->hit_test(mpos))
+                    || widgets.output_editbox->hit_test(mpos)) {
                     active_context_menu = widgets.editbox_context_menu;
                     active_context_menu->show_at(mpos);
                 } else if (widgets.tree->hit_test(mpos)) {
@@ -2055,37 +2641,56 @@ int main() {
         // Set mouse pos for menu hover rendering
         g_mouse_pos_for_menu = mpos;
 
-        // Render all widgets by type
+        // ---- Render nested widget tree ----
+
+        // Chrome (always rendered)
         render_menubar(widgets.menubar);
         render_toolbar(widgets.toolbar);
         render_statusbar(widgets.statusbar);
 
+        // Main split: sidebar | center
+        render_splitpanel(widgets.main_split);
 
-        // Column 1
-        render_button(widgets.btn_normal);
-        render_button(widgets.btn_toggle);
-        render_button(widgets.btn_check);
-        render_button(widgets.radio1);
-        render_button(widgets.radio2);
-        render_label(widgets.label);
-        render_textinput(widgets.text_input);
-        render_slider(widgets.slider_h);
-        render_slider(widgets.slider_v);
-        render_progress_bar(widgets.prog_det);
-        render_progress_bar(widgets.prog_ind);
-        render_editbox(widgets.editbox);
-        render_image(widgets.image);
-
-        // Column 2
-        render_listbox(widgets.listbox);
+        // Sidebar: tree / propgrid (nested inside main_split's left pane)
+        render_splitpanel(widgets.sidebar_split);
         render_treeview(widgets.tree);
         render_propertygrid(widgets.propgrid);
 
-        // Column 3
+        // Center: tabs / bottom (nested inside main_split's right pane)
+        render_splitpanel(widgets.center_split);
+
+        // Tab control + scrollbar
         render_tabcontrol(widgets.tabs);
         render_scrollbar(widgets.scrollbar);
-        render_colorpicker(widgets.picker);
-        render_splitpanel(widgets.split);
+
+        // Tab content (only render active tab's widgets)
+        switch (g_active_tab) {
+        case 0: // Editor tab
+            render_editbox(widgets.editbox, g_scroll_drag == ScrollDragTarget::EditBox);
+            break;
+        case 1: // Controls tab
+            render_button(widgets.btn_normal);
+            render_button(widgets.btn_toggle);
+            render_button(widgets.btn_check);
+            render_button(widgets.radio1);
+            render_button(widgets.radio2);
+            render_label(widgets.label);
+            render_textinput(widgets.text_input);
+            render_slider(widgets.slider_h);
+            render_slider(widgets.slider_v);
+            render_progress_bar(widgets.prog_det);
+            render_progress_bar(widgets.prog_ind);
+            break;
+        case 2: // Visuals tab
+            render_colorpicker(widgets.picker);
+            render_image(widgets.image);
+            break;
+        }
+
+        // Bottom panel: list+combo | output
+        render_splitpanel(widgets.bottom_split);
+        render_listbox(widgets.listbox);
+        render_editbox(widgets.output_editbox, g_scroll_drag == ScrollDragTarget::OutputEditBox);
 
         // Overlays (dropdown, menu, context menu, dialog)
         render_combobox(widgets.combo);

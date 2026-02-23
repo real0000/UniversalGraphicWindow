@@ -157,6 +157,11 @@ public:
     virtual int get_selected_property() const = 0;
     virtual void set_selected_property(int property_id) = 0;
 
+    // Scrolling
+    virtual float get_scroll_offset() const = 0;
+    virtual void set_scroll_offset(float offset) = 0;
+    virtual float get_total_content_height() const = 0;
+
     // Layout
     virtual float get_name_column_width() const = 0;
     virtual void set_name_column_width(float width) = 0;

@@ -112,6 +112,9 @@ public:
     virtual void clear_selection() = 0;
 
     // Scrolling
+    virtual float get_scroll_offset() const = 0;
+    virtual void set_scroll_offset(float offset) = 0;
+    virtual float get_total_content_height() const = 0;
     virtual void scroll_to_item(int item_id) = 0;
     virtual void ensure_item_visible(int item_id) = 0;
 

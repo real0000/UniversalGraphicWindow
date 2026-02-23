@@ -90,21 +90,9 @@ bool MouseState::any_button_down() const {
     return false;
 }
 
-void MouseState::get_delta(int* dx, int* dy) const {
-    if (dx) *dx = x - last_x;
-    if (dy) *dy = y - last_y;
-}
-
 void MouseState::set_position(int new_x, int new_y) {
-    last_x = x;
-    last_y = y;
     x = new_x;
     y = new_y;
-}
-
-void MouseState::reset_scroll() {
-    scroll_x = 0.0f;
-    scroll_y = 0.0f;
 }
 
 void MouseState::reset() {
@@ -113,10 +101,6 @@ void MouseState::reset() {
     }
     x = 0;
     y = 0;
-    last_x = 0;
-    last_y = 0;
-    scroll_x = 0.0f;
-    scroll_y = 0.0f;
 }
 
 //=============================================================================
@@ -368,9 +352,6 @@ void DefaultMouseDevice::inject_button_up(MouseButton button, int x, int y, KeyM
 }
 
 void DefaultMouseDevice::inject_wheel(float dx, float dy, int x, int y, KeyMod modifiers, double timestamp) {
-    state_.scroll_x += dx;
-    state_.scroll_y += dy;
-
     if (dispatcher_) {
         MouseWheelEvent event;
         event.type = EventType::MouseWheel;

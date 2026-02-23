@@ -195,6 +195,11 @@ public:
         }
         return false;
     }
+    bool handle_mouse_scroll(float, float dy) override {
+        int step = (dy > 0) ? -3 : 3;
+        set_first_visible_line(first_vis_ + step);
+        return true;
+    }
     const char* get_text() const override {
         cached_text_.clear();
         for(int i=0;i<(int)lines_.size();++i){if(i)cached_text_+='\n';cached_text_+=lines_[i];}

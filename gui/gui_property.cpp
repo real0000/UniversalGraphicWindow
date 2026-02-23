@@ -21,7 +21,7 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
     std::vector<Prop> props_;
     int next_id_=0, selected_=-1;
     std::unordered_map<std::string,bool> cat_expanded_;
-    float name_col_w_=150, row_h_=24;
+    float name_col_w_=150, row_h_=24, scroll_y_=0;
     PropertyGridStyle style_=PropertyGridStyle::default_style();
     IPropertyGridEventHandler* handler_=nullptr;
     static const std::vector<std::string> empty_opts_;
@@ -104,15 +104,31 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         return val_cache_.back().c_str();
     }
 
+    void clamp_scroll() {
+        std::vector<VisRow> visible;
+        collect_visible(visible);
+        float content_h = (float)visible.size() * row_h_;
+        float view_h = math::box_height(base_.get_bounds());
+        float max_scroll = content_h - view_h;
+        if (max_scroll < 0) max_scroll = 0;
+        if (scroll_y_ < 0) scroll_y_ = 0;
+        if (scroll_y_ > max_scroll) scroll_y_ = max_scroll;
+    }
 public:
     bool is_focusable() const override { return true; }
+    bool handle_mouse_scroll(float, float dy) override {
+        if (dy == 0) return false;
+        scroll_y_ -= dy * row_h_ * 3;
+        clamp_scroll();
+        return true;
+    }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!base_.is_enabled() || !hit_test(p)) return false;
         if (btn == MouseButton::Left && pressed) {
             auto b = base_.get_bounds();
             float bx = math::x(math::box_min(b));
             float rel_x = math::x(p) - bx;
-            float rel_y = math::y(p) - math::y(math::box_min(b));
+            float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
             int row = (row_h_ > 0) ? (int)(rel_y / row_h_) : -1;
 
             std::vector<VisRow> visible;
@@ -206,6 +222,13 @@ public:
     void collapse_all() override { for(auto& p:cat_expanded_) p.second=false; }
     int get_selected_property() const override { return selected_; }
     void set_selected_property(int id) override { selected_=id; }
+    float get_scroll_offset() const override { return scroll_y_; }
+    void set_scroll_offset(float offset) override { scroll_y_ = offset; clamp_scroll(); }
+    float get_total_content_height() const override {
+        std::vector<VisRow> visible;
+        collect_visible(visible);
+        return (float)visible.size() * row_h_;
+    }
     float get_name_column_width() const override { return name_col_w_; }
     void set_name_column_width(float w) override { name_col_w_=w; }
     float get_row_height() const override { return row_h_; }
@@ -217,6 +240,7 @@ public:
         if(!out) return; auto b=base_.get_bounds();
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;
         out->style=style_; out->total_row_count=(int)props_.size(); out->selected_property=selected_;
+        out->scroll_offset_y=scroll_y_;
         out->editing_property=editing_id_; out->edit_buffer=edit_buf_.c_str();
     }
     const char* get_string_value(int id) const override {

@@ -125,6 +125,9 @@ public:
     // Scrolling
     virtual void scroll_to_node(int node_id) = 0;
     virtual void ensure_node_visible(int node_id) = 0;
+    virtual float get_scroll_offset() const = 0;
+    virtual void set_scroll_offset(float offset) = 0;
+    virtual float get_total_content_height() const = 0;
 
     // User data
     virtual void set_node_user_data(int node_id, void* data) = 0;

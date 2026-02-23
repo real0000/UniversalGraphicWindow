@@ -34,7 +34,23 @@ class GuiTreeView : public WidgetBase<IGuiTreeView, WidgetType::TreeView> {
                 collect_visible(n.id, 0, out);
         }
     }
+    void clamp_scroll() {
+        std::vector<std::pair<int,int>> visible;
+        collect_all_visible(visible);
+        float content_h = (float)visible.size() * style_.row_height;
+        float view_h = math::box_height(base_.get_bounds());
+        float max_scroll = content_h - view_h;
+        if (max_scroll < 0) max_scroll = 0;
+        if (scroll_y_ < 0) scroll_y_ = 0;
+        if (scroll_y_ > max_scroll) scroll_y_ = max_scroll;
+    }
 public:
+    bool handle_mouse_scroll(float, float dy) override {
+        if (dy == 0) return false;
+        scroll_y_ -= dy * style_.row_height * 3;
+        clamp_scroll();
+        return true;
+    }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!base_.is_enabled() || !hit_test(p)) return false;
         if (btn == MouseButton::Left && pressed) {
@@ -100,8 +116,41 @@ public:
     void get_selected_nodes(std::vector<int>& out) const override { out=multi_sel_; }
     void set_selected_nodes(const std::vector<int>& ids) override { multi_sel_=ids; }
     void clear_selection() override { selected_=-1; multi_sel_.clear(); }
-    void scroll_to_node(int) override {}
-    void ensure_node_visible(int id) override { expand_to_node(id); }
+    void scroll_to_node(int id) override {
+        // Find the row index of the node in visible list
+        std::vector<std::pair<int,int>> visible;
+        collect_all_visible(visible);
+        for (int i = 0; i < (int)visible.size(); ++i) {
+            if (nodes_[visible[i].first].id == id) {
+                scroll_y_ = i * style_.row_height;
+                clamp_scroll();
+                return;
+            }
+        }
+    }
+    void ensure_node_visible(int id) override {
+        expand_to_node(id);
+        std::vector<std::pair<int,int>> visible;
+        collect_all_visible(visible);
+        for (int i = 0; i < (int)visible.size(); ++i) {
+            if (nodes_[visible[i].first].id == id) {
+                float row_top = i * style_.row_height;
+                float row_bot = row_top + style_.row_height;
+                float view_h = math::box_height(base_.get_bounds());
+                if (row_top < scroll_y_) scroll_y_ = row_top;
+                else if (row_bot > scroll_y_ + view_h) scroll_y_ = row_bot - view_h;
+                clamp_scroll();
+                return;
+            }
+        }
+    }
+    float get_scroll_offset() const override { return scroll_y_; }
+    void set_scroll_offset(float offset) override { scroll_y_ = offset; clamp_scroll(); }
+    float get_total_content_height() const override {
+        std::vector<std::pair<int,int>> visible;
+        collect_all_visible(visible);
+        return (float)visible.size() * style_.row_height;
+    }
     void set_node_user_data(int id,void* d) override { int i=find_idx(id); if(i>=0)nodes_[i].user_data=d; }
     void* get_node_user_data(int id) const override { int i=find_idx(id); return i>=0?nodes_[i].user_data:nullptr; }
     bool is_node_enabled(int id) const override { int i=find_idx(id); return i>=0?nodes_[i].enabled:false; }
