@@ -72,6 +72,108 @@ public:
     void* native_device() const override { return (__bridge void*)device; }
     void* native_context() const override { return (__bridge void*)command_queue; }
     void* native_swapchain() const override { return (__bridge void*)layer; }
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || !device) return;
+        GraphicsCapabilities& c = *out_caps;
+
+        // API version: Metal version maps to OS; approximate using GPU family
+        c.api_version_major = 3;  // Metal 3 on Apple Silicon / macOS 13
+        c.api_version_minor = 0;
+        c.shader_model      = 6.0f;  // MSL is roughly SM 6.x capable
+
+        // Texture limits
+        // Apple Silicon GPUs support up to 16384; older Intel/AMD GPUs 8192
+#if TARGET_OS_OSX
+        if ([device supportsFamily:MTLGPUFamilyApple7]) {
+            c.max_texture_size = 16384;
+        } else {
+            c.max_texture_size = 8192;
+        }
+#else
+        // iOS: A14+ supports 16384, older 8192
+        c.max_texture_size = [device supportsFamily:MTLGPUFamilyApple7] ? 16384 : 8192;
+#endif
+        c.max_texture_3d_size      = 2048;
+        c.max_texture_cube_size    = c.max_texture_size;
+        c.max_texture_array_layers = 2048;
+        c.max_mip_levels           = 15;  // log2(16384) + 1
+        c.max_framebuffer_width    = c.max_texture_size;
+        c.max_framebuffer_height   = c.max_texture_size;
+
+        // Framebuffer / MSAA
+        c.max_color_attachments = 8;
+        c.max_samples           = [device supportsTextureSampleCount:8] ? 8 :
+                                  [device supportsTextureSampleCount:4] ? 4 : 1;
+
+        // Sampling
+        c.max_texture_bindings = 128;
+        c.max_anisotropy       = 16;
+
+        // Vertex / buffer limits
+        c.max_vertex_attributes   = 31;
+        c.max_vertex_buffers      = 31;
+        c.max_uniform_buffer_size = 64 * 1024;         // 64 KB inline constant buffer
+        c.max_uniform_bindings    = 31;
+        c.max_storage_bindings    = 31;
+        c.max_viewports           = 16;
+        c.max_scissor_rects       = 16;
+
+        // Compute
+        c.max_compute_group_size_x = 1024;
+        c.max_compute_group_size_y = 1024;
+        c.max_compute_group_size_z = 64;
+        c.max_compute_group_total  = 1024;
+        c.max_compute_dispatch_x   = 0;  // No fixed limit in Metal
+        c.max_compute_dispatch_y   = 0;
+        c.max_compute_dispatch_z   = 0;
+
+        // Pipeline features
+        c.compute_shaders     = true;
+        c.geometry_shaders    = false;  // Not supported in Metal
+        c.tessellation        = true;   // Metal tessellation via compute + post-tess
+        c.mesh_shaders        = [device supportsFamily:MTLGPUFamilyApple7] || [device supportsFamily:MTLGPUFamilyMac2];
+        c.instancing          = true;
+        c.indirect_draw       = true;
+        c.multi_draw_indirect = false;  // No direct equivalent in Metal
+        c.base_vertex_draw    = true;
+        c.occlusion_query     = true;
+        c.timestamp_query     = [device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary];
+        c.depth_clamp         = true;
+        c.fill_mode_wireframe = true;
+        c.conservative_raster = false;  // Not in Metal
+
+        // Texture features
+        c.texture_arrays = c.texture_3d = c.cube_maps = c.cube_map_arrays = true;
+        c.render_to_texture = c.read_write_textures   = true;
+        c.floating_point_textures = c.integer_textures = true;
+        c.srgb_framebuffer = c.srgb_textures = true;
+        c.hdr_output       = [device supportsFamily:MTLGPUFamilyApple6] ||
+                             [device supportsFamily:MTLGPUFamilyMac1];
+        c.depth32f = c.stencil8 = true;
+
+        // Compressed formats
+        c.texture_compression_astc = [device supportsFamily:MTLGPUFamilyApple2] ||
+                                     [device supportsFamily:MTLGPUFamilyMacCatalyst1];
+#if TARGET_OS_OSX
+        c.texture_compression_bc   = true;  // BC supported on all macOS GPUs
+        c.texture_compression_etc2 = false; // ETC not natively in Metal on macOS
+#else
+        c.texture_compression_bc   = false;
+        c.texture_compression_etc2 = true;  // ETC2 on iOS via GPU family
+#endif
+
+        // Blend
+        c.independent_blend = true;
+        c.dual_source_blend = false;  // Not in Metal
+        c.logic_ops         = false;  // Not in Metal
+
+        // Tearing / HDR
+        c.tearing_support   = false;  // Metal manages VSync internally
+
+        // VRAM: recommendedMaxWorkingSetSize gives a practical upper bound
+        c.vram_dedicated_bytes = [device recommendedMaxWorkingSetSize];
+    }
 };
 
 // Helper to resolve swap mode from config

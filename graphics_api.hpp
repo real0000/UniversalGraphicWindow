@@ -225,12 +225,13 @@ enum class TextureFormat : uint16_t {
 
 // TextureFormat utilities
 const char* texture_format_to_string(TextureFormat format);
-int texture_format_bytes_per_pixel(TextureFormat format);
-int texture_format_block_size(TextureFormat format);
-bool texture_format_is_compressed(TextureFormat format);
-bool texture_format_is_depth_stencil(TextureFormat format);
-bool texture_format_is_srgb(TextureFormat format);
-bool texture_format_has_alpha(TextureFormat format);
+bool        parse_texture_format(const char* s, TextureFormat* out);
+int         texture_format_bytes_per_pixel(TextureFormat format);
+int         texture_format_block_size(TextureFormat format);     // Compressed block size in pixels (1 for non-compressed)
+bool        texture_format_is_compressed(TextureFormat format);
+bool        texture_format_is_depth_stencil(TextureFormat format);
+bool        texture_format_is_srgb(TextureFormat format);
+bool        texture_format_has_alpha(TextureFormat format);
 
 //=============================================================================
 // Graphics Device Information
@@ -303,6 +304,172 @@ bool find_display_mode(const MonitorInfo& monitor, int width, int height, int re
 
 // Get the primary monitor info
 bool get_primary_monitor(MonitorInfo* out_monitor);
+
+//=============================================================================
+// GraphicsCapabilities
+//=============================================================================
+
+struct GraphicsCapabilities {
+
+    //-------------------------------------------------------------------------
+    // Texture size limits
+    //-------------------------------------------------------------------------
+
+    int max_texture_size        = 0;  // Max width/height of a 2D texture (e.g. 16384)
+    int max_texture_3d_size     = 0;  // Max dimension of a 3D texture
+    int max_texture_cube_size   = 0;  // Max face dimension of a cubemap texture
+    int max_texture_array_layers = 0; // Max number of layers in a texture array
+    int max_mip_levels          = 0;  // Max mipmap chain depth (typically log2(max_texture_size)+1)
+
+    //-------------------------------------------------------------------------
+    // Render-target / framebuffer limits
+    //-------------------------------------------------------------------------
+
+    int max_color_attachments   = 1;  // Max simultaneous render targets (MRT)
+    int max_framebuffer_width   = 0;  // Max renderable width  (0 = same as max_texture_size)
+    int max_framebuffer_height  = 0;  // Max renderable height (0 = same as max_texture_size)
+    int max_samples             = 1;  // Max MSAA sample count (1 = no MSAA)
+
+    //-------------------------------------------------------------------------
+    // Sampling limits
+    //-------------------------------------------------------------------------
+
+    int   max_anisotropy        = 1;  // Max anisotropic filtering level (1 = disabled)
+    int   max_texture_bindings  = 0;  // Max simultaneous textures per shader stage
+    float max_texture_lod_bias  = 0.0f; // Max absolute LOD bias value
+
+    //-------------------------------------------------------------------------
+    // Vertex / buffer limits
+    //-------------------------------------------------------------------------
+
+    int max_vertex_attributes   = 0;  // Max vertex input attributes (VS input slots)
+    int max_vertex_buffers      = 0;  // Max simultaneously-bound vertex buffers
+    int max_uniform_buffer_size = 0;  // Max size of a single constant/uniform buffer (bytes)
+    int max_uniform_bindings    = 0;  // Max constant/uniform buffer binding slots per stage
+    int max_storage_bindings    = 0;  // Max storage/UAV buffer slots per stage (0 = unsupported)
+
+    //-------------------------------------------------------------------------
+    // Draw call limits
+    //-------------------------------------------------------------------------
+
+    int max_draw_indirect_count = 0;  // Max count for indirect/multi-draw  (0 = unsupported)
+    int max_viewports           = 1;  // Max simultaneous viewports (D3D11/D3D12/Vulkan >= 1)
+    int max_scissor_rects       = 1;  // Max simultaneous scissor rectangles
+
+    //-------------------------------------------------------------------------
+    // Compute limits  (zeros indicate compute is unsupported)
+    //-------------------------------------------------------------------------
+
+    int max_compute_group_size_x    = 0; // Max thread group X dimension
+    int max_compute_group_size_y    = 0; // Max thread group Y dimension
+    int max_compute_group_size_z    = 0; // Max thread group Z dimension
+    int max_compute_group_total     = 0; // Max total threads per group (x*y*z)
+    int max_compute_dispatch_x      = 0; // Max dispatch X group count
+    int max_compute_dispatch_y      = 0; // Max dispatch Y group count
+    int max_compute_dispatch_z      = 0; // Max dispatch Z group count
+
+    //-------------------------------------------------------------------------
+    // Shader / pipeline feature support
+    //-------------------------------------------------------------------------
+
+    float shader_model          = 0.0f; // Shader model version (4.0, 5.0, 6.0, ...)
+    bool  compute_shaders       = false;
+    bool  geometry_shaders      = false;
+    bool  tessellation          = false;  // Hull + Domain shaders / Tessellation stages
+    bool  mesh_shaders          = false;  // Mesh + Amplification shaders (DX12 / Vulkan 1.2+)
+
+    //-------------------------------------------------------------------------
+    // Draw feature support
+    //-------------------------------------------------------------------------
+
+    bool instancing             = true;   // Instanced drawing
+    bool indirect_draw          = false;  // DrawIndirect / DrawIndexedIndirect
+    bool multi_draw_indirect    = false;  // MultiDrawIndirect (OpenGL / Vulkan)
+    bool base_vertex_draw       = false;  // glDrawElementsBaseVertex / equivalent
+    bool occlusion_query        = false;  // GPU occlusion query
+    bool timestamp_query        = false;  // GPU timestamp / pipeline statistics query
+
+    //-------------------------------------------------------------------------
+    // Rasteriser feature support
+    //-------------------------------------------------------------------------
+
+    bool depth_clamp            = false;  // Clamp depth instead of clip
+    bool fill_mode_wireframe    = false;  // Wireframe fill mode
+    bool conservative_raster    = false;  // Conservative rasterisation
+    bool line_smooth            = false;  // Anti-aliased line rasterisation
+
+    //-------------------------------------------------------------------------
+    // Texture feature support
+    //-------------------------------------------------------------------------
+
+    bool texture_compression_bc   = false; // BC1-BC7  (DXT/S3TC, ubiquitous on desktop)
+    bool texture_compression_etc2 = false; // ETC2/EAC (OpenGL ES, Android, many desktop GL)
+    bool texture_compression_astc = false; // ASTC     (mobile, Apple Silicon, some desktop)
+    bool floating_point_textures  = false; // R16F/R32F/RGBA16F/RGBA32F sampling
+    bool integer_textures         = false; // R8UI/R16I/... integer fetch
+    bool texture_arrays           = false; // 2D texture arrays
+    bool texture_3d               = true;  // 3D textures
+    bool cube_maps                = true;  // Cubemap textures
+    bool cube_map_arrays          = false; // Cubemap array textures
+    bool render_to_texture        = true;  // Render to a texture (FBO / RTV)
+    bool read_write_textures      = false; // Read/Write (UAV / image) texture access
+    bool sparse_textures          = false; // Partially-resident / tiled textures
+
+    //-------------------------------------------------------------------------
+    // Format support
+    //-------------------------------------------------------------------------
+
+    bool srgb_framebuffer       = false;  // sRGB-capable swap chain / FBO
+    bool srgb_textures          = false;  // sRGB texture formats
+    bool hdr_output             = false;  // 10-bit/16-bit HDR swap chain output
+    bool depth32f               = false;  // 32-bit float depth buffer
+    bool stencil8               = false;  // 8-bit stencil buffer
+
+    //-------------------------------------------------------------------------
+    // Blend state support
+    //-------------------------------------------------------------------------
+
+    bool dual_source_blend      = false;  // SRC1_COLOR / SRC1_ALPHA blend factors
+    bool independent_blend      = false;  // Per-render-target blend states
+    bool logic_ops              = false;  // Logical blend operations
+
+    //-------------------------------------------------------------------------
+    // Sync / presentation
+    //-------------------------------------------------------------------------
+
+    bool tearing_support        = false;  // Variable refresh / tearing (DXGI_PRESENT_ALLOW_TEARING)
+    bool multi_gpu              = false;  // Linked / explicit multi-GPU
+
+    //-------------------------------------------------------------------------
+    // API version
+    //-------------------------------------------------------------------------
+
+    int api_version_major       = 0;  // e.g. OpenGL 4, D3D 11, Vulkan 1, Metal 3
+    int api_version_minor       = 0;  // e.g. OpenGL .6, Vulkan .3
+
+    //-------------------------------------------------------------------------
+    // Memory information  (0 = unknown)
+    //-------------------------------------------------------------------------
+
+    uint64_t vram_dedicated_bytes   = 0; // Dedicated VRAM (GPU-local)
+    uint64_t vram_shared_bytes      = 0; // Shared system memory usable by GPU
+
+    //-------------------------------------------------------------------------
+    // Convenience helpers
+    //-------------------------------------------------------------------------
+
+    bool supports_msaa(int samples) const {
+        return samples >= 1 && samples <= max_samples && (samples & (samples - 1)) == 0;
+    }
+
+    bool supports_texture_size(int w, int h) const {
+        return max_texture_size > 0 && w <= max_texture_size && h <= max_texture_size;
+    }
+
+    bool supports_texture_format_compressed() const {
+        return texture_compression_bc || texture_compression_etc2 || texture_compression_astc;
+    }
+};
 
 //=============================================================================
 // Forward Declarations
@@ -391,6 +558,11 @@ public:
     virtual void* native_device() const = 0;
     virtual void* native_context() const = 0;
     virtual void* native_swapchain() const = 0;
+
+    // Query backend capabilities and hardware limits.
+    // Fills *out_caps completely; any field that cannot be determined is left
+    // at its default (zero / false).  Always safe to call after creation.
+    virtual void get_capabilities(GraphicsCapabilities* out_caps) const = 0;
 
 protected:
     Graphics() = default;
@@ -481,6 +653,9 @@ enum class BlendFactor : uint8_t {
     InvBlendFactor
 };
 
+const char* blend_factor_to_string(BlendFactor factor);
+bool        parse_blend_factor(const char* s, BlendFactor* out);
+
 enum class BlendOp : uint8_t {
     Add,
     Subtract,
@@ -488,6 +663,9 @@ enum class BlendOp : uint8_t {
     Min,
     Max
 };
+
+const char* blend_op_to_string(BlendOp op);
+bool        parse_blend_op(const char* s, BlendOp* out);
 
 struct BlendState {
     bool enabled = false;
@@ -544,6 +722,9 @@ enum class CompareFunc : uint8_t {
     Always
 };
 
+const char* compare_func_to_string(CompareFunc func);
+bool        parse_compare_func(const char* s, CompareFunc* out);
+
 enum class StencilOp : uint8_t {
     Keep,
     Zero,
@@ -554,6 +735,9 @@ enum class StencilOp : uint8_t {
     IncrWrap,
     DecrWrap
 };
+
+const char* stencil_op_to_string(StencilOp op);
+bool        parse_stencil_op(const char* s, StencilOp* out);
 
 struct StencilOpDesc {
     StencilOp stencil_fail = StencilOp::Keep;
@@ -595,16 +779,25 @@ enum class FillMode : uint8_t {
     Wireframe
 };
 
+const char* fill_mode_to_string(FillMode mode);
+bool        parse_fill_mode(const char* s, FillMode* out);
+
 enum class CullMode : uint8_t {
     None,
     Front,
     Back
 };
 
+const char* cull_mode_to_string(CullMode mode);
+bool        parse_cull_mode(const char* s, CullMode* out);
+
 enum class FrontFace : uint8_t {
     CounterClockwise,
     Clockwise
 };
+
+const char* front_face_to_string(FrontFace face);
+bool        parse_front_face(const char* s, FrontFace* out);
 
 struct RasterizerState {
     FillMode fill_mode = FillMode::Solid;
@@ -642,6 +835,9 @@ enum class FilterMode : uint8_t {
     Anisotropic
 };
 
+const char* filter_mode_to_string(FilterMode mode);
+bool        parse_filter_mode(const char* s, FilterMode* out);
+
 enum class AddressMode : uint8_t {
     Wrap,
     Mirror,
@@ -649,6 +845,9 @@ enum class AddressMode : uint8_t {
     Border,
     MirrorOnce
 };
+
+const char* address_mode_to_string(AddressMode mode);
+bool        parse_address_mode(const char* s, AddressMode* out);
 
 struct SamplerState {
     FilterMode min_filter = FilterMode::Linear;
@@ -709,6 +908,9 @@ enum class PrimitiveTopology : uint8_t {
     TriangleStripAdj
 };
 
+const char* primitive_topology_to_string(PrimitiveTopology topology);
+bool        parse_primitive_topology(const char* s, PrimitiveTopology* out);
+
 //=============================================================================
 // Vertex Format
 //=============================================================================
@@ -744,7 +946,9 @@ enum class VertexFormat : uint8_t {
 };
 
 // Get byte size of a vertex format
-int vertex_format_size(VertexFormat format);
+int         vertex_format_size(VertexFormat format);
+const char* vertex_format_to_string(VertexFormat format);
+bool        parse_vertex_format(const char* s, VertexFormat* out);
 
 } // namespace window
 

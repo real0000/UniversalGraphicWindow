@@ -103,6 +103,141 @@ public:
     void* native_device() const override { return device; }
     void* native_context() const override { return command_queue; }
     void* native_swapchain() const override { return swap_chain; }
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || !device) return;
+        GraphicsCapabilities& c = *out_caps;
+
+        // API version
+        c.api_version_major = 12;
+        c.api_version_minor = 0;
+
+        // Shader model
+        static const D3D_SHADER_MODEL sm_list[] = {
+            D3D_SHADER_MODEL_6_6, D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_4,
+            D3D_SHADER_MODEL_6_3, D3D_SHADER_MODEL_6_2, D3D_SHADER_MODEL_6_1,
+            D3D_SHADER_MODEL_6_0, D3D_SHADER_MODEL_5_1
+        };
+        D3D12_FEATURE_DATA_SHADER_MODEL sm = { D3D_SHADER_MODEL_6_6 };
+        for (auto m : sm_list) {
+            sm.HighestShaderModel = m;
+            if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm)))) break;
+        }
+        c.shader_model = static_cast<float>((sm.HighestShaderModel >> 4) & 0xF)
+                       + ((sm.HighestShaderModel & 0xF) * 0.1f);
+
+        // Feature level
+        static const D3D_FEATURE_LEVEL fl_list[] = {
+            D3D_FEATURE_LEVEL_12_2, D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0,
+            D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0
+        };
+        D3D12_FEATURE_DATA_FEATURE_LEVELS fl_data = {};
+        fl_data.NumFeatureLevels         = _countof(fl_list);
+        fl_data.pFeatureLevelsRequested  = fl_list;
+        device->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &fl_data, sizeof(fl_data));
+
+        // Texture limits
+        c.max_texture_size         = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+        c.max_texture_3d_size      = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+        c.max_texture_cube_size    = D3D12_REQ_TEXTURECUBE_DIMENSION;
+        c.max_texture_array_layers = D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION;
+        c.max_mip_levels           = D3D12_REQ_MIP_LEVELS;
+        c.max_framebuffer_width    = c.max_texture_size;
+        c.max_framebuffer_height   = c.max_texture_size;
+
+        // Framebuffer / MSAA
+        c.max_color_attachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT;
+        c.max_samples = 1;
+        for (UINT s : {8u, 4u, 2u}) {
+            D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS mql = {};
+            mql.Format      = DXGI_FORMAT_R8G8B8A8_UNORM;
+            mql.SampleCount = s;
+            if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &mql, sizeof(mql))) && mql.NumQualityLevels > 0) {
+                c.max_samples = static_cast<int>(s);
+                break;
+            }
+        }
+
+        // Sampling
+        c.max_texture_bindings = D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1;
+        c.max_anisotropy       = D3D12_MAX_MAXANISOTROPY;
+
+        // Vertex / buffer limits
+        c.max_vertex_attributes   = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
+        c.max_vertex_buffers      = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
+        c.max_uniform_bindings    = D3D12_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT;
+        c.max_uniform_buffer_size = D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16;
+        c.max_storage_bindings    = D3D12_UAV_SLOT_COUNT;
+        c.max_viewports           = D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        c.max_scissor_rects       = D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+
+        // Compute
+        c.max_compute_group_size_x = D3D12_CS_THREAD_GROUP_MAX_X;
+        c.max_compute_group_size_y = D3D12_CS_THREAD_GROUP_MAX_Y;
+        c.max_compute_group_size_z = D3D12_CS_THREAD_GROUP_MAX_Z;
+        c.max_compute_group_total  = D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP;
+        c.max_compute_dispatch_x   = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+        c.max_compute_dispatch_y   = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+        c.max_compute_dispatch_z   = D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION;
+
+        // Pipeline features
+        c.compute_shaders     = true;
+        c.geometry_shaders    = true;
+        c.tessellation        = true;
+        c.instancing          = true;
+        c.indirect_draw       = true;
+        c.base_vertex_draw    = true;
+        c.occlusion_query     = true;
+        c.timestamp_query     = true;
+        c.depth_clamp         = true;
+        c.fill_mode_wireframe = true;
+
+        // Options query for conservative rasterisation and other features
+        D3D12_FEATURE_DATA_D3D12_OPTIONS opts = {};
+        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &opts, sizeof(opts))))
+            c.conservative_raster = (opts.ConservativeRasterizationTier != D3D12_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED);
+
+        // Mesh shaders (SM 6.5+, Options7)
+        if (c.shader_model >= 6.5f) {
+            D3D12_FEATURE_DATA_D3D12_OPTIONS7 opts7 = {};
+            if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &opts7, sizeof(opts7))))
+                c.mesh_shaders = (opts7.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED);
+        }
+
+        // Texture features
+        c.texture_arrays = c.texture_3d = c.cube_maps = c.cube_map_arrays = true;
+        c.render_to_texture = c.read_write_textures   = true;
+        c.floating_point_textures = c.integer_textures = true;
+        c.texture_compression_bc  = true;
+        c.srgb_framebuffer = c.srgb_textures = true;
+        c.depth32f = c.stencil8              = true;
+
+        // Blend
+        c.independent_blend = c.dual_source_blend = c.logic_ops = true;
+
+        // DXGI: VRAM + tearing
+        IDXGIFactory4* fac4 = nullptr;
+        IDXGIAdapter*  adapter = nullptr;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void**)&fac4))) {
+            LUID luid = device->GetAdapterLuid();
+            if (SUCCEEDED(fac4->EnumAdapterByLuid(luid, __uuidof(IDXGIAdapter), (void**)&adapter))) {
+                DXGI_ADAPTER_DESC desc = {};
+                if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                    c.vram_dedicated_bytes = desc.DedicatedVideoMemory;
+                    c.vram_shared_bytes    = desc.SharedSystemMemory;
+                }
+                adapter->Release();
+            }
+            IDXGIFactory5* fac5 = nullptr;
+            if (SUCCEEDED(fac4->QueryInterface(__uuidof(IDXGIFactory5), (void**)&fac5))) {
+                BOOL tearing = FALSE;
+                if (SUCCEEDED(fac5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &tearing, sizeof(tearing))))
+                    c.tearing_support = (tearing != FALSE);
+                fac5->Release();
+            }
+            fac4->Release();
+        }
+    }
 };
 
 //=============================================================================

@@ -100,6 +100,116 @@ public:
     void* native_device() const override { return device; }
     void* native_context() const override { return graphics_queue; }
     void* native_swapchain() const override { return swapchain; }
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || physical_device == VK_NULL_HANDLE) return;
+        GraphicsCapabilities& c = *out_caps;
+
+        VkPhysicalDeviceProperties props = {};
+        vkGetPhysicalDeviceProperties(physical_device, &props);
+        const VkPhysicalDeviceLimits& lim = props.limits;
+
+        // API version
+        c.api_version_major = static_cast<int>(VK_VERSION_MAJOR(props.apiVersion));
+        c.api_version_minor = static_cast<int>(VK_VERSION_MINOR(props.apiVersion));
+        c.shader_model = (c.api_version_minor >= 3) ? 6.5f :
+                         (c.api_version_minor >= 2) ? 6.4f :
+                         (c.api_version_minor >= 1) ? 6.0f : 5.0f;
+
+        // Texture limits
+        c.max_texture_size         = static_cast<int>(lim.maxImageDimension2D);
+        c.max_texture_3d_size      = static_cast<int>(lim.maxImageDimension3D);
+        c.max_texture_cube_size    = static_cast<int>(lim.maxImageDimensionCube);
+        c.max_texture_array_layers = static_cast<int>(lim.maxImageArrayLayers);
+        c.max_mip_levels           = static_cast<int>(lim.maxMipLevels);
+
+        // Framebuffer
+        c.max_color_attachments  = static_cast<int>(lim.maxColorAttachments);
+        c.max_framebuffer_width  = static_cast<int>(lim.maxFramebufferWidth);
+        c.max_framebuffer_height = static_cast<int>(lim.maxFramebufferHeight);
+        c.max_samples = 1;
+        VkSampleCountFlags sc = lim.framebufferColorSampleCounts & lim.framebufferDepthSampleCounts;
+        if      (sc & VK_SAMPLE_COUNT_64_BIT) c.max_samples = 64;
+        else if (sc & VK_SAMPLE_COUNT_32_BIT) c.max_samples = 32;
+        else if (sc & VK_SAMPLE_COUNT_16_BIT) c.max_samples = 16;
+        else if (sc & VK_SAMPLE_COUNT_8_BIT)  c.max_samples = 8;
+        else if (sc & VK_SAMPLE_COUNT_4_BIT)  c.max_samples = 4;
+        else if (sc & VK_SAMPLE_COUNT_2_BIT)  c.max_samples = 2;
+
+        // Sampling
+        c.max_texture_bindings = static_cast<int>(lim.maxDescriptorSetSampledImages);
+        c.max_anisotropy       = static_cast<int>(lim.maxSamplerAnisotropy);
+
+        // Vertex / buffer limits
+        c.max_vertex_attributes   = static_cast<int>(lim.maxVertexInputAttributes);
+        c.max_vertex_buffers      = static_cast<int>(lim.maxVertexInputBindings);
+        c.max_uniform_buffer_size = static_cast<int>(lim.maxUniformBufferRange);
+        c.max_uniform_bindings    = static_cast<int>(lim.maxDescriptorSetUniformBuffers);
+        c.max_storage_bindings    = static_cast<int>(lim.maxDescriptorSetStorageBuffers);
+        c.max_viewports           = static_cast<int>(lim.maxViewports);
+        c.max_scissor_rects       = static_cast<int>(lim.maxViewports);
+        c.max_draw_indirect_count = static_cast<int>(lim.maxDrawIndirectCount);
+
+        // Compute
+        c.max_compute_group_size_x = static_cast<int>(lim.maxComputeWorkGroupSize[0]);
+        c.max_compute_group_size_y = static_cast<int>(lim.maxComputeWorkGroupSize[1]);
+        c.max_compute_group_size_z = static_cast<int>(lim.maxComputeWorkGroupSize[2]);
+        c.max_compute_group_total  = static_cast<int>(lim.maxComputeWorkGroupInvocations);
+        c.max_compute_dispatch_x   = static_cast<int>(lim.maxComputeWorkGroupCount[0]);
+        c.max_compute_dispatch_y   = static_cast<int>(lim.maxComputeWorkGroupCount[1]);
+        c.max_compute_dispatch_z   = static_cast<int>(lim.maxComputeWorkGroupCount[2]);
+
+        // Device features
+        VkPhysicalDeviceFeatures feat = {};
+        vkGetPhysicalDeviceFeatures(physical_device, &feat);
+
+        c.compute_shaders     = true;
+        c.geometry_shaders    = (feat.geometryShader  != VK_FALSE);
+        c.tessellation        = (feat.tessellationShader != VK_FALSE);
+        c.instancing          = true;
+        c.indirect_draw       = true;
+        c.multi_draw_indirect = (feat.multiDrawIndirect != VK_FALSE);
+        c.base_vertex_draw    = true;
+        c.occlusion_query     = true;
+        c.timestamp_query     = (lim.timestampComputeAndGraphics != VK_FALSE);
+        c.depth_clamp         = (feat.depthClamp    != VK_FALSE);
+        c.fill_mode_wireframe = (feat.fillModeNonSolid != VK_FALSE);
+        c.line_smooth         = (feat.wideLines      != VK_FALSE);
+        c.sparse_textures     = (feat.sparseBinding  != VK_FALSE);
+
+        // Texture features
+        c.texture_arrays = c.texture_3d = c.cube_maps = true;
+        c.cube_map_arrays     = (feat.imageCubeArray  != VK_FALSE);
+        c.render_to_texture = c.read_write_textures   = true;
+        c.floating_point_textures = c.integer_textures = true;
+        c.srgb_framebuffer = c.srgb_textures = true;
+        c.depth32f = c.stencil8              = true;
+
+        // Compressed formats via format query
+        auto has_fmt = [&](VkFormat fmt) -> bool {
+            VkFormatProperties fp = {};
+            vkGetPhysicalDeviceFormatProperties(physical_device, fmt, &fp);
+            return (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+        };
+        c.texture_compression_bc   = (feat.textureCompressionBC   != VK_FALSE) && has_fmt(VK_FORMAT_BC1_RGB_UNORM_BLOCK);
+        c.texture_compression_etc2 = (feat.textureCompressionETC2 != VK_FALSE) && has_fmt(VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK);
+        c.texture_compression_astc = (feat.textureCompressionASTC_LDR != VK_FALSE) && has_fmt(VK_FORMAT_ASTC_4x4_UNORM_BLOCK);
+
+        // Blend
+        c.independent_blend = (feat.independentBlend != VK_FALSE);
+        c.dual_source_blend = (feat.dualSrcBlend     != VK_FALSE);
+        c.logic_ops         = (feat.logicOp          != VK_FALSE);
+
+        // VRAM: sum device-local heaps
+        VkPhysicalDeviceMemoryProperties mem = {};
+        vkGetPhysicalDeviceMemoryProperties(physical_device, &mem);
+        for (uint32_t i = 0; i < mem.memoryHeapCount; i++) {
+            if (mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                c.vram_dedicated_bytes += mem.memoryHeaps[i].size;
+            else
+                c.vram_shared_bytes    += mem.memoryHeaps[i].size;
+        }
+    }
 };
 
 //=============================================================================

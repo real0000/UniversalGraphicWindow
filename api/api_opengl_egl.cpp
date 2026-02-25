@@ -10,6 +10,7 @@
 #include <EGL/egl.h>
 #include <string>
 #include <cstdint>
+#include "opengl_caps.inl"
 
 #ifdef __ANDROID__
 #include <android/native_window.h>
@@ -102,6 +103,11 @@ public:
 #if defined(__linux__) && !defined(__ANDROID__)
     void* native_egl_window() const { return egl_window; }
 #endif
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || !egl_context) return;
+        fill_gl_capabilities(*out_caps);
+    }
 };
 
 //=============================================================================

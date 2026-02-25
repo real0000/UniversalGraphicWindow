@@ -12,6 +12,7 @@
 #include <GL/gl.h>
 #include <cstring>
 #include <string>
+#include "opengl_caps.inl"
 
 typedef GLXContext (*PFNGLXCREATECONTEXTATTRIBSARBPROC)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
 
@@ -68,6 +69,11 @@ public:
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return context; }
     void* native_swapchain() const override { return display; }
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || !context) return;
+        fill_gl_capabilities(*out_caps);
+    }
 };
 
 //=============================================================================

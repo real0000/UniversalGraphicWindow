@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cstdio>
 #include <string>
+#include "opengl_caps.inl"
 
 namespace window {
 
@@ -51,6 +52,11 @@ public:
             context = 0;
         }
         delete this;
+    }
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || !context) return;
+        fill_gl_capabilities(*out_caps);
     }
 };
 

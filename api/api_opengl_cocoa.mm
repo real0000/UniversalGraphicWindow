@@ -7,6 +7,7 @@
 #if defined(__APPLE__) && !defined(WINDOW_NO_OPENGL)
 
 #import <Foundation/Foundation.h>
+#include "opengl_caps.inl"
 
 #if TARGET_OS_OSX
 #import <Cocoa/Cocoa.h>
@@ -71,6 +72,11 @@ public:
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return (__bridge void*)context; }
     void* native_swapchain() const override { return (__bridge void*)pixel_format; }
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || !context) return;
+        fill_gl_capabilities(*out_caps);
+    }
 };
 
 Graphics* create_opengl_graphics_nsview(void* ns_view, int width, int height, const Config& config) {
@@ -202,6 +208,11 @@ public:
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return (__bridge void*)context; }
     void* native_swapchain() const override { return nullptr; }
+
+    void get_capabilities(GraphicsCapabilities* out_caps) const override {
+        if (!out_caps || !context) return;
+        fill_gl_capabilities(*out_caps);
+    }
 };
 
 Graphics* create_opengl_graphics_uiview(void* ui_view, int width, int height, const Config& config) {
