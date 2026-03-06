@@ -688,7 +688,7 @@ inline float box_area(const Box& b) {
 }
 
 inline bool box_contains(const Box& b, const Vec2& p) {
-    return bg::within(p, b);
+    return bg::covered_by(p, b);
 }
 
 inline bool box_intersects(const Box& a, const Box& b) {

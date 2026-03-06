@@ -492,6 +492,7 @@ if(WINDOW_ENABLE_GUI)
         gui/gui_toolbar.cpp
         gui/gui_page.cpp
         gui/gui_panel.cpp
+        gui/gui_sizer.cpp
         gui/gui_animation.cpp
     )
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_GUI)

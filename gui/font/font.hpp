@@ -126,6 +126,20 @@ enum class PixelFormat : uint8_t {
 // ============================================================================
 
 // ============================================================================
+// Font Atlas Entry
+// ============================================================================
+
+// Position of one image within a texture-array atlas.
+struct AtlasEntry {
+    int   layer = -1;        // Atlas layer index (-1 = invalid / not yet placed)
+    int   px = 0, py = 0;   // Pixel position within layer
+    int   pw = 0, ph = 0;   // Pixel dimensions
+    float u0 = 0, v0 = 0;   // Normalised UV top-left
+    float u1 = 0, v1 = 0;   // Normalised UV bottom-right
+    bool  valid() const { return layer >= 0; }
+};
+
+// ============================================================================
 // Font Descriptor
 // ============================================================================
 
@@ -515,6 +529,85 @@ public:
 };
 
 // ============================================================================
+// Font Atlas Interface (Abstract)
+// ============================================================================
+//
+// Manages a shelf-packed 2D texture-array atlas for glyphs and images.
+// Graphics-API-agnostic: all GPU operations are delegated to user callbacks.
+//
+// Usage:
+//   IFontAtlas* atlas = create_font_atlas();
+//   atlas->set_tile_size(4096, 4096);          // optional; default = 4096
+//   atlas->set_callbacks(init_cb, grow_cb, upload_cb, destroy_cb);
+//   AtlasEntry e = atlas->add(rgba8_pixels, width, height);
+//   // use e.layer, e.u0/v0, e.u1/v1 to issue draw calls
+//   destroy_font_atlas(atlas);
+//
+class IFontAtlas {
+public:
+    virtual ~IFontAtlas() = default;
+
+    // ---- GPU callbacks ----
+
+    // Called once when the atlas first needs GPU storage.
+    // Must allocate a 2D texture-array of (tile_w × tile_h × depth).
+    // Return a non-zero user handle (e.g., cast GLuint → uintptr_t).
+    using InitCallback    = std::function<uintptr_t(int tile_w, int tile_h, int depth)>;
+
+    // Called when the atlas needs to grow to new_depth layers.
+    // Must: create new texture array of new_depth layers,
+    //       copy existing old_depth layers from old_handle,
+    //       release old_handle.
+    // Return the new handle.
+    using GrowCallback    = std::function<uintptr_t(uintptr_t old_handle,
+                                                     int tile_w, int tile_h,
+                                                     int old_depth, int new_depth)>;
+
+    // Called to upload an RGBA8 sub-image to the atlas texture.
+    using UploadCallback  = std::function<void(uintptr_t handle, const void* rgba8,
+                                               int x, int y, int layer, int w, int h)>;
+
+    // Called when the atlas is destroyed; must release the GPU texture.
+    using DestroyCallback = std::function<void(uintptr_t handle)>;
+
+    // Register all four callbacks. Must be called before the first add() / update().
+    virtual void set_callbacks(InitCallback    init_cb,
+                                GrowCallback    grow_cb,
+                                UploadCallback  upload_cb,
+                                DestroyCallback destroy_cb) = 0;
+
+    // Set tile dimensions (must be called before the first add()).
+    // Defaults: 4096 × 4096.
+    virtual void set_tile_size(int tile_w, int tile_h) = 0;
+
+    // Set maximum number of layers. Default: 2048.
+    virtual void set_max_layers(int max_layers) = 0;
+
+    // Shelf-pack an RGBA8 image into the atlas.
+    // Returns a valid AtlasEntry on success, or entry.valid()==false on failure
+    // (atlas full, or callbacks not set, or image larger than tile).
+    virtual AtlasEntry add(const void* rgba8, int w, int h) = 0;
+
+    // Update pixels of an existing entry in-place (dimensions must match).
+    virtual void update(const AtlasEntry& entry, const void* rgba8) = 0;
+
+    // Opaque GPU handle returned by the most-recent init / grow callback.
+    // Cast to the appropriate GPU type, e.g. (GLuint)atlas->get_gpu_handle().
+    virtual uintptr_t get_gpu_handle() const = 0;
+
+    // Current atlas dimensions.
+    virtual int get_tile_width()  const = 0;
+    virtual int get_tile_height() const = 0;
+    virtual int get_layer_count() const = 0;
+
+    // Reset all shelf state (all packed entries freed); GPU texture retained.
+    virtual void clear() = 0;
+
+    // Invoke the destroy callback and release all resources.
+    virtual void destroy() = 0;
+};
+
+// ============================================================================
 // Font System (Combines all interfaces)
 // ============================================================================
 
@@ -557,12 +650,16 @@ IGlyphCache* create_glyph_cache(int max_glyphs = 4096);
 FontSystem* create_font_system(FontBackend backend = FontBackend::Auto,
                                 Result* out_result = nullptr);
 
+// Create a shelf-packed font atlas (callbacks must be set before use)
+IFontAtlas* create_font_atlas();
+
 // Destroy instances
 void destroy_font_library(IFontLibrary* library);
 void destroy_text_shaper(ITextShaper* shaper);
 void destroy_font_renderer(IFontRenderer* renderer);
 void destroy_glyph_cache(IGlyphCache* cache);
 void destroy_font_system(FontSystem* system);
+void destroy_font_atlas(IFontAtlas* atlas);
 
 // ============================================================================
 // Utility Functions

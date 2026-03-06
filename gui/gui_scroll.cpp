@@ -14,6 +14,7 @@ class GuiScrollBar : public WidgetBase<IGuiScrollBar, WidgetType::Custom> {
     bool thumb_hover_=false, thumb_press_=false;
     float drag_offset_=0; // offset from thumb top to click point
     ScrollBarStyle style_ = ScrollBarStyle::default_style();
+    mutable WidgetRenderInfo ri_;
 
     // Compute thumb geometry: returns thumb_pos and thumb_len along the scrollbar axis
     void get_thumb_geometry(float& thumb_pos, float& thumb_len, float& track_start, float& track_len) const {
@@ -117,6 +118,32 @@ public:
     bool is_thumb_hovered() const override { return thumb_hover_; }
     bool is_thumb_pressed() const override { return thumb_press_; }
 
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        ri_.push_rect(bx, by, bw, bh, s.track_color, d++, noclip);
+        float range = max_ - min_;
+        float total = range + page_size_;
+        if (total > 0) {
+            float thumb_len, thumb_pos, track_start, track_sz;
+            get_thumb_geometry(thumb_pos, thumb_len, track_start, track_sz);
+            const math::Vec4& tc = thumb_press_ ? s.thumb_pressed_color :
+                                   thumb_hover_ ? s.thumb_hover_color : s.thumb_color;
+            if (orient_ == ScrollBarOrientation::Vertical)
+                ri_.push_rect(bx+1, thumb_pos, bw-2, thumb_len, tc, d++, noclip);
+            else
+                ri_.push_rect(thumb_pos, by+1, thumb_len, bh-2, tc, d++, noclip);
+        }
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
+    }
+
     void get_scrollbar_render_info(ScrollBarRenderInfo* out) const override {
         if(!out) return;
         auto b=base_.get_bounds();
@@ -199,6 +226,38 @@ public:
         out->v_scrollbar_visible=can_scroll_vertical()&&v_vis_!=ScrollBarVisibility::Never;
     }
 };
+
+// ============================================================================
+// Scrollbar utility functions
+// ============================================================================
+
+bool scrollbar_hit_test(const math::Box& widget_bounds, float content_h, const math::Vec2& pos) {
+    const float SB_WIDTH  = 10.0f;
+    const float SB_MARGIN =  1.0f;
+    float bx = math::x(math::box_min(widget_bounds)), by = math::y(math::box_min(widget_bounds));
+    float bw = math::box_width(widget_bounds),         bh = math::box_height(widget_bounds);
+    if (content_h <= bh) return false;
+    float sb_x = bx + bw - SB_WIDTH - SB_MARGIN;
+    return math::x(pos) >= sb_x && math::x(pos) <= bx + bw
+        && math::y(pos) >= by  && math::y(pos) <= by + bh;
+}
+
+float scrollbar_offset_from_mouse(const math::Box& widget_bounds, float content_h, float mouse_y) {
+    float by = math::y(math::box_min(widget_bounds));
+    float bh = math::box_height(widget_bounds);
+    float max_scroll = content_h - bh;
+    if (max_scroll <= 0) return 0;
+    float thumb_ratio = bh / content_h;
+    float thumb_h     = bh * thumb_ratio;
+    if (thumb_h < 16) thumb_h = 16;
+    float track_range = bh - thumb_h;
+    if (track_range <= 0) return 0;
+    float rel_y = mouse_y - by - thumb_h * 0.5f;
+    float ratio = rel_y / track_range;
+    if (ratio < 0) ratio = 0;
+    if (ratio > 1) ratio = 1;
+    return ratio * max_scroll;
+}
 
 // Factory functions
 IGuiScrollBar* create_scroll_bar_widget(ScrollBarOrientation orient) { return new GuiScrollBar(orient); }

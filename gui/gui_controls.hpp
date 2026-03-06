@@ -84,6 +84,10 @@ public:
     virtual int get_radio_group() const = 0;
     virtual void set_radio_group(int group_id) = 0;
 
+    // Explicit radio peers: deselected when this button is selected (for standalone/overlay radios)
+    virtual void add_radio_peer(IGuiButton* peer) = 0;
+    virtual void clear_radio_peers() = 0;
+
     // Style
     virtual const ButtonStyle& get_button_style() const = 0;
     virtual void set_button_style(const ButtonStyle& style) = 0;
@@ -419,6 +423,22 @@ public:
 // Image Interface - For image display
 // ============================================================================
 
+struct ImageRenderInfo {
+    const IGuiWidget* widget = nullptr;
+
+    math::Box bounds;
+    math::Box clip_rect;
+
+    std::string image_name;         // Resolved by the renderer
+    math::Vec4  tint;               // RGBA multiplier
+
+    // 9-slice
+    bool            use_slice9   = false;
+    SliceBorder     slice_border;                               // Pixel borders in source image
+    SliceCenterMode slice_center_mode = SliceCenterMode::Stretch;
+    math::Vec2      source_size;    // Source image pixel dimensions (for UV conversion)
+};
+
 class IGuiImage : public IGuiWidget {
 public:
     virtual ~IGuiImage() = default;
@@ -430,6 +450,24 @@ public:
     // Tint
     virtual math::Vec4 get_tint() const = 0;
     virtual void set_tint(const math::Vec4& tint) = 0;
+
+    // 9-slice support
+    virtual bool get_use_slice9() const = 0;
+    virtual void set_use_slice9(bool enabled) = 0;
+
+    // Border sizes in pixels of the source image (used when use_slice9 is true)
+    virtual const SliceBorder& get_slice_border() const = 0;
+    virtual void set_slice_border(const SliceBorder& border) = 0;
+
+    virtual SliceCenterMode get_slice_center_mode() const = 0;
+    virtual void set_slice_center_mode(SliceCenterMode mode) = 0;
+
+    // Source image pixel dimensions (needed for UV computation at render time)
+    virtual math::Vec2 get_source_size() const = 0;
+    virtual void set_source_size(const math::Vec2& size) = 0;
+
+    // Render info
+    virtual void get_image_render_info(ImageRenderInfo* out_info) const = 0;
 };
 
 } // namespace gui

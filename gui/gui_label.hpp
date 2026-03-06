@@ -127,6 +127,7 @@ public:
     virtual void on_text_changed() = 0;
     virtual void on_cursor_moved(const TextPosition& position) = 0;
     virtual void on_selection_changed(const TextRange& selection) = 0;
+    virtual void on_right_click(const math::Vec2& pos) {}
 };
 
 class IGuiEditBox : public IGuiWidget {
@@ -234,6 +235,9 @@ public:
 
     // Event handler
     virtual void set_editbox_event_handler(IEditBoxEventHandler* handler) = 0;
+
+    // Text measurer (optional; improves click-to-cursor accuracy)
+    virtual void set_text_measurer(ITextMeasurer* measurer) = 0;
 };
 
 } // namespace gui

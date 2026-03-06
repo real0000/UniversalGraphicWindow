@@ -23,6 +23,7 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
     IToolbarEventHandler* handler_=nullptr;
     int hovered_idx_=-1;
     int pressed_idx_=-1;
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
 
     // Find which item index a click x-position falls on (-1 if none)
@@ -134,6 +135,40 @@ public:
         }
         return n;
     }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        auto noclip=math::make_box(0,0,0,0);
+        int32_t d=0;
+        const auto& s=style_;
+        ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
+        float ix = bx + s.toolbar_padding;
+        for (int i = 0; i < (int)items_.size(); i++) {
+            if (items_[i].type == ToolbarItemType::Separator) {
+                float sep_x = ix + s.separator_padding;
+                ri_.push_rect(sep_x, by+4, s.separator_width, bh-8, s.separator_color, d++, noclip);
+                ix += s.separator_width + s.separator_padding*2;
+            } else {
+                math::Vec4 btn_bg = (i==pressed_idx_) ? s.button_pressed_color :
+                                    items_[i].toggled   ? s.button_toggled_color :
+                                    (i==hovered_idx_)   ? s.button_hover_color : s.button_color;
+                float btn_y = by + (bh - s.button_size) * 0.5f;
+                ri_.push_rect(ix, btn_y, s.button_size, s.button_size, btn_bg, d++, noclip);
+                math::Vec4 ic = items_[i].enabled ? s.icon_color : s.icon_disabled_color;
+                // Draw icon placeholder / label
+                if (!items_[i].icon.empty()) {
+                    ri_.push_text(items_[i].icon.c_str(), ix, btn_y, s.button_size, s.button_size,
+                                  ic, 9.0f, Alignment::Center, d++, noclip);
+                }
+                ix += s.button_size + s.button_padding;
+            }
+        }
+        ri_.push_outline(bx, by, bw, bh, math::Vec4(0.2f,0.2f,0.22f,1.0f), d, noclip);
+        ri_.finalize(); base_.clear_dirty(); return ri_;
+    }
 };
 
 // ============================================================================
@@ -153,6 +188,7 @@ class GuiStatusBar : public WidgetBase<IGuiStatusBar, WidgetType::Custom> {
     int next_id_=0;
     StatusBarStyle style_=StatusBarStyle::default_style();
     IStatusBarEventHandler* handler_=nullptr;
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)panels_.size();++i) if(panels_[i].id==id) return i; return -1; }
 public:
     int add_panel(const char* text, StatusBarPanelSizeMode mode) override {
@@ -202,6 +238,45 @@ public:
             out[i].clickable=panels_[i].clickable;
         }
         return n;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        auto noclip=math::make_box(0,0,0,0);
+        int32_t d=0;
+        const auto& s=style_;
+        ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
+        // Distribute panel widths
+        int np = (int)panels_.size();
+        if (np > 0) {
+            // Count auto panels
+            float fixed_total = 0;
+            int auto_count = 0;
+            for (auto& p : panels_) {
+                if (p.size_mode == StatusBarPanelSizeMode::Fixed) fixed_total += p.fixed_width;
+                else auto_count++;
+            }
+            float auto_w = auto_count > 0 ? (bw - fixed_total - s.separator_width*(np-1)) / auto_count : 0;
+            float px = bx;
+            for (int i = 0; i < np; i++) {
+                float pw = (panels_[i].size_mode == StatusBarPanelSizeMode::Fixed)
+                           ? panels_[i].fixed_width : std::max(auto_w, panels_[i].min_width);
+                // Separator before panel (except first)
+                if (i > 0) {
+                    ri_.push_rect(px, by+2, s.separator_width, bh-4, s.separator_color, d++, noclip);
+                    px += s.separator_width;
+                }
+                if (!panels_[i].text.empty()) {
+                    ri_.push_text(panels_[i].text.c_str(), px+4, by, pw-8, bh,
+                                  s.text_color, 11.0f, Alignment::CenterLeft, d++, noclip);
+                }
+                px += pw;
+            }
+        }
+        ri_.finalize(); base_.clear_dirty(); return ri_;
     }
 };
 

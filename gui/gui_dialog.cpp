@@ -18,6 +18,7 @@ class GuiDialog : public WidgetBase<IGuiDialog, WidgetType::Custom> {
     DialogStyle style_=DialogStyle::default_style();
     IDialogEventHandler* handler_=nullptr;
     std::vector<CustomBtn> custom_buttons_;
+    mutable WidgetRenderInfo ri_;
 public:
     const char* get_title() const override { return title_.c_str(); }
     void set_title(const char* t) override { title_=t?t:""; }
@@ -56,11 +57,126 @@ public:
     const DialogStyle& get_dialog_style() const override { return style_; }
     void set_dialog_style(const DialogStyle& s) override { style_=s; }
     void set_dialog_event_handler(IDialogEventHandler* h) override { handler_=h; }
+
+    bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
+        if (!open_) return false;
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        // Clicks outside the dialog always pass through (lets background widgets work while dialog is visible)
+        if (!math::box_contains(b, p)) return false;
+        // Inside the dialog: absorb non-left-press events
+        if (btn != MouseButton::Left || !pressed) return true;
+        // Close button (matches render: cx=bx+bw-title_h, cy=by, size=title_h)
+        if (close_btn_) {
+            float th = style_.title_bar_height;
+            if (math::box_contains(math::make_box(bx+bw-th, by, th, th), p)) {
+                hide();
+                if (handler_) { handler_->on_dialog_button_clicked(DialogResult::None);
+                                 handler_->on_dialog_closed(DialogResult::None); }
+                return true;
+            }
+        }
+        // Action buttons (matches render: centered, btn_w=80, gap=8, row at bottom)
+        int n = get_button_count();
+        if (n > 0) {
+            auto result_for = [&](int i) -> DialogResult {
+                switch(buttons_) {
+                    case DialogButtons::OK:               return DialogResult::OK;
+                    case DialogButtons::OKCancel:         return i==0?DialogResult::OK:DialogResult::Cancel;
+                    case DialogButtons::YesNo:            return i==0?DialogResult::Yes:DialogResult::No;
+                    case DialogButtons::YesNoCancel:      return i==0?DialogResult::Yes:(i==1?DialogResult::No:DialogResult::Cancel);
+                    case DialogButtons::RetryCancel:      return i==0?DialogResult::Retry:DialogResult::Cancel;
+                    case DialogButtons::AbortRetryIgnore: return i==0?DialogResult::Abort:(i==1?DialogResult::Retry:DialogResult::Ignore);
+                    default: return DialogResult::None;
+                }
+            };
+            float btn_w=80.f, btn_gap=8.f, btn_area_h=style_.button_area_height;
+            float total_w=n*(btn_w+btn_gap)-btn_gap;
+            float bstart=bx+(bw-total_w)*0.5f, bar_y=by+bh-btn_area_h;
+            for (int i=0;i<n;i++) {
+                if (math::box_contains(math::make_box(bstart, bar_y+6, btn_w, btn_area_h-12), p)) {
+                    result_ = result_for(i);
+                    hide();
+                    if (handler_) { handler_->on_dialog_button_clicked(result_);
+                                     handler_->on_dialog_closed(result_); }
+                    return true;
+                }
+                bstart += btn_w+btn_gap;
+            }
+        }
+        return true; // absorb left click inside dialog (not on a specific button)
+    }
+
     void get_dialog_render_info(DialogRenderInfo* out) const override {
         if(!out) return; auto b=base_.get_bounds();
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;
         out->style=style_; out->title=title_.c_str(); out->is_modal=modal_;
         out->is_draggable=draggable_; out->is_resizable=resizable_; out->show_close_button=close_btn_;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        if (!open_) { ri_.finalize(); return ri_; }
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        auto noclip=math::make_box(0,0,0,0);
+        int32_t d=0;
+        const auto& s=style_;
+        // Modal overlay dimming
+        if (modal_)
+            ri_.push_rect(0, 0, 9999, 9999, math::Vec4(0,0,0,0.45f), d++, noclip);
+        // Dialog background + shadow
+        ri_.push_rect(bx+3, by+3, bw, bh, math::Vec4(0,0,0,0.35f), d++, noclip);
+        ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
+        // Title bar
+        const float title_h = s.title_bar_height;
+        ri_.push_rect(bx, by, bw, title_h, s.title_bar_color, d++, noclip);
+        if (!title_.empty())
+            ri_.push_text(title_.c_str(), bx+10, by, bw-40, title_h,
+                          s.title_text_color, s.title_font_size, Alignment::CenterLeft, d++, noclip);
+        // Close button
+        if (close_btn_) {
+            float cx = bx+bw-title_h, cy = by;
+            ri_.push_rect(cx, cy, title_h, title_h, math::Vec4(0.8f,0.2f,0.2f,0.8f), d++, noclip);
+            ri_.push_text("X", cx, cy, title_h, title_h,
+                          math::Vec4(1,1,1,1), 10.0f, Alignment::Center, d++, noclip);
+        }
+        // Button bar at bottom
+        int btn_count = get_button_count();
+        if (btn_count > 0) {
+            float btn_h = s.button_area_height;
+            float bar_y = by + bh - btn_h;
+            ri_.push_rect(bx, bar_y, bw, btn_h, s.background_color, d++, noclip);
+            ri_.push_rect(bx, bar_y, bw, 1, s.border_color, d++, noclip); // separator line
+            float btn_w = 80.0f, btn_gap = 8.0f;
+            float total_w = btn_count*(btn_w+btn_gap)-btn_gap;
+            float bstart = bx + (bw-total_w)*0.5f;
+            math::Vec4 btn_bg(0.25f, 0.25f, 0.28f, 1.0f);
+            auto draw_btn = [&](const char* label) {
+                ri_.push_rect(bstart, bar_y+6, btn_w, btn_h-12, btn_bg, d++, noclip);
+                ri_.push_outline(bstart, bar_y+6, btn_w, btn_h-12, s.border_color, d, noclip);
+                ri_.push_text(label, bstart, bar_y+6, btn_w, btn_h-12,
+                              s.title_text_color, 11.0f, Alignment::Center, d++, noclip);
+                bstart += btn_w + btn_gap;
+            };
+            if (buttons_ == DialogButtons::Custom) {
+                for (auto& cb : custom_buttons_) draw_btn(cb.text.c_str());
+            } else {
+                switch(buttons_) {
+                    case DialogButtons::OK:            draw_btn("OK"); break;
+                    case DialogButtons::OKCancel:      draw_btn("OK"); draw_btn("Cancel"); break;
+                    case DialogButtons::YesNo:         draw_btn("Yes"); draw_btn("No"); break;
+                    case DialogButtons::YesNoCancel:   draw_btn("Yes"); draw_btn("No"); draw_btn("Cancel"); break;
+                    case DialogButtons::RetryCancel:   draw_btn("Retry"); draw_btn("Cancel"); break;
+                    case DialogButtons::AbortRetryIgnore: draw_btn("Abort"); draw_btn("Retry"); draw_btn("Ignore"); break;
+                    default: break;
+                }
+            }
+        }
+        ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
+        ri_.finalize(); base_.clear_dirty(); return ri_;
     }
 };
 
@@ -75,6 +191,7 @@ class GuiPopup : public WidgetBase<IGuiPopup, WidgetType::Custom> {
     math::Vec4 border_color_=color_rgba8(63,63,70);
     float corner_radius_=4.0f;
     IPopupEventHandler* handler_=nullptr;
+    mutable WidgetRenderInfo ri_;
 public:
     void show(PopupPlacement) override { open_=true; if(handler_) handler_->on_popup_opened(); }
     void show_at(const math::Vec2& pos) override {
@@ -121,6 +238,20 @@ public:
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;
         out->background_color=bg_color_; out->border_color=border_color_;
         out->corner_radius=corner_radius_; out->is_open=open_;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        if (!open_) { ri_.finalize(); return ri_; }
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        auto noclip=math::make_box(0,0,0,0);
+        int32_t d=0;
+        ri_.push_rect(bx+2, by+2, bw, bh, math::Vec4(0,0,0,0.3f), d++, noclip);
+        ri_.push_rect(bx, by, bw, bh, bg_color_, d++, noclip);
+        ri_.push_outline(bx, by, bw, bh, border_color_, d, noclip);
+        ri_.finalize(); base_.clear_dirty(); return ri_;
     }
 };
 

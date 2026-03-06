@@ -96,38 +96,43 @@ public:
         if (second_panel_ && !second_collapsed_) second_panel_->update(delta_time);
     }
 
-    void get_render_info(Window* window, WidgetRenderInfo* out) const override {
-        if (!out) return;
-        out->clear();
-        out->clip_rect = clip_enabled_ ? clip_rect_ : bounds_;
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        if (!dirty_) return render_info_;
+        render_info_.invalidate();
+        render_info_.clip_rect = clip_enabled_ ? clip_rect_ : bounds_;
 
         // Background
-        TextureEntry bg;
-        bg.source_type = TextureSourceType::Generated;
-        bg.solid_color = widget_style_.background_color;
-        bg.dest_rect = bounds_;
-        bg.clip_rect = out->clip_rect;
+        WidgetRenderInfo::ColorCmd bg;
+        bg.dest  = bounds_;
+        bg.color = widget_style_.background_color;
         bg.depth = 0;
-        out->textures.push_back(bg);
+        bg.clip  = render_info_.clip_rect;
+        render_info_.colors.push_back(bg);
 
         // Splitter bar
         if (!first_collapsed_ && !second_collapsed_) {
-            TextureEntry splitter;
-            splitter.source_type = TextureSourceType::Generated;
-            splitter.solid_color = splitter_dragging_ ? style_.splitter_drag_color
-                                 : splitter_hovered_ ? style_.splitter_hover_color
-                                 : style_.splitter_color;
-            splitter.dest_rect = get_splitter_visual_rect();
-            splitter.clip_rect = out->clip_rect;
+            WidgetRenderInfo::ColorCmd splitter;
+            splitter.color = splitter_dragging_ ? style_.splitter_drag_color
+                           : splitter_hovered_  ? style_.splitter_hover_color
+                           : style_.splitter_color;
+            splitter.dest  = get_splitter_visual_rect();
             splitter.depth = 1;
-            out->textures.push_back(splitter);
+            splitter.clip  = render_info_.clip_rect;
+            render_info_.colors.push_back(splitter);
 
             // Grip dots
-            add_grip_dots(out);
+            add_grip_dots();
         }
 
-        out->sort_and_batch();
+        render_info_.finalize();
+        dirty_ = false;
+        return render_info_;
     }
+    void mark_dirty() override {
+        dirty_ = true;
+        if (parent_) parent_->mark_dirty();
+    }
+    bool is_dirty() const override { return dirty_; }
 
     bool handle_mouse_move(const math::Vec2& position) override {
         if (!enabled_ || !visible_) return false;
@@ -151,13 +156,20 @@ public:
         bool was_hovered = splitter_hovered_;
         splitter_hovered_ = math::box_contains(hit_rect, position);
 
-        // Forward to children
+        // Forward to children (bounds-based)
+        bool in_first  = first_panel_  && !first_collapsed_  && math::box_contains(first_rect_,  position);
+        bool in_second = second_panel_ && !second_collapsed_ && math::box_contains(second_rect_, position);
         bool handled = false;
-        if (first_panel_ && !first_collapsed_ && math::box_contains(first_rect_, position))
+        if (in_first)           handled = first_panel_->handle_mouse_move(position);
+        if (!handled && in_second)  handled = second_panel_->handle_mouse_move(position);
+        // Unconstrained fallback: lets a dragging nested split panel receive events even when
+        // the mouse has left this panel's sub-region (mouse capture for drag operations)
+        if (!handled && !in_first  && first_panel_  && !first_collapsed_)
             handled = first_panel_->handle_mouse_move(position);
-        if (!handled && second_panel_ && !second_collapsed_ && math::box_contains(second_rect_, position))
+        if (!handled && !in_second && second_panel_ && !second_collapsed_)
             handled = second_panel_->handle_mouse_move(position);
 
+        if (splitter_hovered_ != was_hovered) dirty_ = true;
         return handled || (splitter_hovered_ != was_hovered);
     }
 
@@ -197,12 +209,18 @@ public:
             }
         }
 
-        // Forward to children
-        if (first_panel_ && !first_collapsed_ && math::box_contains(first_rect_, position))
-            return first_panel_->handle_mouse_button(button, pressed, position);
-        if (second_panel_ && !second_collapsed_ && math::box_contains(second_rect_, position))
-            return second_panel_->handle_mouse_button(button, pressed, position);
-
+        // Forward to children (bounds-based)
+        bool in_first  = first_panel_  && !first_collapsed_  && math::box_contains(first_rect_,  position);
+        bool in_second = second_panel_ && !second_collapsed_ && math::box_contains(second_rect_, position);
+        if (in_first  && first_panel_->handle_mouse_button(button, pressed, position))  return true;
+        if (in_second && second_panel_->handle_mouse_button(button, pressed, position)) return true;
+        // On release, also try out-of-bounds children to clear any drag state (mouse capture)
+        if (!pressed) {
+            if (!in_first  && first_panel_  && !first_collapsed_
+                && first_panel_->handle_mouse_button(button, pressed, position))  return true;
+            if (!in_second && second_panel_ && !second_collapsed_
+                && second_panel_->handle_mouse_button(button, pressed, position)) return true;
+        }
         return false;
     }
 
@@ -434,7 +452,7 @@ private:
         }
     }
 
-    void add_grip_dots(WidgetRenderInfo* out) const {
+    void add_grip_dots() const {
         math::Box splitter_rect = get_splitter_visual_rect();
         float cx = math::x(math::box_center(splitter_rect));
         float cy = math::y(math::box_center(splitter_rect));
@@ -451,17 +469,17 @@ private:
             } else {
                 dx = cx + offset; dy = cy;
             }
-            TextureEntry dot;
-            dot.source_type = TextureSourceType::Generated;
-            dot.solid_color = style_.grip_color;
-            dot.dest_rect = math::make_box(dx - dot_size * 0.5f, dy - dot_size * 0.5f, dot_size, dot_size);
-            dot.clip_rect = out->clip_rect;
+            WidgetRenderInfo::ColorCmd dot;
+            dot.color = style_.grip_color;
+            dot.dest  = math::make_box(dx - dot_size * 0.5f, dy - dot_size * 0.5f, dot_size, dot_size);
+            dot.clip  = render_info_.clip_rect;
             dot.depth = 2;
-            out->textures.push_back(dot);
+            render_info_.colors.push_back(dot);
         }
     }
 
     void recalculate_layout() {
+        dirty_ = true;
         float bx = math::x(bounds_.min_corner());
         float by = math::y(bounds_.min_corner());
         float bw = math::box_width(bounds_);
@@ -528,6 +546,8 @@ private:
     Alignment alignment_ = Alignment::TopLeft;
     IGuiEventHandler* event_handler_ = nullptr;
     ISplitPanelEventHandler* split_handler_ = nullptr;
+    mutable WidgetRenderInfo render_info_;
+    mutable bool dirty_ = true;
 
     // Panels
     IGuiWidget* first_panel_ = nullptr;
@@ -659,19 +679,18 @@ public:
         if (center_content_) center_content_->update(delta_time);
     }
 
-    void get_render_info(Window* window, WidgetRenderInfo* out) const override {
-        if (!out) return;
-        out->clear();
-        out->clip_rect = clip_enabled_ ? clip_rect_ : bounds_;
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        if (!dirty_) return render_info_;
+        render_info_.invalidate();
+        render_info_.clip_rect = clip_enabled_ ? clip_rect_ : bounds_;
 
         // Overall background
-        TextureEntry bg;
-        bg.source_type = TextureSourceType::Generated;
-        bg.solid_color = widget_style_.background_color;
-        bg.dest_rect = bounds_;
-        bg.clip_rect = out->clip_rect;
+        WidgetRenderInfo::ColorCmd bg;
+        bg.dest  = bounds_;
+        bg.color = widget_style_.background_color;
         bg.depth = 0;
-        out->textures.push_back(bg);
+        bg.clip  = render_info_.clip_rect;
+        render_info_.colors.push_back(bg);
 
         // Docked panel backgrounds and title bars
         int depth = 1;
@@ -683,40 +702,44 @@ public:
             if (math::box_width(panel_rect) <= 0 || math::box_height(panel_rect) <= 0) continue;
 
             // Panel background
-            TextureEntry panel_bg;
-            panel_bg.source_type = TextureSourceType::Generated;
-            panel_bg.solid_color = style_.background_color;
-            panel_bg.dest_rect = panel_rect;
-            panel_bg.clip_rect = out->clip_rect;
+            WidgetRenderInfo::ColorCmd panel_bg;
+            panel_bg.color = style_.background_color;
+            panel_bg.dest  = panel_rect;
+            panel_bg.clip  = render_info_.clip_rect;
             panel_bg.depth = depth++;
-            out->textures.push_back(panel_bg);
+            render_info_.colors.push_back(panel_bg);
 
             // Title bar
-            TextureEntry title_bar;
-            title_bar.source_type = TextureSourceType::Generated;
-            title_bar.solid_color = p.active ? style_.title_bar_active_color : style_.title_bar_color;
             float px = math::x(panel_rect.min_corner());
             float py = math::y(panel_rect.min_corner());
             float pw = math::box_width(panel_rect);
-            title_bar.dest_rect = math::make_box(px, py, pw, style_.title_bar_height);
-            title_bar.clip_rect = out->clip_rect;
+            WidgetRenderInfo::ColorCmd title_bar;
+            title_bar.color = p.active ? style_.title_bar_active_color : style_.title_bar_color;
+            title_bar.dest  = math::make_box(px, py, pw, style_.title_bar_height);
+            title_bar.clip  = render_info_.clip_rect;
             title_bar.depth = depth++;
-            out->textures.push_back(title_bar);
+            render_info_.colors.push_back(title_bar);
         }
 
         // Drop indicator
         if (drop_indicator_.visible) {
-            TextureEntry indicator;
-            indicator.source_type = TextureSourceType::Generated;
-            indicator.solid_color = style_.drop_indicator_color;
-            indicator.dest_rect = drop_indicator_.indicator_rect;
-            indicator.clip_rect = out->clip_rect;
+            WidgetRenderInfo::ColorCmd indicator;
+            indicator.color = style_.drop_indicator_color;
+            indicator.dest  = drop_indicator_.indicator_rect;
+            indicator.clip  = render_info_.clip_rect;
             indicator.depth = 100;
-            out->textures.push_back(indicator);
+            render_info_.colors.push_back(indicator);
         }
 
-        out->sort_and_batch();
+        render_info_.finalize();
+        dirty_ = false;
+        return render_info_;
     }
+    void mark_dirty() override {
+        dirty_ = true;
+        if (parent_) parent_->mark_dirty();
+    }
+    bool is_dirty() const override { return dirty_; }
 
     bool handle_mouse_move(const math::Vec2& pos) override {
         if (!enabled_ || !visible_) return false;
@@ -1377,6 +1400,8 @@ private:
     // Drag/drop
     bool drag_docking_enabled_ = true;
     DockDropIndicatorInfo drop_indicator_;
+    mutable WidgetRenderInfo render_info_;
+    mutable bool dirty_ = true;
 };
 
 // ============================================================================

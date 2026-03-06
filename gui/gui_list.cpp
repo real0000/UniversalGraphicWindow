@@ -14,13 +14,30 @@ class GuiListBox : public WidgetBase<IGuiListBox, WidgetType::ListBox> {
     ListBoxSelectionMode sel_mode_=ListBoxSelectionMode::Single;
     std::vector<int> multi_sel_;
     float scroll_y_=0;
+    bool sb_drag_=false;
     ListBoxStyle style_=ListBoxStyle::default_style();
     IListBoxEventHandler* handler_=nullptr;
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
 public:
+    bool handle_mouse_move(const math::Vec2& p) override {
+        if (sb_drag_) {
+            float content_h = get_total_content_height();
+            set_scroll_offset(scrollbar_offset_from_mouse(base_.get_bounds(), content_h, math::y(p)));
+            return true;
+        }
+        return base_.handle_mouse_move(p);
+    }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!base_.is_enabled() || !hit_test(p)) return false;
+        if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; }
         if (btn == MouseButton::Left && pressed) {
+            float content_h = get_total_content_height();
+            if (scrollbar_hit_test(base_.get_bounds(), content_h, p)) {
+                sb_drag_ = true;
+                set_scroll_offset(scrollbar_offset_from_mouse(base_.get_bounds(), content_h, math::y(p)));
+                return true;
+            }
             auto b = base_.get_bounds();
             float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
             int row = (style_.row_height > 0) ? (int)(rel_y / style_.row_height) : -1;
@@ -95,6 +112,52 @@ public:
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;
         out->style=style_; out->total_item_count=(int)items_.size(); out->scroll_offset_y=scroll_y_;
     }
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        math::Box clip = b;
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        // Background
+        ri_.push_rect(bx, by, bw, bh, s.row_background, d++, noclip);
+        // Rows
+        int count = (int)items_.size();
+        float row_h = s.row_height;
+        for (int i = 0; i < count; i++) {
+            float ry = by + i * row_h - scroll_y_;
+            if (ry + row_h < by || ry > by + bh) continue;
+            bool is_sel = (items_[i].id == selected_);
+            math::Vec4 row_bg = is_sel ? s.selected_background
+                              : (i%2==0) ? s.row_background : s.row_alt_background;
+            ri_.push_rect(bx, ry, bw, row_h, row_bg, d++, clip);
+            math::Vec4 text_col = is_sel ? s.selected_text_color : s.text_color;
+            if (!items_[i].text.empty())
+                ri_.push_text(items_[i].text.c_str(), bx+s.item_padding, ry, bw-s.item_padding, row_h,
+                              text_col, 11.0f, Alignment::CenterLeft, d++, clip);
+        }
+        // Embedded scrollbar
+        float content_h = (float)count * row_h;
+        if (content_h > bh) {
+            const float sb_w = 10.0f;
+            float sb_x = bx + bw - sb_w - 1;
+            ri_.push_rect(sb_x, by, sb_w, bh, math::Vec4(0.12f,0.12f,0.13f,0.6f), d++, noclip);
+            float thumb_ratio = bh / content_h;
+            float thumb_h = std::max(16.0f, bh * thumb_ratio);
+            float track_range = bh - thumb_h;
+            float max_scroll = content_h - bh;
+            float pos_ratio = (max_scroll > 0) ? scroll_y_ / max_scroll : 0.0f;
+            ri_.push_rect(sb_x, by + track_range*pos_ratio, sb_w, thumb_h,
+                          math::Vec4(0.4f,0.4f,0.42f,0.7f), d++, noclip);
+        }
+        ri_.push_outline(bx, by, bw, bh, math::Vec4(0.25f,0.25f,0.27f,1.0f), d, noclip);
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
+    }
+
     int get_visible_list_items(ListBoxItemRenderInfo* out,int max) const override {
         if(!out||max<=0) return 0;
         int n=std::min(max,(int)items_.size());
@@ -114,6 +177,7 @@ class GuiComboBox : public WidgetBase<IGuiComboBox, WidgetType::ComboBox> {
     std::string placeholder_;
     ComboBoxStyle style_=ComboBoxStyle::default_style();
     IComboBoxEventHandler* handler_=nullptr;
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
 public:
     bool hit_test(const math::Vec2& p) const override {
@@ -195,6 +259,51 @@ public:
         int n=std::min(max,(int)items_.size());
         for(int i=0;i<n;++i){out[i].item_id=items_[i].id;out[i].text=items_[i].text.c_str();out[i].icon_name=items_[i].icon.c_str();out[i].enabled=items_[i].enabled;out[i].selected=(items_[i].id==selected_);}
         return n;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        // Background + border
+        math::Vec4 bg = open_ ? s.open_background : s.background_color;
+        ri_.push_rect(bx, by, bw, bh, bg, d++, noclip);
+        ri_.push_outline(bx, by, bw, bh, s.dropdown_border_color, d, noclip);
+        // Selected text or placeholder
+        int si = find_idx(selected_);
+        const char* text = (si >= 0) ? items_[si].text.c_str() : placeholder_.c_str();
+        math::Vec4 text_col = (si >= 0) ? s.text_color : s.placeholder_color;
+        if (text && text[0])
+            ri_.push_text(text, bx+8, by, bw-26, bh, text_col, 13.0f, Alignment::CenterLeft, d++, noclip);
+        // Arrow indicator
+        ri_.push_rect(bx+bw-18, by+bh/2-3, 8, 6, s.arrow_color, d++, noclip);
+        // Dropdown list
+        if (open_) {
+            int count = (int)items_.size();
+            float drop_h = std::min(s.dropdown_max_height, (float)count * s.item_height);
+            float dy = by + bh;
+            ri_.push_rect(bx, dy, bw, drop_h, s.dropdown_background, d++, noclip);
+            math::Box drop_clip = math::make_box(bx, dy, bw, drop_h);
+            for (int i = 0; i < count && i*s.item_height < drop_h; i++) {
+                float ry = dy + i * s.item_height;
+                bool is_sel = (items_[i].id == selected_);
+                ri_.push_rect(bx, ry, bw, s.item_height,
+                              is_sel ? s.item_selected_background : s.dropdown_background, d++, drop_clip);
+                if (!items_[i].text.empty()) {
+                    math::Vec4 ic = is_sel ? s.item_selected_text_color : s.item_text_color;
+                    ri_.push_text(items_[i].text.c_str(), bx+s.item_padding, ry, bw-s.item_padding, s.item_height,
+                                  ic, 13.0f, Alignment::CenterLeft, d++, drop_clip);
+                }
+            }
+            ri_.push_outline(bx, dy, bw, drop_h, s.dropdown_border_color, d, noclip);
+        }
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
     }
 };
 

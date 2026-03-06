@@ -15,8 +15,30 @@ class GuiButton : public WidgetBase<IGuiButton, WidgetType::Button> {
     std::string text_, icon_;
     bool checked_ = false;
     int radio_group_ = 0;
+    std::vector<IGuiButton*> radio_peers_;
     ButtonStyle style_ = ButtonStyle::default_style();
     IButtonEventHandler* handler_ = nullptr;
+    mutable WidgetRenderInfo ri_;
+
+    void uncheck_radio_group() {
+        // Deselect explicit peers (for standalone/overlay radio buttons)
+        for (auto* peer : radio_peers_)
+            if (peer && peer->is_checked()) peer->set_checked(false);
+        // Deselect siblings in the same parent widget tree group
+        auto* parent = base_.get_parent();
+        if (parent) {
+            for (int i = 0; i < parent->get_child_count(); ++i) {
+                auto* sib = parent->get_child(i);
+                if (sib == this || sib->get_type() != WidgetType::Button) continue;
+                auto* sib_btn = static_cast<IGuiButton*>(sib);
+                if (sib_btn->get_button_type() == ButtonType::Radio &&
+                    sib_btn->get_radio_group() == radio_group_ &&
+                    sib_btn->is_checked()) {
+                    sib_btn->set_checked(false);
+                }
+            }
+        }
+    }
 public:
     explicit GuiButton(ButtonType t = ButtonType::Normal) : type_(t) {}
     bool is_focusable() const override { return true; }
@@ -27,20 +49,7 @@ public:
                 checked_ = !checked_; if (handler_) handler_->on_toggled(checked_);
             } else if (type_ == ButtonType::Radio) {
                 if (!checked_) {
-                    // Uncheck other radios in same group among siblings
-                    auto* parent = base_.get_parent();
-                    if (parent) {
-                        for (int i = 0; i < parent->get_child_count(); ++i) {
-                            auto* sib = parent->get_child(i);
-                            if (sib == this || sib->get_type() != WidgetType::Button) continue;
-                            auto* sib_btn = static_cast<IGuiButton*>(sib);
-                            if (sib_btn->get_button_type() == ButtonType::Radio &&
-                                sib_btn->get_radio_group() == radio_group_ &&
-                                sib_btn->is_checked()) {
-                                sib_btn->set_checked(false);
-                            }
-                        }
-                    }
+                    uncheck_radio_group();
                     checked_ = true;
                     if (handler_) handler_->on_toggled(true);
                 }
@@ -59,9 +68,59 @@ public:
     void set_checked(bool c) override { checked_ = c; }
     int get_radio_group() const override { return radio_group_; }
     void set_radio_group(int g) override { radio_group_ = g; }
+    void add_radio_peer(IGuiButton* peer) override { if (peer) radio_peers_.push_back(peer); }
+    void clear_radio_peers() override { radio_peers_.clear(); }
     const ButtonStyle& get_button_style() const override { return style_; }
     void set_button_style(const ButtonStyle& s) override { style_ = s; }
     void set_button_event_handler(IButtonEventHandler* h) override { handler_ = h; }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        bool is_radio = (type_ == ButtonType::Radio);
+        bool is_check = (type_ == ButtonType::Checkbox);
+        if (is_radio || is_check) {
+            if (base_.has_focus())
+                ri_.push_outline(bx, by, bw, bh, s.focus_border_color, d, noclip);
+            if (is_check) {
+                float cbx = bx + 4, cby = by + bh/2 - 6;
+                ri_.push_rect(cbx, cby, 12, 12, s.background_color, d++, noclip);
+                ri_.push_outline(cbx, cby, 12, 12, s.border_color, d, noclip);
+                if (checked_) ri_.push_rect(cbx+3, cby+3, 6, 6, s.checked_color, d++, noclip);
+            } else {
+                float rcx = bx + 10, rcy = by + bh/2;
+                ri_.push_circle(rcx, rcy, 6, s.border_color, d++, noclip);
+                ri_.push_circle(rcx, rcy, 5, s.background_color, d++, noclip);
+                if (checked_) ri_.push_circle(rcx, rcy, 3, s.checked_color, d++, noclip);
+            }
+            if (!text_.empty())
+                ri_.push_text(text_.c_str(), bx+22, by, bw-22, bh,
+                              s.text_color, s.font_size, Alignment::CenterLeft, d++, noclip);
+        } else {
+            math::Vec4 bg;
+            switch (base_.get_state()) {
+                case WidgetState::Pressed:  bg = s.pressed_color;  break;
+                case WidgetState::Hovered:  bg = s.hover_color;    break;
+                case WidgetState::Disabled: bg = s.disabled_color; break;
+                default: bg = checked_ ? s.checked_color : s.background_color; break;
+            }
+            ri_.push_rect(bx, by, bw, bh, bg, d++, noclip);
+            ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
+            if (base_.has_focus())
+                ri_.push_outline(bx-1, by-1, bw+2, bh+2, s.focus_border_color, d, noclip);
+            if (!text_.empty())
+                ri_.push_text(text_.c_str(), bx, by, bw, bh,
+                              s.text_color, s.font_size, Alignment::Center, d++, noclip);
+        }
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
+    }
 };
 
 // ============================================================================
@@ -70,12 +129,74 @@ public:
 
 class GuiImage : public WidgetBase<IGuiImage, WidgetType::Image> {
     std::string image_name_;
-    math::Vec4 tint_{1, 1, 1, 1};
+    math::Vec4  tint_{1, 1, 1, 1};
+    bool        use_slice9_   = false;
+    SliceBorder slice_border_;
+    SliceCenterMode slice_center_mode_ = SliceCenterMode::Stretch;
+    math::Vec2  source_size_;
+    mutable WidgetRenderInfo ri_;
 public:
     const std::string& get_image_name() const override { return image_name_; }
     void set_image_name(const std::string& n) override { image_name_ = n; }
     math::Vec4 get_tint() const override { return tint_; }
     void set_tint(const math::Vec4& t) override { tint_ = t; }
+
+    bool get_use_slice9() const override { return use_slice9_; }
+    void set_use_slice9(bool e) override { use_slice9_ = e; }
+    const SliceBorder& get_slice_border() const override { return slice_border_; }
+    void set_slice_border(const SliceBorder& b) override { slice_border_ = b; }
+    SliceCenterMode get_slice_center_mode() const override { return slice_center_mode_; }
+    void set_slice_center_mode(SliceCenterMode m) override { slice_center_mode_ = m; }
+    math::Vec2 get_source_size() const override { return source_size_; }
+    void set_source_size(const math::Vec2& s) override { source_size_ = s; }
+
+    void get_image_render_info(ImageRenderInfo* out) const override {
+        if (!out) return;
+        auto b = base_.get_bounds();
+        out->widget      = this;
+        out->bounds      = b;
+        out->clip_rect   = base_.is_clip_enabled() ? base_.get_clip_rect() : b;
+        out->image_name  = image_name_;
+        out->tint        = tint_;
+        out->use_slice9  = use_slice9_;
+        out->slice_border       = slice_border_;
+        out->slice_center_mode  = slice_center_mode_;
+        out->source_size        = source_size_;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        // Background placeholder
+        ri_.push_rect(bx, by, bw, bh,
+                      math::Vec4(0.12f*tint_.x, 0.12f*tint_.y, 0.14f*tint_.z, tint_.w), d++, noclip);
+        if (use_slice9_) {
+            WidgetRenderInfo::Slice9Cmd cmd;
+            cmd.dest        = b;
+            cmd.border      = slice_border_;
+            cmd.center_mode = slice_center_mode_;
+            cmd.color       = math::Vec4(tint_.x*0.45f, tint_.y*0.50f, tint_.z*0.60f, tint_.w);
+            cmd.atlas_layer = -1;
+            cmd.depth       = d++;
+            cmd.clip        = noclip;
+            ri_.slices.push_back(cmd);
+            ri_.push_text("9-slice", bx, by, bw, bh,
+                          math::Vec4(tint_.x*0.7f, tint_.y*0.8f, tint_.z*0.9f, 0.7f),
+                          13.0f, Alignment::Center, d++, noclip);
+        } else {
+            math::Vec4 ch(tint_.x*0.5f, tint_.y*0.5f, tint_.z*0.5f, 0.5f);
+            ri_.push_rect(bx, by+bh*0.5f-1, bw, 2, ch, d++, noclip);
+            ri_.push_rect(bx+bw*0.5f-1, by, 2, bh, ch, d++, noclip);
+            ri_.push_outline(bx, by, bw, bh, math::Vec4(0.3f,0.3f,0.3f,1.0f), d, noclip);
+        }
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
+    }
 };
 
 // ============================================================================
@@ -88,6 +209,7 @@ class GuiSlider : public WidgetBase<IGuiSlider, WidgetType::Slider> {
     bool ticks_ = false, thumb_hover_ = false, thumb_press_ = false;
     SliderStyle style_ = SliderStyle::default_style();
     ISliderEventHandler* handler_ = nullptr;
+    mutable WidgetRenderInfo ri_;
     float clamp_val(float v) const {
         v = std::max(min_, std::min(max_, v));
         if (step_ > 0) v = min_ + std::round((v - min_) / step_) * step_;
@@ -136,6 +258,36 @@ public:
     const SliderStyle& get_slider_style() const override { return style_; }
     void set_slider_style(const SliderStyle& s) override { style_ = s; }
     void set_slider_event_handler(ISliderEventHandler* h) override { handler_ = h; }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        float norm = (max_ > min_) ? (value_ - min_) / (max_ - min_) : 0.0f;
+        bool horiz = (orient_ == SliderOrientation::Horizontal);
+        const math::Vec4& tc = thumb_press_ ? s.thumb_pressed_color :
+                               thumb_hover_ ? s.thumb_hover_color : s.thumb_color;
+        if (horiz) {
+            float cy = by + bh / 2.0f, th = s.track_height;
+            ri_.push_rect(bx, cy-th/2, bw, th, s.track_color, d++, noclip);
+            ri_.push_rect(bx, cy-th/2, bw*norm, th, s.track_fill_color, d++, noclip);
+            ri_.push_circle(bx+bw*norm, cy, s.thumb_radius, tc, d++, noclip);
+        } else {
+            float cx = bx + bw/2.0f, th = s.track_height;
+            float fill_h = bh * norm;
+            ri_.push_rect(cx-th/2, by, th, bh, s.track_color, d++, noclip);
+            ri_.push_rect(cx-th/2, by+bh-fill_h, th, fill_h, s.track_fill_color, d++, noclip);
+            ri_.push_circle(cx, by+bh*(1.0f-norm), s.thumb_radius, tc, d++, noclip);
+        }
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
+    }
+
     void get_slider_render_info(SliderRenderInfo* out) const override {
         if (!out) return;
         auto b = base_.get_bounds();
@@ -159,6 +311,7 @@ class GuiProgressBar : public WidgetBase<IGuiProgressBar, WidgetType::ProgressBa
     bool show_text_ = false;
     std::string text_;
     ProgressBarStyle style_ = ProgressBarStyle::default_style();
+    mutable WidgetRenderInfo ri_;
 public:
     void update(float dt) override { if (mode_ == ProgressBarMode::Indeterminate) anim_phase_ = std::fmod(anim_phase_ + dt, 1.0f); }
     ProgressBarMode get_mode() const override { return mode_; }
@@ -171,6 +324,29 @@ public:
     void set_text(const char* t) override { text_ = t ? t : ""; }
     const ProgressBarStyle& get_progress_bar_style() const override { return style_; }
     void set_progress_bar_style(const ProgressBarStyle& s) override { style_ = s; }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        ri_.push_rect(bx, by, bw, bh, s.track_color, d++, noclip);
+        if (mode_ == ProgressBarMode::Determinate) {
+            ri_.push_rect(bx, by, bw*value_, bh, s.fill_color, d++, noclip);
+        } else {
+            float iw = bw * s.indeterminate_width;
+            ri_.push_rect(bx + (bw-iw)*anim_phase_, by, iw, bh, s.indeterminate_color, d++, noclip);
+        }
+        if (show_text_ && !text_.empty())
+            ri_.push_text(text_.c_str(), bx, by, bw, bh, s.text_color, 13.0f, Alignment::Center, d++, noclip);
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
+    }
+
     void get_progress_bar_render_info(ProgressBarRenderInfo* out) const override {
         if (!out) return;
         auto b = base_.get_bounds();
@@ -184,6 +360,18 @@ public:
 // ============================================================================
 // GuiColorPicker
 // ============================================================================
+
+// Simple HSV->RGB helper (local, not exposed)
+static void hue_to_rgb_simple(float h, float& r, float& g, float& b) {
+    float hp = h / 60.0f;
+    float x = 1.0f - std::fabsf(std::fmodf(hp, 2.0f) - 1.0f);
+    if      (hp < 1) { r=1; g=x; b=0; }
+    else if (hp < 2) { r=x; g=1; b=0; }
+    else if (hp < 3) { r=0; g=1; b=x; }
+    else if (hp < 4) { r=0; g=x; b=1; }
+    else if (hp < 5) { r=x; g=0; b=1; }
+    else             { r=1; g=0; b=x; }
+}
 
 class GuiColorPicker : public WidgetBase<IGuiColorPicker, WidgetType::Custom> {
     ColorPickerMode mode_ = ColorPickerMode::HSVSquare;
@@ -343,6 +531,8 @@ public:
         }
         return false;
     }
+    mutable WidgetRenderInfo ri_;
+
     bool is_focusable() const override { return true; }
     int get_editing_channel() const { return editing_channel_; }
     const char* get_edit_buffer() const { return edit_buf_.c_str(); }
@@ -390,6 +580,96 @@ public:
     const ColorPickerStyle& get_color_picker_style() const override { return style_; }
     void set_color_picker_style(const ColorPickerStyle& s) override { style_=s; }
     void set_color_picker_event_handler(IColorPickerEventHandler* h) override { handler_=h; }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        float sq_x, sq_y, sv_size, hue_x, hue_w, hue_h, alpha_y;
+        get_layout(sq_x, sq_y, sv_size, hue_x, hue_w, hue_h, alpha_y);
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        // Background
+        ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
+        ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
+        // Hue strip: 32 colored bands approximating the gradient
+        {
+            int steps = 32;
+            float step_h = hue_h / (float)steps;
+            for (int i = 0; i < steps; i++) {
+                float hue = (float)i / (float)steps * 360.0f;
+                float rr=1, gg=0, bb=0;
+                hue_to_rgb_simple(hue, rr, gg, bb);
+                ri_.push_rect(hue_x, sq_y + i*step_h, hue_w, step_h+1,
+                              math::Vec4(rr,gg,bb,1.0f), d++, noclip);
+            }
+        }
+        // Hue indicator bar
+        float hue_ind_y = sq_y + (hue_ / 360.0f) * hue_h;
+        ri_.push_rect(hue_x-2, hue_ind_y-1, hue_w+4, 3, math::Vec4(1,1,1,1), d++, noclip);
+        // SV square: 4-corner gradient approximation using rows
+        {
+            float hr=1,hg=0,hb=0;
+            hue_to_rgb_simple(hue_, hr, hg, hb);
+            int rows = 16;
+            float row_h = sv_size / (float)rows;
+            for (int yi = 0; yi < rows; yi++) {
+                float val_f = 1.0f - (yi+0.5f)/(float)rows;
+                int cols = 16;
+                float col_w = sv_size / (float)cols;
+                for (int xi = 0; xi < cols; xi++) {
+                    float sat_f = (xi+0.5f)/(float)cols;
+                    float r = (1.0f - sat_f + sat_f*hr) * val_f;
+                    float g = (1.0f - sat_f + sat_f*hg) * val_f;
+                    float bv= (1.0f - sat_f + sat_f*hb) * val_f;
+                    ri_.push_rect(sq_x+xi*col_w, sq_y+yi*row_h, col_w+1, row_h+1,
+                                  math::Vec4(r,g,bv,1.0f), d++, noclip);
+                }
+            }
+        }
+        // SV crosshair
+        float cx = sq_x + sat_ * sv_size, cy_sv = sq_y + (1.0f - bright_) * sv_size;
+        ri_.push_rect(cx-4, cy_sv, 9, 1, math::Vec4(1,1,1,1), d++, noclip);
+        ri_.push_rect(cx, cy_sv-4, 1, 9, math::Vec4(1,1,1,1), d++, noclip);
+        // Preview: current | previous color
+        float prev_y = sq_y + sv_size + 5;
+        ri_.push_rect(sq_x,           prev_y, sv_size/2, 20, color_,      d++, noclip);
+        ri_.push_rect(sq_x+sv_size/2, prev_y, sv_size/2, 20, prev_color_, d++, noclip);
+        // RGBA channel labels and value texts
+        int nch = alpha_enabled_ ? 4 : 3;
+        float input_y = prev_y + 25;
+        float input_w = sv_size / 2.0f;
+        const char* ch_labels[4] = {"R:", "G:", "B:", "A:"};
+        float vals[4] = {color_.x*255, color_.y*255, color_.z*255, color_.w*255};
+        for (int ch = 0; ch < nch; ch++) {
+            float iy = input_y + ch * 18;
+            ri_.push_text(ch_labels[ch], bx+5, iy, 24, 16, s.label_color, 11.0f, Alignment::CenterLeft, d++, noclip);
+            ri_.push_rect(bx+30, iy, input_w, 16, s.input_background, d++, noclip);
+            bool editing = (editing_channel_ == ch);
+            ri_.push_outline(bx+30, iy, input_w, 16,
+                             editing ? math::Vec4(0,0.48f,0.8f,1) : math::Vec4(0.3f,0.3f,0.35f,1), d, noclip);
+            if (editing) {
+                ri_.push_text(edit_buf_.c_str(), bx+34, iy, input_w-4, 16,
+                              s.input_text_color, 11.0f, Alignment::CenterLeft, d++, noclip);
+            } else {
+                char vbuf[16]; std::snprintf(vbuf, sizeof(vbuf), "%d", (int)vals[ch]);
+                ri_.push_text(vbuf, bx+34, iy, input_w-4, 16,
+                              s.input_text_color, 11.0f, Alignment::CenterLeft, d++, noclip);
+            }
+        }
+        // Hex display
+        if (hex_vis_) {
+            float hex_y = input_y + nch * 18 + 2;
+            ri_.push_text(get_hex_string(), bx+5, hex_y, bw-10, 16,
+                          s.label_color, 11.0f, Alignment::CenterLeft, d++, noclip);
+        }
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
+    }
+
     void get_color_picker_render_info(ColorPickerRenderInfo* out) const override {
         if(!out) return;
         auto b=base_.get_bounds();

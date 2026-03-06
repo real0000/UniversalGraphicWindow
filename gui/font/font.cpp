@@ -1161,4 +1161,143 @@ void destroy_font_renderer(IFontRenderer* renderer) {
     delete renderer;
 }
 
+// ============================================================================
+// FontAtlasImpl — CPU-side shelf-packing, GPU ops via callbacks
+// ============================================================================
+
+class FontAtlasImpl : public IFontAtlas {
+public:
+    int        m_tile_w     = 4096;
+    int        m_tile_h     = 4096;
+    int        m_max_layers = 2048;
+    int        m_depth      = 0;
+    uintptr_t  m_handle     = 0;
+
+    InitCallback    m_init_cb;
+    GrowCallback    m_grow_cb;
+    UploadCallback  m_upload_cb;
+    DestroyCallback m_destroy_cb;
+
+    struct Shelf { int cur_x = 0, shelf_y = 0, shelf_h = 0; };
+    std::vector<Shelf> m_shelves;
+
+    void set_callbacks(InitCallback    init_cb,
+                       GrowCallback    grow_cb,
+                       UploadCallback  upload_cb,
+                       DestroyCallback destroy_cb) override {
+        m_init_cb    = std::move(init_cb);
+        m_grow_cb    = std::move(grow_cb);
+        m_upload_cb  = std::move(upload_cb);
+        m_destroy_cb = std::move(destroy_cb);
+    }
+
+    void set_tile_size(int tile_w, int tile_h) override {
+        m_tile_w = tile_w; m_tile_h = tile_h;
+    }
+
+    void set_max_layers(int max_layers) override {
+        m_max_layers = max_layers;
+    }
+
+    AtlasEntry add(const void* rgba8, int w, int h) override {
+        if (!rgba8 || w <= 0 || h <= 0 || w > m_tile_w || h > m_tile_h) return {};
+        if (!m_init_cb || !m_grow_cb || !m_upload_cb) return {};
+
+        if (m_depth == 0) grow_to(4);
+
+        // Search existing layers for a shelf with room
+        for (int li = 0; li < m_depth; li++) {
+            Shelf& s = m_shelves[li];
+            if (s.shelf_h > 0 && h <= s.shelf_h && s.cur_x + w <= m_tile_w) {
+                AtlasEntry e = make_entry(li, s.cur_x, s.shelf_y, w, h);
+                s.cur_x += w;
+                do_upload(e, rgba8);
+                return e;
+            }
+            // Try a new shelf below the current one
+            int new_y = s.shelf_y + s.shelf_h;
+            if (new_y + h <= m_tile_h) {
+                s.shelf_y = new_y;
+                s.shelf_h = h;
+                s.cur_x   = w;
+                AtlasEntry e = make_entry(li, 0, new_y, w, h);
+                do_upload(e, rgba8);
+                return e;
+            }
+        }
+
+        // All layers full — grow
+        if (m_depth >= m_max_layers) return {};
+        int old_depth = m_depth;
+        grow_to(std::min(m_depth * 2, m_max_layers));
+
+        Shelf& s = m_shelves[old_depth];
+        s.shelf_y = 0; s.shelf_h = h; s.cur_x = w;
+        AtlasEntry e = make_entry(old_depth, 0, 0, w, h);
+        do_upload(e, rgba8);
+        return e;
+    }
+
+    void update(const AtlasEntry& entry, const void* rgba8) override {
+        if (!entry.valid() || !rgba8 || !m_handle || !m_upload_cb) return;
+        m_upload_cb(m_handle, rgba8, entry.px, entry.py, entry.layer, entry.pw, entry.ph);
+    }
+
+    uintptr_t get_gpu_handle() const override { return m_handle; }
+    int get_tile_width()       const override { return m_tile_w; }
+    int get_tile_height()      const override { return m_tile_h; }
+    int get_layer_count()      const override { return m_depth;  }
+
+    void clear() override {
+        m_shelves.clear();
+        m_shelves.resize(m_depth);
+    }
+
+    void destroy() override {
+        if (m_handle && m_destroy_cb)
+            m_destroy_cb(m_handle);
+        m_handle = 0;
+        m_depth  = 0;
+        m_shelves.clear();
+    }
+
+private:
+    AtlasEntry make_entry(int layer, int x, int y, int w, int h) const {
+        AtlasEntry e;
+        e.layer = layer;
+        e.px = x; e.py = y; e.pw = w; e.ph = h;
+        e.u0 = (float)x       / m_tile_w;
+        e.v0 = (float)y       / m_tile_h;
+        e.u1 = (float)(x + w) / m_tile_w;
+        e.v1 = (float)(y + h) / m_tile_h;
+        return e;
+    }
+
+    void do_upload(const AtlasEntry& e, const void* rgba8) {
+        m_upload_cb(m_handle, rgba8, e.px, e.py, e.layer, e.pw, e.ph);
+    }
+
+    void grow_to(int new_depth) {
+        if (new_depth <= m_depth) return;
+        if (m_depth == 0) {
+            m_handle = m_init_cb(m_tile_w, m_tile_h, new_depth);
+        } else {
+            m_handle = m_grow_cb(m_handle, m_tile_w, m_tile_h, m_depth, new_depth);
+        }
+        m_depth = new_depth;
+        m_shelves.resize(new_depth);
+    }
+};
+
+IFontAtlas* create_font_atlas() {
+    return new FontAtlasImpl();
+}
+
+void destroy_font_atlas(IFontAtlas* atlas) {
+    if (atlas) {
+        atlas->destroy();
+        delete atlas;
+    }
+}
+
 } // namespace font

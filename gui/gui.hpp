@@ -280,101 +280,191 @@ struct Viewport {
 };
 
 // ============================================================================
-// Widget Render Info - Texture list for rendering
+// Widget Render Info — ECS-style typed component pools
 // ============================================================================
 
-// Texture source type
+// Texture source type (used by TextureCmd and Slice9Cmd)
 enum class TextureSourceType : uint8_t {
-    File = 0,       // File path
-    Memory,         // Memory data pointer
-    Generated       // Runtime generated (solid color, gradient, etc.)
+    File = 0,   // File path
+    Memory,     // Memory / atlas pointer
+    Generated   // Runtime-generated (solid color, gradient, etc.)
 };
 
-// 9-slice (9-patch) center behavior
+// Shape variant for ColorCmd
+enum class DrawShape : uint8_t {
+    Rect = 0,   // Filled rectangle (default)
+    Circle      // Filled circle inscribed in dest
+};
+
+// 9-slice (9-patch) center behaviour
 enum class SliceCenterMode : uint8_t {
     Stretch = 0,    // Stretch center region
     Tile,           // Tile center region
-    Hidden          // Don't draw center (for frames)
+    Hidden          // Don't draw center (frame-only effect)
 };
 
-// 9-slice border definition (in pixels or UV units depending on use)
+// 9-slice border sizes in pixels (source image space)
 struct SliceBorder {
-    float left = 0.0f;
-    float top = 0.0f;
-    float right = 0.0f;
-    float bottom = 0.0f;
-
+    float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
     bool is_zero() const;
     static SliceBorder uniform(float size);
 };
 
-// Single texture entry for rendering
-struct TextureEntry {
-    // Texture source
-    TextureSourceType source_type = TextureSourceType::File;
-    const char* file_path = nullptr;        // For File type
-    const void* memory_data = nullptr;      // For Memory type
-    size_t memory_size = 0;                 // For Memory type
-
-    // Depth/z-order for sorting (lower = further back, higher = closer to front)
-    int32_t depth = 0;
-
-    // Destination rectangle (screen coordinates)
-    math::Box dest_rect;
-
-    // UV coordinates (0.0-1.0)
-    math::Box uv_rect = math::make_box(0.0f, 0.0f, 1.0f, 1.0f);
-
-    // Tint color (RGBA 0.0-1.0)
-    math::Vec4 tint = math::Vec4(1.0f, 1.0f, 1.0f, 1.0f);
-
-    // Clipping rectangle
-    math::Box clip_rect;
-
-    // For generated textures (solid color fill)
-    math::Vec4 solid_color;
-
-    // 9-slice rendering
-    bool use_slice9 = false;                // Enable 9-slice rendering
-    SliceBorder slice_border;               // Border sizes in pixels (source texture)
-    SliceCenterMode slice_center_mode = SliceCenterMode::Stretch;
-
-    // Check if two entries use the same texture source
-    bool same_texture(const TextureEntry& other) const;
-};
-
-// Render batch - group of entries with same texture for efficient rendering
-struct RenderBatch {
-    TextureSourceType source_type = TextureSourceType::File;
-    const char* file_path = nullptr;        // For File type
-    const void* memory_data = nullptr;      // For Memory type
-    size_t memory_size = 0;                 // For Memory type
-    int32_t start_index = 0;                // Start index in sorted entries
-    int32_t count = 0;                      // Number of entries in this batch
-};
+// ============================================================================
 
 struct WidgetRenderInfo {
-    // List of texture entries (unsorted, call sort_and_batch() before rendering)
-    std::vector<TextureEntry> textures;
+    // ------------------------------------------------------------------
+    // ECS component pools — populated by widget implementations.
+    // Each pool holds one class of primitive; entries are referenced by
+    // DrawRef after finalize() sorts the draw order by depth.
+    // ------------------------------------------------------------------
 
-    // Clipping rectangle for the entire widget
+    // Component: solid-colour rect or circle
+    struct ColorCmd {
+        math::Box  dest;
+        math::Vec4 color;
+        DrawShape  shape = DrawShape::Rect;
+        int32_t    depth = 0;
+        math::Box  clip;
+    };
+
+    // Component: textured quad (atlas layer or file path)
+    struct TextureCmd {
+        TextureSourceType source_type = TextureSourceType::Memory;
+        const char*  file_path   = nullptr;
+        const void*  memory_data = nullptr;
+        size_t       memory_size = 0;
+        int32_t      atlas_layer = -1;     // >= 0 for GL_TEXTURE_2D_ARRAY
+        math::Box    dest;
+        math::Box    uv = math::make_box(0.0f, 0.0f, 1.0f, 1.0f);
+        math::Vec4   tint = math::Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+        int32_t      depth = 0;
+        math::Box    clip;
+    };
+
+    // Component: 9-slice rect — solid (atlas_layer < 0) or textured
+    struct Slice9Cmd {
+        math::Box       dest;
+        SliceBorder     border;
+        SliceCenterMode center_mode = SliceCenterMode::Stretch;
+        // Solid fill (atlas_layer < 0)
+        math::Vec4      color;
+        // Textured (atlas_layer >= 0)
+        int32_t         atlas_layer = -1;
+        math::Box       uv = math::make_box(0.0f, 0.0f, 1.0f, 1.0f);
+        math::Vec4      tint = math::Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+        math::Vec2      source_size; // px dimensions for UV border computation
+        int32_t         depth = 0;
+        math::Box       clip;
+    };
+
+    // Component: text string to be rendered by the host renderer
+    struct TextCmd {
+        std::string  text;
+        math::Box    dest;
+        math::Vec4   color;
+        float        font_size  = 14.0f;
+        Alignment    alignment  = Alignment::CenterLeft;  // how text is placed in dest
+        int32_t      depth = 0;
+        math::Box    clip;
+        // Optional cursor (renderer measures text to find pixel position)
+        bool         show_cursor   = false;
+        int32_t      cursor_pos    = -1;    // char index where caret appears
+        math::Vec4   cursor_color;
+        // Optional selection highlight (renderer measures text to find pixel range)
+        int32_t      sel_start     = -1;
+        int32_t      sel_end       = -1;    // half-open [sel_start, sel_end)
+        math::Vec4   sel_bg_color;
+    };
+
+    std::vector<ColorCmd>   colors;    // solid rects / circles
+    std::vector<TextureCmd> textures;  // textured quads
+    std::vector<Slice9Cmd>  slices;    // 9-slice entries
+    std::vector<TextCmd>    texts;     // text strings
+
+    // Root clip rectangle for the widget subtree
     math::Box clip_rect;
 
-    // Sort entries by depth (back to front), then batch by texture source
-    // After calling this, textures are sorted and batches are populated
-    void sort_and_batch();
+    // ------------------------------------------------------------------
+    // Draw order — filled by finalize(), sorted back-to-front by depth.
+    // Each DrawRef points into one of the three pools above.
+    // ------------------------------------------------------------------
+    struct DrawRef {
+        enum class Pool : uint8_t { Color = 0, Texture, Slice9, Text };
+        Pool      pool;
+        int32_t   index;       // index into colors / textures / slices / texts
+        int32_t   depth;       // cached from the pool entry for sorting
+        math::Box clip;        // cached clip rect from the pool entry (set by finalize())
+        bool      clip_changed; // true when clip differs from the previous DrawRef (set by finalize())
+    };
 
-    // Get batches (valid after sort_and_batch())
-    const std::vector<RenderBatch>& get_batches() const { return batches; }
+    const std::vector<DrawRef>& get_draw_order() const { return draw_order_; }
 
-    // Clear all data
-    void clear() {
-        textures.clear();
-        batches.clear();
+    // ------------------------------------------------------------------
+    // Batch spans over draw_order_ — consecutive entries that can be
+    // submitted in a single draw call (same pool type + same texture key).
+    // Valid only after finalize().
+    // ------------------------------------------------------------------
+    struct BatchSpan {
+        int32_t start = 0;
+        int32_t count = 0;
+    };
+
+    const std::vector<BatchSpan>& get_batches() const { return batch_spans_; }
+
+    // True when the cached render info is up to date.
+    bool is_valid() const { return valid_; }
+
+    // ------------------------------------------------------------------
+    // Convenience push helpers — append to the pools with less boilerplate.
+    // depth is the draw-order value; caller tracks and increments it.
+    // ------------------------------------------------------------------
+
+    void push_rect(float x, float y, float w, float h,
+                   const math::Vec4& col, int32_t depth, const math::Box& clip) {
+        colors.push_back({math::make_box(x,y,w,h), col, DrawShape::Rect, depth, clip});
+    }
+    void push_circle(float cx, float cy, float radius,
+                     const math::Vec4& col, int32_t depth, const math::Box& clip) {
+        float d2 = radius * 2.0f;
+        colors.push_back({math::make_box(cx-radius,cy-radius,d2,d2), col, DrawShape::Circle, depth, clip});
+    }
+    // 4-edge outline; depth is incremented 4 times (pass by ref)
+    void push_outline(float x, float y, float w, float h,
+                      const math::Vec4& col, int32_t& depth, const math::Box& clip) {
+        push_rect(x,     y,     w, 1.f, col, depth++, clip);
+        push_rect(x,     y+h-1, w, 1.f, col, depth++, clip);
+        push_rect(x,     y,     1.f, h, col, depth++, clip);
+        push_rect(x+w-1, y,     1.f, h, col, depth++, clip);
+    }
+    // Text placed inside dest rect with the given alignment
+    void push_text(const char* t, float x, float y, float w, float h,
+                   const math::Vec4& col, float font_size, Alignment align,
+                   int32_t depth, const math::Box& clip) {
+        if (!t || !t[0]) return;
+        texts.push_back({t, math::make_box(x,y,w,h), col, font_size, align, depth, clip});
     }
 
+    // Discard all pools and cached data; called by IGuiWidget::mark_dirty().
+    void invalidate() {
+        valid_ = false;
+        colors.clear();
+        textures.clear();
+        slices.clear();
+        texts.clear();
+        draw_order_.clear();
+        batch_spans_.clear();
+    }
+
+    // Collect DrawRefs from all pools, stable-sort by depth, build BatchSpans.
+    // Called automatically from IGuiWidget::get_render_info() after all
+    // entries have been appended.
+    void finalize();
+
 private:
-    std::vector<RenderBatch> batches;
+    std::vector<DrawRef>   draw_order_;
+    std::vector<BatchSpan> batch_spans_;
+    bool valid_ = false;
 };
 
 // ============================================================================
@@ -442,8 +532,32 @@ public:
     // Update
     virtual void update(float delta_time) = 0;
 
-    // Get render info for this widget (renderer calls this)
-    virtual void get_render_info(Window* window, WidgetRenderInfo* out_info) const = 0;
+    // -----------------------------------------------------------------------
+    // Rendering — dirty-tracked, tree-recursive, auto-finalized
+    // -----------------------------------------------------------------------
+
+    // Return the render info for this widget and its entire subtree.
+    //
+    // Behaviour contract for implementations:
+    //   • If is_dirty() is false the cached WidgetRenderInfo is returned as-is.
+    //   • Otherwise the implementation clears its WidgetRenderInfo, appends
+    //     its own TextureEntry items, then calls get_render_info() on each
+    //     visible child (merging their entries), and finally calls
+    //     WidgetRenderInfo::finalize() — which sorts by depth and builds
+    //     RenderBatch groups — before returning.
+    //   • After get_render_info() returns, is_dirty() must be false.
+    //
+    // This replaces the previous (Window*, WidgetRenderInfo*) out-param API
+    // and the separate collect_render_info() free function.
+    virtual const WidgetRenderInfo& get_render_info(Window* window) const = 0;
+
+    // Mark this widget's cached render info as stale.
+    // Implementations must also call mark_dirty() on their parent (if any)
+    // so the entire ancestor chain is invalidated bottom-up.
+    virtual void mark_dirty() = 0;
+
+    // True if render info needs to be rebuilt on the next get_render_info call.
+    virtual bool is_dirty() const = 0;
 
     // Input handling
     virtual bool handle_mouse_move(const math::Vec2& position) = 0;
@@ -487,6 +601,7 @@ public:
 } // namespace window
 
 // Include all GUI component headers (after base types are defined)
+#include "gui_sizer.hpp"        // ISizer, IBoxSizer, IGridSizer, IFlowSizer
 #include "gui_label.hpp"        // IGuiLabel, IGuiTextInput, IGuiEditBox
 #include "gui_scroll.hpp"       // IGuiScrollView, IGuiScrollBar
 #include "gui_property.hpp"     // IGuiPropertyGrid

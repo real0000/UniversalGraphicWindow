@@ -17,6 +17,7 @@ class GuiTabControl : public WidgetBase<IGuiTabControl, WidgetType::TabControl> 
     bool drag_reorder_=false;
     TabStyle style_=TabStyle::default_style();
     ITabControlEventHandler* handler_=nullptr;
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)tabs_.size();++i) if(tabs_[i].id==id) return i; return -1; }
 public:
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
@@ -88,6 +89,40 @@ public:
         int n=std::min(max,(int)tabs_.size());
         for(int i=0;i<n;++i){out[i].tab_id=tabs_[i].id;out[i].text=tabs_[i].text.c_str();out[i].icon_name=tabs_[i].icon.c_str();out[i].active=(tabs_[i].id==active_);out[i].closable=tabs_[i].closable;out[i].enabled=tabs_[i].enabled;}
         return n;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float bw = math::box_width(b), bh = math::box_height(b);
+        auto noclip = math::make_box(0,0,0,0);
+        int32_t d = 0;
+        const auto& s = style_;
+        float tab_h = s.tab_height;
+        float tw = fixed_width_;  // tab width
+        // Tab bar background
+        ri_.push_rect(bx, by, bw, tab_h, s.tab_bar_background, d++, noclip);
+        // Each tab
+        for (int i = 0; i < (int)tabs_.size(); i++) {
+            bool is_active = (tabs_[i].id == active_);
+            float tx = bx + i * tw;
+            math::Vec4 tab_bg = is_active ? s.tab_active_background : s.tab_background;
+            math::Vec4 text_col = is_active ? s.tab_active_text_color : s.tab_text_color;
+            ri_.push_rect(tx, by, tw, tab_h, tab_bg, d++, noclip);
+            if (is_active)
+                ri_.push_rect(tx, by+tab_h-s.indicator_height, tw, s.indicator_height,
+                              s.indicator_color, d++, noclip);
+            if (!tabs_[i].text.empty())
+                ri_.push_text(tabs_[i].text.c_str(), tx, by, tw, tab_h,
+                              text_col, 11.0f, Alignment::Center, d++, noclip);
+        }
+        // Content area background
+        ri_.push_rect(bx, by+tab_h, bw, bh-tab_h, s.tab_active_background, d++, noclip);
+        ri_.push_outline(bx, by, bw, bh, math::Vec4(0.25f,0.25f,0.27f,1.0f), d, noclip);
+        ri_.finalize();
+        base_.clear_dirty();
+        return ri_;
     }
 };
 

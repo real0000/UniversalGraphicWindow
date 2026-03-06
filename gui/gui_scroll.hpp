@@ -247,6 +247,10 @@ public:
 // String conversion
 const char* scroll_view_size_to_string(ScrollViewSize size);
 
+// Scrollbar utility functions
+bool  scrollbar_hit_test(const math::Box& widget_bounds, float content_h, const math::Vec2& pos);
+float scrollbar_offset_from_mouse(const math::Box& widget_bounds, float content_h, float mouse_y);
+
 } // namespace gui
 } // namespace window
 

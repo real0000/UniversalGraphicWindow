@@ -22,6 +22,7 @@ enum class DialogResult : uint8_t {
     No,
     Retry,
     Abort,
+    Ignore,
     Custom
 };
 

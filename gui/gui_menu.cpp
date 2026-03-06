@@ -21,6 +21,7 @@ class GuiMenu : public WidgetBase<IGuiMenu, WidgetType::Custom> {
     bool open_=false;
     MenuStyle style_=MenuStyle::default_style();
     IMenuEventHandler* handler_=nullptr;
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
 
     // Compute the row Y offset for item at visual index, accounting for separators
@@ -44,7 +45,7 @@ public:
         float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
         float w = std::max(math::box_width(b), style_.min_width);
         float h = total_height();
-        auto drop = math::make_box(bx, by, bx + w, by + h);
+        auto drop = math::make_box(bx, by, w, h);
         return math::box_contains(drop, p);
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
@@ -162,6 +163,54 @@ public:
         }
         return n;
     }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        if (!open_) { ri_.finalize(); return ri_; }
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float menu_w = std::max(math::box_width(b), style_.min_width);
+        float th = total_height();
+        auto noclip=math::make_box(0,0,0,0);
+        int32_t d=0;
+        const auto& s=style_;
+        // Dropdown background + border
+        ri_.push_rect(bx, by, menu_w, th, s.background_color, d++, noclip);
+        ri_.push_outline(bx, by, menu_w, th, s.border_color, d, noclip);
+        float ry = by;
+        for (int i = 0; i < (int)items_.size(); i++) {
+            if (items_[i].type == MenuItemType::Separator) {
+                ri_.push_rect(bx+4, ry+s.separator_height*0.5f-1, menu_w-8, 1,
+                              s.separator_color, d++, noclip);
+                ry += s.separator_height;
+            } else {
+                math::Vec4 item_bg = items_[i].enabled ? s.background_color : s.background_color;
+                // Highlight hovered - no hover tracking in this widget, skip
+                if (items_[i].type == MenuItemType::Checkbox || items_[i].type == MenuItemType::Radio) {
+                    if (items_[i].checked) {
+                        float cx = bx+4, cy = ry + s.item_height*0.5f - 4;
+                        ri_.push_rect(cx, cy, 8, 8, s.check_color, d++, noclip);
+                    }
+                }
+                math::Vec4 tc = items_[i].enabled ? s.item_text_color : s.item_disabled_text_color;
+                if (!items_[i].text.empty())
+                    ri_.push_text(items_[i].text.c_str(), bx+20, ry, menu_w-50, s.item_height,
+                                  tc, s.font_size, Alignment::CenterLeft, d++, noclip);
+                if (!items_[i].shortcut.empty())
+                    ri_.push_text(items_[i].shortcut.c_str(), bx+menu_w-80, ry, 76, s.item_height,
+                                  s.shortcut_text_color, s.font_size, Alignment::CenterRight, d++, noclip);
+                if (items_[i].type == MenuItemType::Submenu) {
+                    // Arrow indicator
+                    float ax = bx+menu_w-10, ay = ry+s.item_height*0.5f;
+                    ri_.push_rect(ax, ay-4, 2, 8, s.item_text_color, d++, noclip);
+                    ri_.push_rect(ax+2, ay-2, 2, 4, s.item_text_color, d++, noclip);
+                    ri_.push_rect(ax+4, ay, 2, 2, s.item_text_color, d++, noclip);
+                }
+                ry += s.item_height;
+            }
+        }
+        ri_.finalize(); base_.clear_dirty(); return ri_;
+    }
 };
 
 // ============================================================================
@@ -174,6 +223,7 @@ class GuiMenuBar : public WidgetBase<IGuiMenuBar, WidgetType::Custom> {
     int next_id_=0;
     int open_menu_=-1;  // id of currently open menu entry, -1 if none
     MenuBarStyle style_=MenuBarStyle::default_style();
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)entries_.size();++i) if(entries_[i].id==id) return i; return -1; }
 public:
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
@@ -190,8 +240,8 @@ public:
 
         if (btn == MouseButton::Left && pressed) {
             if (!hit_test(p)) {
-                // Click outside: close open menu
-                if (open_menu_ >= 0) { close_open_menu(); return true; }
+                // Click outside: close open menu and let the click pass through
+                if (open_menu_ >= 0) { close_open_menu(); return false; }
                 return false;
             }
             auto b = base_.get_bounds();
@@ -251,6 +301,42 @@ public:
         int n=std::min(max,(int)entries_.size());
         for(int i=0;i<n;++i){out[i].item_id=entries_[i].id;out[i].text=entries_[i].text.c_str();out[i].enabled=entries_[i].enabled;out[i].open=(entries_[i].id==open_menu_);}
         return n;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        auto noclip=math::make_box(0,0,0,0);
+        int32_t d=0;
+        const auto& s=style_;
+        ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
+        const float item_w = 60.0f;
+        float ix = bx + 8;
+        for (int i = 0; i < (int)entries_.size(); i++) {
+            bool is_open = (entries_[i].id == open_menu_);
+            if (is_open)
+                ri_.push_rect(ix-2, by, item_w+4, bh, s.item_open_background, d++, noclip);
+            math::Vec4 tc = entries_[i].enabled ? s.item_text_color : s.item_hover_text_color;
+            if (!entries_[i].text.empty())
+                ri_.push_text(entries_[i].text.c_str(), ix, by, item_w, bh,
+                              tc, s.font_size, Alignment::Center, d++, noclip);
+            ix += item_w;
+        }
+        // Bottom border line
+        ri_.push_rect(bx, by+bh-1, bw, 1, math::Vec4(0.2f,0.2f,0.22f,1.0f), d++, noclip);
+        // Render open dropdown menu
+        for (int i = 0; i < (int)entries_.size(); i++) {
+            if (entries_[i].id == open_menu_ && entries_[i].menu) {
+                const auto& mri = entries_[i].menu->get_render_info(nullptr);
+                for (auto cmd : mri.colors)   { cmd.depth += d; ri_.colors.push_back(cmd); }
+                for (auto cmd : mri.texts)    { cmd.depth += d; ri_.texts.push_back(cmd); }
+                for (auto cmd : mri.textures) { cmd.depth += d; ri_.textures.push_back(cmd); }
+                for (auto cmd : mri.slices)   { cmd.depth += d; ri_.slices.push_back(cmd); }
+            }
+        }
+        ri_.finalize(); base_.clear_dirty(); return ri_;
     }
 };
 

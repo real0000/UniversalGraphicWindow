@@ -81,6 +81,7 @@ public:
     virtual void on_node_selected(int node_id) = 0;
     virtual void on_node_expanded(int node_id, bool expanded) = 0;
     virtual void on_node_double_clicked(int node_id) = 0;
+    virtual void on_right_click(const math::Vec2& pos) {}
 };
 
 class IGuiTreeView : public IGuiWidget {

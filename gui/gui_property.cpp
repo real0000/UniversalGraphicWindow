@@ -27,6 +27,8 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
     static const std::vector<std::string> empty_opts_;
     int editing_id_=-1;
     std::string edit_buf_;
+    bool sb_drag_=false;
+    mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)props_.size();++i) if(props_[i].id==id) return i; return -1; }
 
     void start_editing(int prop_id) {
@@ -122,9 +124,24 @@ public:
         clamp_scroll();
         return true;
     }
+    bool handle_mouse_move(const math::Vec2& p) override {
+        if (sb_drag_) {
+            float content_h = get_total_content_height();
+            set_scroll_offset(scrollbar_offset_from_mouse(base_.get_bounds(), content_h, math::y(p)));
+            return true;
+        }
+        return base_.handle_mouse_move(p);
+    }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!base_.is_enabled() || !hit_test(p)) return false;
+        if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; }
         if (btn == MouseButton::Left && pressed) {
+            float content_h = get_total_content_height();
+            if (scrollbar_hit_test(base_.get_bounds(), content_h, p)) {
+                sb_drag_ = true;
+                set_scroll_offset(scrollbar_offset_from_mouse(base_.get_bounds(), content_h, math::y(p)));
+                return true;
+            }
             auto b = base_.get_bounds();
             float bx = math::x(math::box_min(b));
             float rel_x = math::x(p) - bx;
@@ -285,6 +302,112 @@ public:
             }
         }
         return n;
+    }
+
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        ri_.invalidate();
+        val_cache_.clear();
+        auto b = base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        math::Box clip = b;
+        auto noclip=math::make_box(0,0,0,0);
+        int32_t d=0;
+        const auto& s=style_;
+        ri_.push_rect(bx, by, bw, bh, s.row_background, d++, noclip);
+        // Column divider
+        ri_.push_rect(bx+name_col_w_, by, 1, bh, s.separator_color, d++, noclip);
+
+        std::vector<VisRow> visible;
+        collect_visible(visible);
+        float content_h = (float)visible.size() * row_h_;
+
+        for (int i = 0; i < (int)visible.size(); i++) {
+            float ry = by + i * row_h_ - scroll_y_;
+            if (ry + row_h_ < by || ry > by + bh) continue;
+            if (visible[i].is_cat) {
+                // Category header
+                ri_.push_rect(bx, ry, bw, row_h_, s.category_background, d++, clip);
+                bool exp = true;
+                auto it = cat_expanded_.find(visible[i].cat_name);
+                if (it != cat_expanded_.end()) exp = it->second;
+                // Expand/collapse arrow
+                float ax = bx+4, ay = ry+row_h_*0.5f-3;
+                if (exp) {
+                    ri_.push_rect(ax,   ay,   6, 2, s.category_text_color, d++, clip);
+                    ri_.push_rect(ax+1, ay+2, 4, 2, s.category_text_color, d++, clip);
+                    ri_.push_rect(ax+2, ay+4, 2, 2, s.category_text_color, d++, clip);
+                } else {
+                    ri_.push_rect(ax,   ay,   2, 6, s.category_text_color, d++, clip);
+                    ri_.push_rect(ax+2, ay+1, 2, 4, s.category_text_color, d++, clip);
+                    ri_.push_rect(ax+4, ay+2, 2, 2, s.category_text_color, d++, clip);
+                }
+                ri_.push_text(visible[i].cat_name.c_str(), bx+16, ry, bw-16, row_h_,
+                              s.category_text_color, 11.0f, Alignment::CenterLeft, d++, clip);
+            } else {
+                int idx = visible[i].prop_idx;
+                bool is_sel = (props_[idx].id == selected_);
+                math::Vec4 row_bg = is_sel ? s.selected_background : s.row_background;
+                ri_.push_rect(bx, ry, bw, row_h_, row_bg, d++, clip);
+                // Row separator
+                ri_.push_rect(bx, ry+row_h_-1, bw, 1, s.separator_color, d++, clip);
+                // Name column
+                math::Vec4 nc = props_[idx].read_only ? math::Vec4(s.name_text_color.x*0.6f,s.name_text_color.y*0.6f,s.name_text_color.z*0.6f,1.0f) : s.name_text_color;
+                ri_.push_text(props_[idx].name.c_str(), bx+8, ry, name_col_w_-8, row_h_,
+                              nc, 11.0f, Alignment::CenterLeft, d++, clip);
+                // Value column
+                float vx = bx + name_col_w_ + 4;
+                float vw = bw - name_col_w_ - 8;
+                if (props_[idx].type == PropertyType::Bool) {
+                    float cbx = vx, cby = ry+row_h_*0.5f-5;
+                    ri_.push_rect(cbx, cby, 10, 10, s.row_background, d++, clip);
+                    ri_.push_outline(cbx, cby, 10, 10, s.name_text_color, d, clip);
+                    if (props_[idx].bool_val)
+                        ri_.push_rect(cbx+2, cby+2, 6, 6, s.value_text_color, d++, clip);
+                } else if (props_[idx].type == PropertyType::Color) {
+                    ri_.push_rect(vx, ry+3, 16, row_h_-6, props_[idx].vec4_val, d++, clip);
+                    const char* vs = format_value(idx);
+                    ri_.push_text(vs, vx+20, ry, vw-20, row_h_,
+                                  s.value_text_color, 11.0f, Alignment::CenterLeft, d++, clip);
+                } else {
+                    bool editing = (editing_id_ == props_[idx].id);
+                    if (editing) {
+                        ri_.push_rect(vx-2, ry+1, vw+2, row_h_-2, math::Vec4(0.1f,0.1f,0.12f,1.0f), d++, clip);
+                        WidgetRenderInfo::TextCmd tc;
+                        tc.text = edit_buf_;
+                        tc.dest = math::make_box(vx, ry, vw, row_h_);
+                        tc.color = s.value_text_color;
+                        tc.font_size = 11.0f;
+                        tc.alignment = Alignment::CenterLeft;
+                        tc.depth = d++;
+                        tc.clip = clip;
+                        tc.show_cursor = true;
+                        tc.cursor_pos = (int)edit_buf_.size();
+                        tc.cursor_color = s.value_text_color;
+                        ri_.texts.push_back(tc);
+                    } else {
+                        const char* vs = format_value(idx);
+                        math::Vec4 vc = props_[idx].read_only ? math::Vec4(s.value_text_color.x*0.6f,s.value_text_color.y*0.6f,s.value_text_color.z*0.6f,1.0f) : s.value_text_color;
+                        ri_.push_text(vs, vx, ry, vw, row_h_,
+                                      vc, 11.0f, Alignment::CenterLeft, d++, clip);
+                    }
+                }
+            }
+        }
+        // Embedded scrollbar
+        if (content_h > bh) {
+            const float sb_w = 10.0f;
+            float sb_x = bx + bw - sb_w - 1;
+            ri_.push_rect(sb_x, by, sb_w, bh, math::Vec4(0.12f,0.12f,0.13f,0.6f), d++, noclip);
+            float thumb_h = std::max(16.0f, bh * bh / content_h);
+            float track_range = bh - thumb_h;
+            float max_scroll = content_h - bh;
+            float pos_ratio = (max_scroll > 0) ? scroll_y_ / max_scroll : 0.0f;
+            ri_.push_rect(sb_x, by + track_range*pos_ratio, sb_w, thumb_h,
+                          math::Vec4(0.4f,0.4f,0.42f,0.7f), d++, noclip);
+        }
+        ri_.push_outline(bx, by, bw, bh, math::Vec4(0.25f,0.25f,0.27f,1.0f), d, noclip);
+        ri_.finalize(); base_.clear_dirty(); return ri_;
     }
 };
 const std::vector<std::string> GuiPropertyGrid::empty_opts_;

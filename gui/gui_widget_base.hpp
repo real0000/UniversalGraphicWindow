@@ -65,19 +65,28 @@ public:
     void set_alignment(Alignment a) override { alignment_ = a; }
     void set_event_handler(IGuiEventHandler* h) override { event_handler_ = h; }
     void update(float dt) override { for (auto* c : children_) c->update(dt); }
-    void get_render_info(Window*, WidgetRenderInfo* out) const override {
-        if (!out) return;
-        out->clear();
-        out->clip_rect = clip_enabled_ ? clip_rect_ : bounds_;
-        TextureEntry bg;
-        bg.source_type = TextureSourceType::Generated;
-        bg.solid_color = style_.background_color;
-        bg.dest_rect = bounds_;
-        bg.clip_rect = out->clip_rect;
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        if (!dirty_) return render_info_;
+        render_info_.invalidate();
+        render_info_.clip_rect = clip_enabled_ ? clip_rect_ : bounds_;
+        WidgetRenderInfo::ColorCmd bg;
+        bg.dest  = bounds_;
+        bg.color = style_.background_color;
+        bg.shape = DrawShape::Rect;
         bg.depth = 0;
-        out->textures.push_back(bg);
-        out->sort_and_batch();
+        bg.clip  = render_info_.clip_rect;
+        render_info_.colors.push_back(bg);
+        render_info_.finalize();
+        dirty_ = false;
+        return render_info_;
     }
+    void mark_dirty() override {
+        dirty_ = true;
+        if (parent_) parent_->mark_dirty();
+    }
+    bool is_dirty() const override { return dirty_; }
+    // Allow concrete subclasses to reset dirty after rebuilding their own render_info_
+    void clear_dirty() const { dirty_ = false; }
     bool handle_mouse_move(const math::Vec2& pos) override {
         if (!enabled_ || !visible_) return false;
         bool was = (state_ == WidgetState::Hovered);
@@ -162,6 +171,8 @@ protected:
     float spacing_ = 0.0f;
     IGuiEventHandler* event_handler_ = nullptr;
     std::vector<IGuiWidget*> children_;
+    mutable WidgetRenderInfo render_info_;
+    mutable bool dirty_ = true;
 };
 
 // ============================================================================
@@ -209,7 +220,9 @@ public:
     void set_alignment(Alignment a) override { base_.set_alignment(a); }
     void set_event_handler(IGuiEventHandler* h) override { base_.set_event_handler(h); }
     void update(float dt) override { base_.update(dt); }
-    void get_render_info(Window* w, WidgetRenderInfo* out) const override { base_.get_render_info(w, out); }
+    const WidgetRenderInfo& get_render_info(Window* w) const override { return base_.get_render_info(w); }
+    void mark_dirty() override { base_.mark_dirty(); }
+    bool is_dirty() const override { return base_.is_dirty(); }
     bool handle_mouse_move(const math::Vec2& p) override { return base_.handle_mouse_move(p); }
     bool handle_mouse_button(MouseButton b, bool pr, const math::Vec2& p) override { return base_.handle_mouse_button(b, pr, p); }
     bool handle_mouse_scroll(float dx, float dy) override { return base_.handle_mouse_scroll(dx, dy); }

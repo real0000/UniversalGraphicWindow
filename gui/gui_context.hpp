@@ -9,8 +9,9 @@
 #ifndef WINDOW_GUI_CONTEXT_HPP
 #define WINDOW_GUI_CONTEXT_HPP
 
-// Forward declarations for all widget interfaces
+// Forward declarations
 namespace window {
+class Window;
 namespace gui {
 
 class IGuiLabel;
@@ -77,6 +78,31 @@ public:
     // Input (specify which viewport receives input)
     virtual void set_input_state(int viewport_id, const GuiInputState& state) = 0;
     virtual const GuiInputState& get_input_state() const = 0;
+
+    // Dispatch scroll to the topmost widget under mouse_pos (depth-first hit-test).
+    // Called automatically by begin_frame() when input_state has non-zero scroll delta.
+    virtual bool dispatch_scroll(float dx, float dy, const math::Vec2& mouse_pos) = 0;
+
+    // Dispatch mouse move / button / scroll to the widget tree (overlays, then root).
+    // On left-press also updates focused widget. Can be called manually for injected events.
+    virtual void dispatch_mouse_move(const math::Vec2& pos) = 0;
+    virtual bool dispatch_mouse_button(MouseButton button, bool pressed, const math::Vec2& pos) = 0;
+
+    // Attach to a Window: registers built-in mouse and keyboard handlers automatically so
+    // all platform events are routed through the widget tree without manual dispatcher setup.
+    // Automatically unregisters on detach_window() or context shutdown.
+    virtual void attach_window(Window* win) = 0;
+    virtual void detach_window(Window* win) = 0;
+
+    // Overlay widgets: rendered after the root tree (on top), in registration order.
+    // Suitable for standalone widgets, dropdowns, dialogs, and context menus.
+    // get_render_info() skips overlays that are invisible or have empty bounds.
+    virtual void add_overlay(IGuiWidget* widget) = 0;
+    virtual void remove_overlay(IGuiWidget* widget) = 0;
+
+    // Collect render commands from the entire widget tree (root + overlays) into a
+    // single merged WidgetRenderInfo, sorted by depth. Call once per frame.
+    virtual const WidgetRenderInfo& get_render_info() = 0;
 
     // Root widget
     virtual IGuiWidget* get_root() = 0;

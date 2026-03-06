@@ -131,74 +131,84 @@ SliceBorder SliceBorder::uniform(float size) {
 }
 
 // ============================================================================
-// TextureEntry Implementation
-// ============================================================================
-
-bool TextureEntry::same_texture(const TextureEntry& other) const {
-    if (source_type != other.source_type) return false;
-    switch (source_type) {
-        case TextureSourceType::File:
-            return file_path == other.file_path ||
-                   (file_path && other.file_path && std::strcmp(file_path, other.file_path) == 0);
-        case TextureSourceType::Memory:
-            return memory_data == other.memory_data && memory_size == other.memory_size;
-        case TextureSourceType::Generated:
-            return true;  // Generated textures batch together
-        default:
-            return false;
-    }
-}
-
-// ============================================================================
 // WidgetRenderInfo Implementation
 // ============================================================================
 
-void WidgetRenderInfo::sort_and_batch() {
-    if (textures.empty()) {
-        batches.clear();
-        return;
-    }
+void WidgetRenderInfo::finalize() {
+    draw_order_.clear();
+    batch_spans_.clear();
 
-    // Sort by depth first, then group by texture source for batching
-    std::sort(textures.begin(), textures.end(),
-        [](const TextureEntry& a, const TextureEntry& b) {
-            if (a.depth != b.depth) return a.depth < b.depth;
-            // Secondary sort by source type and pointer for grouping
-            if (a.source_type != b.source_type)
-                return static_cast<int>(a.source_type) < static_cast<int>(b.source_type);
-            if (a.source_type == TextureSourceType::File)
-                return a.file_path < b.file_path;
-            if (a.source_type == TextureSourceType::Memory)
-                return a.memory_data < b.memory_data;
-            return false;
-        });
+    // Collect a DrawRef from every entry in each typed pool, caching clip for the renderer.
+    for (int32_t i = 0; i < (int32_t)colors.size(); ++i)
+        draw_order_.push_back({DrawRef::Pool::Color,   i, colors[i].depth,   colors[i].clip,   false});
+    for (int32_t i = 0; i < (int32_t)textures.size(); ++i)
+        draw_order_.push_back({DrawRef::Pool::Texture, i, textures[i].depth, textures[i].clip, false});
+    for (int32_t i = 0; i < (int32_t)slices.size(); ++i)
+        draw_order_.push_back({DrawRef::Pool::Slice9,  i, slices[i].depth,   slices[i].clip,   false});
+    for (int32_t i = 0; i < (int32_t)texts.size(); ++i)
+        draw_order_.push_back({DrawRef::Pool::Text,    i, texts[i].depth,    texts[i].clip,    false});
 
-    // Build batches
-    batches.clear();
-    RenderBatch current_batch;
-    current_batch.source_type = textures[0].source_type;
-    current_batch.file_path = textures[0].file_path;
-    current_batch.memory_data = textures[0].memory_data;
-    current_batch.memory_size = textures[0].memory_size;
-    current_batch.start_index = 0;
-    current_batch.count = 1;
+    // Stable sort by depth — equal-depth entries preserve insertion order.
+    std::stable_sort(draw_order_.begin(), draw_order_.end(),
+        [](const DrawRef& a, const DrawRef& b) { return a.depth < b.depth; });
 
-    for (size_t i = 1; i < textures.size(); ++i) {
-        const auto& entry = textures[i];
-        // Same texture source can be batched
-        if (entry.same_texture(textures[i - 1])) {
-            current_batch.count++;
-        } else {
-            batches.push_back(current_batch);
-            current_batch.source_type = entry.source_type;
-            current_batch.file_path = entry.file_path;
-            current_batch.memory_data = entry.memory_data;
-            current_batch.memory_size = entry.memory_size;
-            current_batch.start_index = static_cast<int32_t>(i);
-            current_batch.count = 1;
+    // Mark clip_changed: first entry always triggers a clip update; subsequent entries
+    // only when the clip rect differs from the previous entry after depth-sort.
+    if (!draw_order_.empty()) {
+        draw_order_[0].clip_changed = true;
+        for (size_t i = 1; i < draw_order_.size(); ++i) {
+            const math::Box& prev = draw_order_[i - 1].clip;
+            const math::Box& cur  = draw_order_[i].clip;
+            draw_order_[i].clip_changed =
+                math::x(math::box_min(cur))  != math::x(math::box_min(prev)) ||
+                math::y(math::box_min(cur))  != math::y(math::box_min(prev)) ||
+                math::box_width(cur)         != math::box_width(prev)        ||
+                math::box_height(cur)        != math::box_height(prev);
         }
     }
-    batches.push_back(current_batch);
+
+    // Build BatchSpan groups for consecutive entries that can share a draw call.
+    // Two refs are in the same batch when they use the same pool type AND the
+    // same texture key (atlas layer / file path), or are both solid-colour.
+    auto same_batch = [&](const DrawRef& a, const DrawRef& b) -> bool {
+        if (a.pool != b.pool) return false;
+        switch (a.pool) {
+            case DrawRef::Pool::Color:
+                return true; // All solid draws share the "no-texture" state.
+            case DrawRef::Pool::Texture: {
+                const TextureCmd& ta = textures[a.index];
+                const TextureCmd& tb = textures[b.index];
+                if (ta.source_type != tb.source_type) return false;
+                if (ta.source_type == TextureSourceType::Memory)
+                    return ta.atlas_layer == tb.atlas_layer
+                        && ta.memory_data == tb.memory_data;
+                if (ta.source_type == TextureSourceType::File)
+                    return ta.file_path == tb.file_path
+                        || (ta.file_path && tb.file_path
+                            && std::strcmp(ta.file_path, tb.file_path) == 0);
+                return true; // Generated textures batch together.
+            }
+            case DrawRef::Pool::Slice9:
+                return slices[a.index].atlas_layer == slices[b.index].atlas_layer;
+            default:
+                return false;
+        }
+    };
+
+    if (!draw_order_.empty()) {
+        BatchSpan current{0, 1};
+        for (size_t i = 1; i < draw_order_.size(); ++i) {
+            if (same_batch(draw_order_[i - 1], draw_order_[i])) {
+                current.count++;
+            } else {
+                batch_spans_.push_back(current);
+                current = {static_cast<int32_t>(i), 1};
+            }
+        }
+        batch_spans_.push_back(current);
+    }
+
+    valid_ = true;
 }
 
 // ============================================================================
