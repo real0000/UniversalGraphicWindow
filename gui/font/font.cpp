@@ -593,14 +593,23 @@ private:
     IFontLibrary* library_;
 };
 
+#ifdef FONT_SUPPORT_HARFBUZZ
+// Defined in font_harfbuzz.cpp
+ITextShaper* create_harfbuzz_text_shaper(IFontLibrary* library, Result* out_result);
+#endif
+
 ITextShaper* create_text_shaper(IFontLibrary* library, Result* out_result) {
     if (!library) {
         if (out_result) *out_result = Result::ErrorInvalidParameter;
         return nullptr;
     }
 
+#ifdef FONT_SUPPORT_HARFBUZZ
+    return create_harfbuzz_text_shaper(library, out_result);
+#else
     if (out_result) *out_result = Result::Success;
     return new SimpleTextShaper(library);
+#endif
 }
 
 void destroy_text_shaper(ITextShaper* shaper) {

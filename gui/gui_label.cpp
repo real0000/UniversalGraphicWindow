@@ -181,7 +181,7 @@ class GuiEditBox : public WidgetBase<IGuiEditBox, WidgetType::Custom> {
                 // Snap to nearest character boundary using midpoint between adjacent positions
                 float prev_w = 0.0f;
                 for (int i = 1; i <= (int)line_str.size(); ++i) {
-                    float w = measurer_->measure_text(line_str.substr(0, i).c_str(), style_.font_size, style_.font_name).x;
+                    float w = measurer_->measure_text(line_str.substr(0, i).c_str(), style_.font_size, style_.font_name).x();
                     if (rel_x < (prev_w + w) / 2.0f) break;  // click is on left half → don't advance
                     col = i;
                     prev_w = w;

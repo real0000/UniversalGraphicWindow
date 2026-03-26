@@ -45,6 +45,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
 
 namespace window {
 
@@ -121,7 +122,8 @@ public:
         c.max_texture_3d_size      = static_cast<int>(lim.maxImageDimension3D);
         c.max_texture_cube_size    = static_cast<int>(lim.maxImageDimensionCube);
         c.max_texture_array_layers = static_cast<int>(lim.maxImageArrayLayers);
-        c.max_mip_levels           = static_cast<int>(lim.maxMipLevels);
+        // Vulkan doesn't expose maxMipLevels directly; derive from max 2D dimension
+        c.max_mip_levels           = static_cast<int>(std::floor(std::log2(lim.maxImageDimension2D))) + 1;
 
         // Framebuffer
         c.max_color_attachments  = static_cast<int>(lim.maxColorAttachments);

@@ -39,6 +39,8 @@ option(WINDOW_ENABLE_VIRTUAL_KEYBOARD "Enable virtual keyboard support" ON)
 # Font options
 option(WINDOW_ENABLE_FONT "Enable font rendering support" ON)
 option(WINDOW_ENABLE_FREETYPE "Enable FreeType2 font backend" OFF)
+option(WINDOW_ENABLE_HARFBUZZ "Enable HarfBuzz text shaping" ON)
+option(WINDOW_ENABLE_FRIBIDI "Enable FriBidi bidirectional text" ON)
 
 # SIMD math acceleration options
 option(WINDOW_MATH_SSE "Enable SSE SIMD acceleration for math (x86/x64)" ON)
@@ -234,6 +236,100 @@ else()
     message(STATUS "Boost found: ${Boost_VERSION}")
     set(BOOST_FETCHED FALSE)
     set(BOOST_INCLUDE_DIR "${Boost_INCLUDE_DIRS}")
+endif()
+
+# HarfBuzz (text shaping)
+if(WINDOW_ENABLE_HARFBUZZ AND WINDOW_ENABLE_FONT)
+    find_package(harfbuzz QUIET)
+    if(NOT harfbuzz_FOUND)
+        message(STATUS "HarfBuzz not found - fetching from GitHub...")
+        set(HB_BUILD_SUBSET OFF CACHE BOOL "" FORCE)
+        set(HB_HAVE_FREETYPE OFF CACHE BOOL "" FORCE)
+        set(HB_HAVE_GLIB OFF CACHE BOOL "" FORCE)
+        set(HB_HAVE_ICU OFF CACHE BOOL "" FORCE)
+        set(HB_HAVE_GOBJECT OFF CACHE BOOL "" FORCE)
+        set(HB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        window_fetch_content(harfbuzz
+            GIT_REPOSITORY https://github.com/harfbuzz/harfbuzz.git
+            GIT_TAG 9.0.0
+        )
+        FetchContent_MakeAvailable(harfbuzz)
+        message(STATUS "HarfBuzz fetched: 9.0.0")
+    else()
+        message(STATUS "HarfBuzz found")
+    endif()
+    set(HARFBUZZ_AVAILABLE TRUE)
+endif()
+
+# FriBidi (bidirectional text)
+if(WINDOW_ENABLE_FRIBIDI AND WINDOW_ENABLE_FONT)
+    find_package(PkgConfig QUIET)
+    set(FRIBIDI_FOUND FALSE)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FRIBIDI fribidi QUIET)
+    endif()
+    if(NOT FRIBIDI_FOUND)
+        message(STATUS "FriBidi not found - fetching release tarball...")
+        window_fetch_content(fribidi
+            URL https://github.com/fribidi/fribidi/releases/download/v1.0.15/fribidi-1.0.15.tar.xz
+        )
+        FetchContent_GetProperties(fribidi)
+        if(NOT fribidi_POPULATED)
+            FetchContent_Populate(fribidi)
+        endif()
+        # FriBidi uses Meson natively; build a minimal CMake target from sources
+        # Release tarball includes pre-generated .tab.i files in lib/
+        set(FRIBIDI_SRC_DIR "${fribidi_SOURCE_DIR}")
+        set(FRIBIDI_BUILD_DIR "${fribidi_BINARY_DIR}")
+        # Generate fribidi-config.h and fribidi-unicode-version.h
+        file(MAKE_DIRECTORY "${FRIBIDI_BUILD_DIR}/lib")
+        file(WRITE "${FRIBIDI_BUILD_DIR}/lib/fribidi-config.h"
+            "#ifndef FRIBIDI_CONFIG_H\n"
+            "#define FRIBIDI_CONFIG_H\n"
+            "#define FRIBIDI_MAJOR_VERSION 1\n"
+            "#define FRIBIDI_MINOR_VERSION 0\n"
+            "#define FRIBIDI_MICRO_VERSION 15\n"
+            "#define FRIBIDI_VERSION \"1.0.15\"\n"
+            "#define FRIBIDI_INTERFACE_VERSION 4\n"
+            "#define FRIBIDI_SIZEOF_INT ${CMAKE_SIZEOF_VOID_P}\n"
+            "#define FRIBIDI_NAME \"GNU FriBidi\"\n"
+            "#define FRIBIDI_BUGREPORT \"https://github.com/fribidi/fribidi/issues\"\n"
+            "#define FRIBIDI_INTERFACE_VERSION_STRING \"4\"\n"
+            "#ifndef FRIBIDI_ENTRY\n"
+            "#define FRIBIDI_ENTRY\n"
+            "#endif\n"
+            "#endif\n"
+        )
+        # fribidi-unicode-version.h is needed by fribidi-unicode.h
+        if(NOT EXISTS "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h")
+            file(WRITE "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h"
+                "#ifndef FRIBIDI_UNICODE_VERSION_H\n"
+                "#define FRIBIDI_UNICODE_VERSION_H\n"
+                "#define FRIBIDI_UNICODE_VERSION \"15.1.0\"\n"
+                "#define FRIBIDI_UNICODE_MAJOR_VERSION 15\n"
+                "#define FRIBIDI_UNICODE_MINOR_VERSION 1\n"
+                "#define FRIBIDI_UNICODE_MICRO_VERSION 0\n"
+                "#endif\n"
+            )
+        endif()
+        file(GLOB FRIBIDI_SOURCES "${FRIBIDI_SRC_DIR}/lib/*.c")
+        # Remove charset-related sources (we only need the core BiDi algorithm)
+        list(FILTER FRIBIDI_SOURCES EXCLUDE REGEX "fribidi-char-sets.*\\.c$")
+        add_library(fribidi STATIC ${FRIBIDI_SOURCES})
+        target_include_directories(fribidi PUBLIC
+            $<BUILD_INTERFACE:${FRIBIDI_SRC_DIR}/lib>
+            $<BUILD_INTERFACE:${FRIBIDI_BUILD_DIR}/lib>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        )
+        target_compile_definitions(fribidi PRIVATE HAVE_STRING_H HAVE_STDLIB_H HAVE_STRINGIZE)
+        if(MSVC)
+            target_compile_options(fribidi PRIVATE /wd4244 /wd4267 /wd4018)
+        endif()
+        message(STATUS "FriBidi fetched: 1.0.15")
+    else()
+        message(STATUS "FriBidi found")
+    endif()
+    set(FRIBIDI_AVAILABLE TRUE)
 endif()
 
 # OpenGL
@@ -583,6 +679,21 @@ if(WINDOW_ENABLE_FONT)
         endif()
     endif()
 
+    # HarfBuzz text shaper
+    if(HARFBUZZ_AVAILABLE)
+        list(APPEND WINDOW_SOURCES gui/font/font_harfbuzz.cpp)
+        list(APPEND WINDOW_LIBS harfbuzz)
+        list(APPEND WINDOW_DEFINES FONT_SUPPORT_HARFBUZZ)
+        message(STATUS "Text shaping: HarfBuzz")
+    endif()
+
+    # FriBidi bidirectional text
+    if(FRIBIDI_AVAILABLE)
+        list(APPEND WINDOW_LIBS fribidi)
+        list(APPEND WINDOW_DEFINES FONT_SUPPORT_FRIBIDI)
+        message(STATUS "BiDi text: FriBidi")
+    endif()
+
     message(STATUS "Font support enabled")
 else()
     message(STATUS "Font support disabled")
@@ -831,7 +942,11 @@ endif()
 
 include(GNUInstallDirs)
 
-install(TARGETS window
+set(_WINDOW_INSTALL_TARGETS window)
+if(FRIBIDI_AVAILABLE AND TARGET fribidi)
+    list(APPEND _WINDOW_INSTALL_TARGETS fribidi)
+endif()
+install(TARGETS ${_WINDOW_INSTALL_TARGETS}
     EXPORT windowTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

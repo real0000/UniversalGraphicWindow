@@ -15,7 +15,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
-#include <dxgi1_2.h>
+#include <dxgi1_5.h>
 #include <string>
 #include "../internal/utf8_util.hpp"
 
