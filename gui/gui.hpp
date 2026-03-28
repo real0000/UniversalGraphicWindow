@@ -656,5 +656,6 @@ public:
 #include "gui_animation.hpp"    // IGuiAnimation, IGuiAnimationManager
 #include "gui_page.hpp"         // IGuiPage, IGuiPageView
 #include "gui_context.hpp"      // IGuiContext, IGuiTheme, IGuiLayout, factory functions
+#include "gui_serialization.hpp" // gui_save, gui_load, GuiSerializeFormat, GuiSerializeOptions
 
 #endif // WINDOW_GUI_HPP

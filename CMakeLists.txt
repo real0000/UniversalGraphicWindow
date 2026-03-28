@@ -590,6 +590,7 @@ if(WINDOW_ENABLE_GUI)
         gui/gui_panel.cpp
         gui/gui_sizer.cpp
         gui/gui_animation.cpp
+        gui/gui_serialization.cpp
     )
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_GUI)
     message(STATUS "GUI support enabled")
@@ -932,6 +933,9 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
     if(WINDOW_ENABLE_GUI)
         add_executable(example_gui examples/gui.cpp)
         target_link_libraries(example_gui PRIVATE window)
+
+        add_executable(example_gui_serialization examples/gui_serialization.cpp)
+        target_link_libraries(example_gui_serialization PRIVATE window)
     endif()
 
     # Metal example (macOS only)
