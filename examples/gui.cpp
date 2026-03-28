@@ -1490,6 +1490,14 @@ int main() {
     }
     printf("Font loaded: %s (%.0fpt)\n", g_font_ui->get_family_name(), g_font_ui->get_size());
 
+    // Create font fallback chain for multi-language support
+    font::IFontFallbackChain* fallback_chain =
+        font::create_fallback_chain_with_defaults(font_library, g_font_ui, 14.0f);
+    if (fallback_chain) {
+        g_font_renderer->set_fallback_chain(fallback_chain);
+        printf("Font fallback chain: %d fonts\n", fallback_chain->get_font_count());
+    }
+
     // Create GUI context
     GuiResult gresult;
     IGuiContext* ctx = create_gui_context(&gresult);
@@ -1646,6 +1654,10 @@ int main() {
     destroy_gui_context(ctx);
     font::destroy_font_renderer(g_font_renderer);
     g_font_renderer = nullptr;
+    if (fallback_chain) {
+        font::destroy_fallback_chain(fallback_chain);
+        fallback_chain = nullptr;
+    }
     font::destroy_font_library(font_library);
     win->destroy();
 

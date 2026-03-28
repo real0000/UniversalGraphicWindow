@@ -35,7 +35,7 @@ namespace font {
 
 class DirectWriteFontFace : public IFontFace {
 public:
-    DirectWriteFontFace(IDWriteFontFace* face, IDWriteFont* font,
+    DirectWriteFontFace(IDWriteFactory* factory, IDWriteFontFace* face, IDWriteFont* font,
                         const FontDescriptor& desc, float size);
     ~DirectWriteFontFace();
 
@@ -63,6 +63,7 @@ private:
     void update_metrics();
     float design_units_to_pixels(int units) const;
 
+    IDWriteFactory* dwrite_factory_ = nullptr;  // borrowed, not owned
     IDWriteFontFace* font_face_ = nullptr;
     IDWriteFont* font_ = nullptr;
     FontDescriptor descriptor_;
@@ -74,9 +75,10 @@ private:
     std::vector<uint8_t> glyph_buffer_;
 };
 
-DirectWriteFontFace::DirectWriteFontFace(IDWriteFontFace* face, IDWriteFont* font,
+DirectWriteFontFace::DirectWriteFontFace(IDWriteFactory* factory, IDWriteFontFace* face,
+                                          IDWriteFont* font,
                                           const FontDescriptor& desc, float size)
-    : font_face_(face), font_(font), descriptor_(desc), size_(size) {
+    : dwrite_factory_(factory), font_face_(face), font_(font), descriptor_(desc), size_(size) {
     if (font_face_) {
         font_face_->AddRef();
     }
@@ -188,11 +190,12 @@ float DirectWriteFontFace::get_kerning(uint32_t left_glyph, uint32_t right_glyph
 
 Result DirectWriteFontFace::render_glyph(uint32_t glyph_index, const RenderOptions& options,
                                           GlyphBitmap* out_bitmap) {
-    if (!font_face_ || !out_bitmap) return Result::ErrorInvalidParameter;
+    if (!font_face_ || !out_bitmap || !dwrite_factory_)
+        return Result::ErrorInvalidParameter;
 
     UINT16 gi = static_cast<UINT16>(glyph_index);
 
-    // Get glyph run bounds
+    // Get design-space glyph metrics
     DWRITE_GLYPH_METRICS glyph_metrics;
     if (FAILED(font_face_->GetDesignGlyphMetrics(&gi, 1, &glyph_metrics))) {
         return Result::ErrorGlyphNotFound;
@@ -200,151 +203,106 @@ Result DirectWriteFontFace::render_glyph(uint32_t glyph_index, const RenderOptio
 
     float scale = size_ / static_cast<float>(dw_metrics_.designUnitsPerEm);
 
-    int width = static_cast<int>(std::ceil(glyph_metrics.advanceWidth * scale)) + 2;
-    int height = static_cast<int>(std::ceil((dw_metrics_.ascent + dw_metrics_.descent) * scale)) + 2;
+    // Build a single-glyph run
+    DWRITE_GLYPH_RUN glyph_run = {};
+    glyph_run.fontFace    = font_face_;
+    glyph_run.fontEmSize  = size_;
+    glyph_run.glyphCount  = 1;
+    glyph_run.glyphIndices = &gi;
 
-    if (width <= 0 || height <= 0) {
-        out_bitmap->width = 0;
+    // Choose rendering mode
+    DWRITE_RENDERING_MODE render_mode = DWRITE_RENDERING_MODE_NATURAL;
+    if (options.antialias == AntiAliasMode::None)
+        render_mode = DWRITE_RENDERING_MODE_ALIASED;
+
+    // Create glyph-run analysis (pure DirectWrite, no COM/WIC/D2D required)
+    IDWriteGlyphRunAnalysis* analysis = nullptr;
+    HRESULT hr = dwrite_factory_->CreateGlyphRunAnalysis(
+        &glyph_run,
+        1.0f,               // pixels per DIP
+        nullptr,             // transform (identity)
+        render_mode,
+        DWRITE_MEASURING_MODE_NATURAL,
+        0.0f, 0.0f,         // baseline origin
+        &analysis);
+
+    if (FAILED(hr) || !analysis) {
+        return Result::ErrorRenderFailed;
+    }
+
+    // DWRITE_TEXTURE_ALIASED_1x1 only works with ALIASED rendering mode.
+    // For antialiased modes, use CLEARTYPE_3x1 (3 bytes per pixel) and
+    // convert to grayscale afterwards.
+    DWRITE_TEXTURE_TYPE tex_type = (render_mode == DWRITE_RENDERING_MODE_ALIASED)
+                                     ? DWRITE_TEXTURE_ALIASED_1x1
+                                     : DWRITE_TEXTURE_CLEARTYPE_3x1;
+
+    // Get the tight bounding box of the rendered glyph
+    RECT bounds = {};
+    hr = analysis->GetAlphaTextureBounds(tex_type, &bounds);
+    if (FAILED(hr) || bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
+        // Glyph has no visible pixels (e.g. space)
+        analysis->Release();
+        out_bitmap->width  = 0;
         out_bitmap->height = 0;
         out_bitmap->pixels = nullptr;
+        out_bitmap->metrics.width     = glyph_metrics.advanceWidth * scale;
+        out_bitmap->metrics.height    = 0;
+        out_bitmap->metrics.bearing_x = glyph_metrics.leftSideBearing * scale;
+        out_bitmap->metrics.bearing_y = 0;
+        out_bitmap->metrics.advance_x = glyph_metrics.advanceWidth * scale;
+        out_bitmap->metrics.advance_y = 0.0f;
         return Result::Success;
     }
 
-    // Create a bitmap render target
-    ID2D1Factory* d2d_factory = nullptr;
-    D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d_factory);
+    int bmp_w = bounds.right  - bounds.left;
+    int bmp_h = bounds.bottom - bounds.top;
 
-    if (!d2d_factory) {
-        return Result::ErrorRenderFailed;
-    }
-
-    // Create WIC bitmap
-    IWICImagingFactory* wic_factory = nullptr;
-    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                     IID_IWICImagingFactory, reinterpret_cast<void**>(&wic_factory));
-
-    if (!wic_factory) {
-        d2d_factory->Release();
-        return Result::ErrorRenderFailed;
-    }
-
-    IWICBitmap* wic_bitmap = nullptr;
-    wic_factory->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA,
-                              WICBitmapCacheOnDemand, &wic_bitmap);
-
-    if (!wic_bitmap) {
-        wic_factory->Release();
-        d2d_factory->Release();
-        return Result::ErrorRenderFailed;
-    }
-
-    // Create D2D render target
-    D2D1_RENDER_TARGET_PROPERTIES rt_props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
-    );
-
-    ID2D1RenderTarget* rt = nullptr;
-    d2d_factory->CreateWicBitmapRenderTarget(wic_bitmap, rt_props, &rt);
-
-    if (!rt) {
-        wic_bitmap->Release();
-        wic_factory->Release();
-        d2d_factory->Release();
-        return Result::ErrorRenderFailed;
-    }
-
-    // Set antialiasing mode
-    D2D1_TEXT_ANTIALIAS_MODE aa_mode = D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE;
-    switch (options.antialias) {
-        case AntiAliasMode::None:
-            aa_mode = D2D1_TEXT_ANTIALIAS_MODE_ALIASED;
-            break;
-        case AntiAliasMode::Subpixel:
-        case AntiAliasMode::SubpixelBGR:
-            aa_mode = D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE;
-            break;
-        default:
-            aa_mode = D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE;
-            break;
-    }
-    rt->SetTextAntialiasMode(aa_mode);
-
-    // Create brush
-    ID2D1SolidColorBrush* brush = nullptr;
-    rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f), &brush);
-
-    // Draw glyph
-    rt->BeginDraw();
-    rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-
-    DWRITE_GLYPH_RUN glyph_run = {};
-    glyph_run.fontFace = font_face_;
-    glyph_run.fontEmSize = size_;
-    glyph_run.glyphCount = 1;
-    glyph_run.glyphIndices = &gi;
-
-    float baseline_y = dw_metrics_.ascent * scale;
-    float bearing_x = glyph_metrics.leftSideBearing * scale;
-    D2D1_POINT_2F origin = {-bearing_x + 1.0f, baseline_y + 1.0f};
-
-    rt->DrawGlyphRun(origin, &glyph_run, brush);
-    rt->EndDraw();
-
-    brush->Release();
-    rt->Release();
-
-    // Lock bitmap and copy to output
-    WICRect lock_rect = {0, 0, width, height};
-    IWICBitmapLock* lock = nullptr;
-    wic_bitmap->Lock(&lock_rect, WICBitmapLockRead, &lock);
-
-    if (lock) {
-        UINT buffer_size = 0;
-        BYTE* data = nullptr;
-        lock->GetDataPointer(&buffer_size, &data);
-
-        UINT stride = 0;
-        lock->GetStride(&stride);
-
-        // Convert to grayscale alpha if needed
-        if (options.output_format == PixelFormat::A8) {
-            glyph_buffer_.resize(width * height);
-            for (int y = 0; y < height; ++y) {
-                for (int x = 0; x < width; ++x) {
-                    BYTE* pixel = data + y * stride + x * 4;
-                    // Use alpha channel (premultiplied)
-                    glyph_buffer_[y * width + x] = pixel[3];
-                }
+    if (tex_type == DWRITE_TEXTURE_ALIASED_1x1) {
+        // A8: 1 byte per pixel
+        glyph_buffer_.resize(bmp_w * bmp_h);
+        hr = analysis->CreateAlphaTexture(tex_type, &bounds,
+                                           glyph_buffer_.data(),
+                                           static_cast<UINT32>(glyph_buffer_.size()));
+    } else {
+        // ClearType: 3 bytes per pixel (RGB sub-pixel coverage).
+        // Read into a temporary buffer, then average to A8.
+        std::vector<uint8_t> ct_buf(bmp_w * bmp_h * 3);
+        hr = analysis->CreateAlphaTexture(tex_type, &bounds,
+                                           ct_buf.data(),
+                                           static_cast<UINT32>(ct_buf.size()));
+        if (SUCCEEDED(hr)) {
+            glyph_buffer_.resize(bmp_w * bmp_h);
+            for (int i = 0; i < bmp_w * bmp_h; ++i) {
+                int r = ct_buf[i * 3 + 0];
+                int g = ct_buf[i * 3 + 1];
+                int b = ct_buf[i * 3 + 2];
+                glyph_buffer_[i] = static_cast<uint8_t>((r + g + b + 1) / 3);
             }
-            out_bitmap->pixels = glyph_buffer_.data();
-            out_bitmap->pitch = width;
-            out_bitmap->format = PixelFormat::A8;
-        } else {
-            glyph_buffer_.resize(buffer_size);
-            memcpy(glyph_buffer_.data(), data, buffer_size);
-            out_bitmap->pixels = glyph_buffer_.data();
-            out_bitmap->pitch = stride;
-            out_bitmap->format = PixelFormat::BGRA8;
         }
+    }
+    analysis->Release();
 
-        lock->Release();
+    if (FAILED(hr)) {
+        return Result::ErrorRenderFailed;
     }
 
-    out_bitmap->width = width;
-    out_bitmap->height = height;
+    // Fill output bitmap — A8
+    out_bitmap->pixels = glyph_buffer_.data();
+    out_bitmap->width  = bmp_w;
+    out_bitmap->height = bmp_h;
+    out_bitmap->pitch  = bmp_w;
+    out_bitmap->format = PixelFormat::A8;
 
-    // Fill metrics
-    out_bitmap->metrics.width = glyph_metrics.advanceWidth * scale;
-    out_bitmap->metrics.height = (dw_metrics_.ascent + dw_metrics_.descent) * scale;
-    out_bitmap->metrics.bearing_x = glyph_metrics.leftSideBearing * scale;
-    out_bitmap->metrics.bearing_y = dw_metrics_.ascent * scale;
+    // Metrics — bearing_x/bearing_y describe where the bitmap sits relative to
+    // the pen position.  bounds.left/top come from the analysis with origin at
+    // (0,0), so they directly encode the bearing offsets.
+    out_bitmap->metrics.width     = glyph_metrics.advanceWidth * scale;
+    out_bitmap->metrics.height    = static_cast<float>(bmp_h);
+    out_bitmap->metrics.bearing_x = static_cast<float>(bounds.left);
+    out_bitmap->metrics.bearing_y = static_cast<float>(-bounds.top);   // positive = above baseline
     out_bitmap->metrics.advance_x = glyph_metrics.advanceWidth * scale;
     out_bitmap->metrics.advance_y = 0.0f;
-
-    wic_bitmap->Release();
-    wic_factory->Release();
-    d2d_factory->Release();
 
     return Result::Success;
 }
@@ -404,6 +362,7 @@ private:
     DWRITE_FONT_STRETCH to_dwrite_stretch(FontStretch stretch) const;
 
     bool initialized_ = false;
+    bool com_initialized_ = false;
     IDWriteFactory* dwrite_factory_ = nullptr;
 };
 
@@ -418,6 +377,12 @@ Result DirectWriteFontLibrary::initialize() {
         return Result::ErrorAlreadyInitialized;
     }
 
+    // COM must be initialized before we can use WIC (CoCreateInstance for
+    // CLSID_WICImagingFactory) during glyph rendering via D2D/WIC.
+    // S_FALSE means "already initialized" which is fine.
+    HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    com_initialized_ = SUCCEEDED(com_hr);
+
     HRESULT hr = DWriteCreateFactory(
         DWRITE_FACTORY_TYPE_SHARED,
         __uuidof(IDWriteFactory),
@@ -425,6 +390,7 @@ Result DirectWriteFontLibrary::initialize() {
     );
 
     if (FAILED(hr) || !dwrite_factory_) {
+        if (com_initialized_) { CoUninitialize(); com_initialized_ = false; }
         return Result::ErrorUnknown;
     }
 
@@ -436,6 +402,10 @@ void DirectWriteFontLibrary::shutdown() {
     if (dwrite_factory_) {
         dwrite_factory_->Release();
         dwrite_factory_ = nullptr;
+    }
+    if (com_initialized_) {
+        CoUninitialize();
+        com_initialized_ = false;
     }
     initialized_ = false;
 }
@@ -480,7 +450,7 @@ IFontFace* DirectWriteFontLibrary::load_font_file(const char* filepath, int face
     desc.size = 12.0f;
 
     if (out_result) *out_result = Result::Success;
-    return new DirectWriteFontFace(font_face, nullptr, desc, 12.0f);
+    return new DirectWriteFontFace(dwrite_factory_, font_face, nullptr, desc, 12.0f);
 }
 
 IFontFace* DirectWriteFontLibrary::load_font_memory(const void* data, size_t size,
@@ -560,7 +530,7 @@ IFontFace* DirectWriteFontLibrary::load_system_font(const FontDescriptor& descri
     }
 
     if (out_result) *out_result = Result::Success;
-    return new DirectWriteFontFace(font_face, font, descriptor, descriptor.size);
+    return new DirectWriteFontFace(dwrite_factory_, font_face, font, descriptor, descriptor.size);
 }
 
 void DirectWriteFontLibrary::destroy_font(IFontFace* face) {

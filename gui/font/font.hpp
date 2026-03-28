@@ -32,6 +32,9 @@
 
 namespace font {
 
+// Forward declarations
+class IFontFallbackChain;
+
 // ============================================================================
 // Enums
 // ============================================================================
@@ -245,6 +248,7 @@ struct PositionedGlyph {
     float y = 0.0f;
     float advance = 0.0f;
     int cluster = 0;                // Character cluster index
+    uint16_t font_index = 0;        // Index into fallback chain (0 = primary)
 };
 
 // ============================================================================
@@ -350,6 +354,11 @@ class ITextShaper {
 public:
     virtual ~ITextShaper() = default;
 
+    // Set a fallback chain for multi-language text shaping.
+    // When set, the shaper will resolve missing glyphs via fallback fonts
+    // and set font_index on each PositionedGlyph accordingly.
+    virtual void set_fallback_chain(IFontFallbackChain* chain) { (void)chain; }
+
     // Shape text and return positioned glyphs
     virtual void shape_text(IFontFace* font, const char* text, int text_length,
                             std::vector<PositionedGlyph>& out_glyphs,
@@ -381,6 +390,10 @@ public:
 class IFontRenderer {
 public:
     virtual ~IFontRenderer() = default;
+
+    // Set a fallback chain for multi-font rendering.
+    // When set, render_glyphs uses pg.font_index to select the font from the chain.
+    virtual void set_fallback_chain(IFontFallbackChain* chain) { (void)chain; }
 
     // Render text to a new bitmap
     // Caller must free the returned pixels with free_bitmap()
@@ -606,6 +619,51 @@ public:
     // Invoke the destroy callback and release all resources.
     virtual void destroy() = 0;
 };
+
+// ============================================================================
+// Font Fallback Chain
+// ============================================================================
+
+// Manages a primary font and a list of fallback fonts for multi-language support.
+// When the primary font lacks a glyph for a codepoint, fallback fonts are tried
+// in order until one is found that contains the glyph.
+class IFontFallbackChain {
+public:
+    virtual ~IFontFallbackChain() = default;
+
+    // Get the primary (first) font in the chain
+    virtual IFontFace* get_primary_font() const = 0;
+
+    // Get the font at a specific index (0 = primary)
+    virtual IFontFace* get_font(int index) const = 0;
+
+    // Get the number of fonts in the chain (primary + fallbacks)
+    virtual int get_font_count() const = 0;
+
+    // Add a fallback font to the end of the chain.
+    // The chain does NOT take ownership; caller must keep the font alive.
+    virtual void add_fallback(IFontFace* font) = 0;
+
+    // Resolve which font in the chain contains a glyph for the given codepoint.
+    // Returns the font index (0 = primary) and writes the glyph index.
+    // If no font has the glyph, returns 0 and *out_glyph_index = 0.
+    virtual int resolve(uint32_t codepoint, uint32_t* out_glyph_index) const = 0;
+
+    // Convenience: check if any font in the chain has the codepoint
+    virtual bool has_glyph(uint32_t codepoint) const = 0;
+};
+
+// Create a fallback chain with the given primary font.
+IFontFallbackChain* create_fallback_chain(IFontFace* primary);
+
+// Create a fallback chain with platform-appropriate fallback fonts automatically added.
+// Uses the font library to load system fonts for CJK, Arabic, Devanagari, emoji, etc.
+IFontFallbackChain* create_fallback_chain_with_defaults(IFontLibrary* library,
+                                                         IFontFace* primary,
+                                                         float size);
+
+// Destroy a fallback chain. Does NOT destroy the fonts it references.
+void destroy_fallback_chain(IFontFallbackChain* chain);
 
 // ============================================================================
 // Font System (Combines all interfaces)

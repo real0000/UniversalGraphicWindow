@@ -342,6 +342,10 @@ class SimpleTextShaper : public ITextShaper {
 public:
     SimpleTextShaper(IFontLibrary* library) : library_(library) {}
 
+    void set_fallback_chain(IFontFallbackChain* chain) {
+        fallback_chain_ = chain;
+    }
+
     void shape_text(IFontFace* font, const char* text, int text_length,
                     std::vector<PositionedGlyph>& out_glyphs,
                     const TextLayoutOptions& options) override {
@@ -366,16 +370,28 @@ public:
                 continue;
             }
 
-            uint32_t glyph_index = font->get_glyph_index(codepoint);
+            // Resolve which font has this glyph
+            uint32_t glyph_index = 0;
+            uint16_t font_index = 0;
+            IFontFace* glyph_font = font;
 
-            // Apply kerning
-            if (prev_glyph != 0) {
-                x += font->get_kerning(prev_glyph, glyph_index);
+            if (fallback_chain_) {
+                int fi = fallback_chain_->resolve(codepoint, &glyph_index);
+                font_index = static_cast<uint16_t>(fi);
+                IFontFace* fb = fallback_chain_->get_font(fi);
+                if (fb) glyph_font = fb;
+            } else {
+                glyph_index = font->get_glyph_index(codepoint);
+            }
+
+            // Apply kerning (only within same font)
+            if (prev_glyph != 0 && font_index == 0) {
+                x += glyph_font->get_kerning(prev_glyph, glyph_index);
             }
             x += options.letter_spacing;
 
             GlyphMetrics metrics;
-            font->get_glyph_metrics(glyph_index, &metrics);
+            glyph_font->get_glyph_metrics(glyph_index, &metrics);
 
             PositionedGlyph pg;
             pg.codepoint = codepoint;
@@ -384,6 +400,7 @@ public:
             pg.y = y;
             pg.advance = metrics.advance_x;
             pg.cluster = cluster;
+            pg.font_index = font_index;
             out_glyphs.push_back(pg);
 
             x += metrics.advance_x;
@@ -451,9 +468,21 @@ public:
                 word_glyph_start = static_cast<int>(out_glyphs.size()) + 1;
             }
 
-            uint32_t glyph_index = font->get_glyph_index(codepoint);
+            // Resolve font for this codepoint
+            uint32_t glyph_index = 0;
+            uint16_t font_index = 0;
+            IFontFace* glyph_font = font;
+            if (fallback_chain_) {
+                int fi = fallback_chain_->resolve(codepoint, &glyph_index);
+                font_index = static_cast<uint16_t>(fi);
+                IFontFace* fb = fallback_chain_->get_font(fi);
+                if (fb) glyph_font = fb;
+            } else {
+                glyph_index = font->get_glyph_index(codepoint);
+            }
+
             GlyphMetrics glyph_metrics;
-            font->get_glyph_metrics(glyph_index, &glyph_metrics);
+            glyph_font->get_glyph_metrics(glyph_index, &glyph_metrics);
 
             float advance = glyph_metrics.advance_x + options.letter_spacing;
             if (codepoint == ' ') advance += options.word_spacing;
@@ -495,6 +524,7 @@ public:
             pg.y = y;
             pg.advance = glyph_metrics.advance_x;
             pg.cluster = result.char_count;
+            pg.font_index = font_index;
             out_glyphs.push_back(pg);
 
             x += advance;
@@ -591,6 +621,7 @@ public:
 
 private:
     IFontLibrary* library_;
+    IFontFallbackChain* fallback_chain_ = nullptr;
 };
 
 #ifdef FONT_SUPPORT_HARFBUZZ
@@ -630,6 +661,11 @@ public:
         if (shaper_) {
             destroy_text_shaper(shaper_);
         }
+    }
+
+    void set_fallback_chain(IFontFallbackChain* chain) override {
+        fallback_chain_ = chain;
+        if (shaper_) shaper_->set_fallback_chain(chain);
     }
 
     Result render_text(IFontFace* font, const char* text, int text_length,
@@ -697,6 +733,13 @@ public:
             return result;
         }
 
+        // Convert premultiplied alpha to straight alpha so that the output
+        // works correctly with standard GL_SRC_ALPHA / GL_ONE_MINUS_SRC_ALPHA
+        // blending.  blend_glyph() composites using premultiplied-over, which
+        // is correct for layering glyphs, but consumers expect straight alpha.
+        premultiplied_to_straight(pixels, bitmap_width, bitmap_height, pitch,
+                                  render_opts.output_format);
+
         *out_pixels = pixels;
         *out_width = bitmap_width;
         *out_height = bitmap_height;
@@ -740,8 +783,6 @@ public:
             return Result::ErrorInvalidParameter;
         }
 
-        const FontMetrics& metrics = font->get_metrics();
-
         for (int i = 0; i < glyph_count; ++i) {
             const PositionedGlyph& pg = glyphs[i];
 
@@ -750,9 +791,16 @@ public:
                 continue;
             }
 
+            // Select the correct font from fallback chain (if available)
+            IFontFace* glyph_font = font;
+            if (fallback_chain_ && pg.font_index > 0) {
+                IFontFace* fb = fallback_chain_->get_font(pg.font_index);
+                if (fb) glyph_font = fb;
+            }
+
             // Render glyph
             GlyphBitmap glyph_bitmap;
-            Result result = font->render_glyph(pg.glyph_index, render_opts, &glyph_bitmap);
+            Result result = glyph_font->render_glyph(pg.glyph_index, render_opts, &glyph_bitmap);
             if (result != Result::Success) {
                 continue; // Skip failed glyphs
             }
@@ -875,8 +923,15 @@ public:
                 continue;
             }
 
+            // Select the correct font from fallback chain
+            IFontFace* glyph_font = font;
+            if (fallback_chain_ && pg.font_index > 0) {
+                IFontFace* fb = fallback_chain_->get_font(pg.font_index);
+                if (fb) glyph_font = fb;
+            }
+
             GlyphMetrics glyph_metrics;
-            if (!font->get_glyph_metrics(pg.glyph_index, &glyph_metrics)) {
+            if (!glyph_font->get_glyph_metrics(pg.glyph_index, &glyph_metrics)) {
                 continue;
             }
 
@@ -945,6 +1000,9 @@ public:
             return result;
         }
 
+        // Convert premultiplied alpha to straight alpha
+        premultiplied_to_straight(pixels, width, height, pitch, pixel_format);
+
         // Create texture via callback
         TextureDesc desc;
         desc.width = width;
@@ -974,6 +1032,31 @@ public:
 private:
     IFontLibrary* library_;
     ITextShaper* shaper_;
+    IFontFallbackChain* fallback_chain_ = nullptr;
+
+    // Convert a premultiplied-alpha bitmap to straight alpha in-place.
+    static void premultiplied_to_straight(void* bitmap, int width, int height,
+                                           int pitch, PixelFormat format) {
+        if (!bitmap || width <= 0 || height <= 0) return;
+
+        // Only RGBA8 and BGRA8 have separate color + alpha channels
+        if (format != PixelFormat::RGBA8 && format != PixelFormat::BGRA8) return;
+
+        uint8_t* data = static_cast<uint8_t*>(bitmap);
+        for (int y = 0; y < height; ++y) {
+            uint8_t* row = data + y * pitch;
+            for (int x = 0; x < width; ++x) {
+                uint8_t* px = row + x * 4;
+                uint8_t a = px[3];
+                if (a == 0) continue;       // fully transparent — leave as zeros
+                if (a == 255) continue;      // fully opaque — no change needed
+                // Un-premultiply: C_straight = C_premul * 255 / A
+                px[0] = static_cast<uint8_t>(std::min(255, px[0] * 255 / a));
+                px[1] = static_cast<uint8_t>(std::min(255, px[1] * 255 / a));
+                px[2] = static_cast<uint8_t>(std::min(255, px[2] * 255 / a));
+            }
+        }
+    }
 
     // Get bytes per pixel for a pixel format
     static int get_bytes_per_pixel(PixelFormat format) {
@@ -1168,6 +1251,195 @@ IFontRenderer* create_font_renderer(IFontLibrary* library, Result* out_result) {
 
 void destroy_font_renderer(IFontRenderer* renderer) {
     delete renderer;
+}
+
+// ============================================================================
+// Font Fallback Chain Implementation
+// ============================================================================
+
+class FallbackFontChain : public IFontFallbackChain {
+public:
+    explicit FallbackFontChain(IFontFace* primary) {
+        if (primary) fonts_.push_back(primary);
+    }
+
+    IFontFace* get_primary_font() const override {
+        return fonts_.empty() ? nullptr : fonts_[0];
+    }
+
+    IFontFace* get_font(int index) const override {
+        if (index < 0 || index >= static_cast<int>(fonts_.size())) return nullptr;
+        return fonts_[index];
+    }
+
+    int get_font_count() const override {
+        return static_cast<int>(fonts_.size());
+    }
+
+    void add_fallback(IFontFace* font) override {
+        if (font) fonts_.push_back(font);
+    }
+
+    int resolve(uint32_t codepoint, uint32_t* out_glyph_index) const override {
+        for (int i = 0; i < static_cast<int>(fonts_.size()); ++i) {
+            uint32_t gi = fonts_[i]->get_glyph_index(codepoint);
+            if (gi != 0) {
+                if (out_glyph_index) *out_glyph_index = gi;
+                return i;
+            }
+        }
+        // No font has this glyph — return primary font's result (glyph 0)
+        if (out_glyph_index) *out_glyph_index = 0;
+        return 0;
+    }
+
+    bool has_glyph(uint32_t codepoint) const override {
+        for (auto* f : fonts_) {
+            if (f->has_glyph(codepoint)) return true;
+        }
+        return false;
+    }
+
+private:
+    std::vector<IFontFace*> fonts_;
+};
+
+IFontFallbackChain* create_fallback_chain(IFontFace* primary) {
+    return new FallbackFontChain(primary);
+}
+
+void destroy_fallback_chain(IFontFallbackChain* chain) {
+    delete chain;
+}
+
+// Platform-specific fallback font family lists.
+// Each list is ordered by priority — common UI fonts first, then script-specific.
+
+#ifdef _WIN32
+static const char* const g_fallback_families[] = {
+    // Latin / Cyrillic / Greek
+    "Arial",
+    "Segoe UI",
+    "Tahoma",
+    // CJK (Chinese, Japanese, Korean)
+    "Microsoft YaHei",      // Simplified Chinese
+    "Microsoft JhengHei",   // Traditional Chinese
+    "Yu Gothic",            // Japanese
+    "Meiryo",               // Japanese fallback
+    "Malgun Gothic",        // Korean
+    // Arabic / Hebrew
+    "Segoe UI",             // already covers Arabic
+    "Arial",                // already covers Hebrew
+    // Devanagari / Indic
+    "Nirmala UI",           // all Indic scripts
+    "Mangal",               // Devanagari fallback
+    // Thai
+    "Leelawadee UI",
+    // Emoji
+    "Segoe UI Emoji",
+    "Segoe UI Symbol",
+    nullptr
+};
+#elif defined(__APPLE__)
+static const char* const g_fallback_families[] = {
+    "Helvetica Neue",
+    ".AppleSystemUIFont",
+    // CJK
+    "PingFang SC",          // Simplified Chinese
+    "PingFang TC",          // Traditional Chinese
+    "Hiragino Sans",        // Japanese
+    "Apple SD Gothic Neo",  // Korean
+    // Arabic / Hebrew
+    "Geeza Pro",            // Arabic
+    "Arial Hebrew",         // Hebrew
+    // Devanagari / Indic
+    "Devanagari Sangam MN",
+    "Kohinoor Devanagari",
+    // Thai
+    "Thonburi",
+    // Emoji
+    "Apple Color Emoji",
+    nullptr
+};
+#elif defined(__linux__)
+static const char* const g_fallback_families[] = {
+    "DejaVu Sans",
+    "Liberation Sans",
+    "FreeSans",
+    // CJK
+    "Noto Sans CJK SC",    // Simplified Chinese
+    "Noto Sans CJK TC",    // Traditional Chinese
+    "Noto Sans CJK JP",    // Japanese
+    "Noto Sans CJK KR",    // Korean
+    "WenQuanYi Micro Hei", // CJK fallback
+    // Arabic / Hebrew
+    "Noto Sans Arabic",
+    "Noto Sans Hebrew",
+    // Devanagari / Indic
+    "Noto Sans Devanagari",
+    "Noto Sans Tamil",
+    "Noto Sans Bengali",
+    // Thai
+    "Noto Sans Thai",
+    // Emoji
+    "Noto Color Emoji",
+    "Noto Emoji",
+    nullptr
+};
+#elif defined(__ANDROID__)
+static const char* const g_fallback_families[] = {
+    "Roboto",
+    "Noto Sans",
+    // CJK
+    "Noto Sans CJK",
+    // Arabic
+    "Noto Sans Arabic",
+    // Devanagari
+    "Noto Sans Devanagari",
+    // Emoji
+    "Noto Color Emoji",
+    nullptr
+};
+#else
+static const char* const g_fallback_families[] = {
+    "Arial",
+    "DejaVu Sans",
+    nullptr
+};
+#endif
+
+IFontFallbackChain* create_fallback_chain_with_defaults(IFontLibrary* library,
+                                                         IFontFace* primary,
+                                                         float size) {
+    FallbackFontChain* chain = new FallbackFontChain(primary);
+    if (!library) return chain;
+
+    // Track which families we've already loaded (including primary)
+    std::vector<std::string> loaded;
+    if (primary) {
+        loaded.push_back(primary->get_family_name());
+    }
+
+    for (int i = 0; g_fallback_families[i] != nullptr; ++i) {
+        const char* family = g_fallback_families[i];
+
+        // Skip if already loaded
+        bool skip = false;
+        for (auto& l : loaded) {
+            if (l == family) { skip = true; break; }
+        }
+        if (skip) continue;
+
+        FontDescriptor desc = FontDescriptor::create(family, size);
+        Result r;
+        IFontFace* face = library->load_system_font(desc, &r);
+        if (face) {
+            chain->add_fallback(face);
+            loaded.push_back(family);
+        }
+    }
+
+    return chain;
 }
 
 // ============================================================================

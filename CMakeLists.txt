@@ -841,6 +841,11 @@ if(WINDOW_BUILD_TESTS)
 
     add_test(NAME test_window COMMAND test_window)
 
+    # Font fallback unit tests (headless, no display required)
+    add_executable(test_font tests/test_font.cpp)
+    target_link_libraries(test_font PRIVATE window)
+    add_test(NAME test_font COMMAND test_font)
+
     # GUI unit tests (headless, no display required)
     if(WINDOW_ENABLE_GUI)
         add_executable(test_gui tests/test_gui.cpp)
