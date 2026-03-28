@@ -516,190 +516,9 @@ static void cleanup_text_cache() {
 }
 
 // ============================================================================
-// Batch Draw from WidgetRenderInfo
+// Draw flattened render info — only Color + Texture commands after flatten().
 // ============================================================================
 
-// ============================================================================
-// 9-slice helpers
-// ============================================================================
-
-// Emit up to 9 solid-colour rects for a Generated 9-slice entry.
-// slice_border values are pixel widths/heights on the destination rectangle.
-static void draw_slice9_solid(float px, float py, float pw, float ph,
-                               float bl, float bt, float br, float bb,
-                               float cr, float cg, float cb, float ca,
-                               gui::SliceCenterMode center_mode) {
-    // Clamp borders so they never exceed half the destination size
-    bl = std::min(bl, pw * 0.5f); br = std::min(br, pw * 0.5f);
-    bt = std::min(bt, ph * 0.5f); bb = std::min(bb, ph * 0.5f);
-
-    float cx = px + bl,       cy = py + bt;
-    float cw = pw - bl - br,  ch = ph - bt - bb;
-
-    // Top row
-    if (bl > 0 && bt > 0) g_renderer->draw_rect(px,           py,           bl, bt, cr, cg, cb, ca);
-    if (cw > 0 && bt > 0) g_renderer->draw_rect(cx,           py,           cw, bt, cr, cg, cb, ca);
-    if (br > 0 && bt > 0) g_renderer->draw_rect(px + pw - br, py,           br, bt, cr, cg, cb, ca);
-
-    // Middle row
-    if (ch > 0) {
-        if (bl > 0) g_renderer->draw_rect(px,           cy, bl, ch, cr, cg, cb, ca);
-        if (cw > 0 && center_mode != gui::SliceCenterMode::Hidden)
-            g_renderer->draw_rect(cx, cy, cw, ch, cr, cg, cb, ca);
-        if (br > 0) g_renderer->draw_rect(px + pw - br, cy, br, ch, cr, cg, cb, ca);
-    }
-
-    // Bottom row
-    if (bl > 0 && bb > 0) g_renderer->draw_rect(px,           py + ph - bb, bl, bb, cr, cg, cb, ca);
-    if (cw > 0 && bb > 0) g_renderer->draw_rect(cx,           py + ph - bb, cw, bb, cr, cg, cb, ca);
-    if (br > 0 && bb > 0) g_renderer->draw_rect(px + pw - br, py + ph - bb, br, bb, cr, cg, cb, ca);
-}
-
-// Emit up to 9 textured quads for a Memory/atlas 9-slice entry.
-// slice_border values are pixel widths in the source image; source_sw/sh give
-// the source image dimensions in pixels (used to convert to UV fractions).
-static void draw_slice9_texture(float px, float py, float pw, float ph,
-                                 float u0, float v0, float u1, float v1,
-                                 float bl, float bt, float br, float bb,
-                                 float source_sw, float source_sh,
-                                 int layer,
-                                 float tr, float tg, float tb, float ta,
-                                 gui::SliceCenterMode center_mode) {
-    // Clamp destination borders
-    bl = std::min(bl, pw * 0.5f); br = std::min(br, pw * 0.5f);
-    bt = std::min(bt, ph * 0.5f); bb = std::min(bb, ph * 0.5f);
-
-    float cx_d = px + bl,       cy_d = py + bt;
-    float cw_d = pw - bl - br,  ch_d = ph - bt - bb;
-
-    // UV range spanned by this tile
-    float uw = u1 - u0, vh = v1 - v0;
-
-    // UV cut points (fall back to thirds if source dimensions unknown)
-    float ucl, ucr, vct, vcb;
-    if (source_sw > 0 && source_sh > 0) {
-        ucl = u0 + (bl / source_sw) * uw;
-        ucr = u1 - (br / source_sw) * uw;
-        vct = v0 + (bt / source_sh) * vh;
-        vcb = v1 - (bb / source_sh) * vh;
-    } else {
-        ucl = u0 + uw * 0.25f; ucr = u0 + uw * 0.75f;
-        vct = v0 + vh * 0.25f; vcb = v0 + vh * 0.75f;
-    }
-
-    auto quad = [&](float du, float dv, float dw, float dh,
-                    float su0, float sv0, float su1, float sv1) {
-        if (dw > 0 && dh > 0)
-            g_renderer->draw_texture(layer, su0, sv0, su1, sv1,
-                                     du, dv, dw, dh,
-                                     tr, tg, tb, ta);
-    };
-
-    // Top row
-    quad(px,           py,           bl,   bt,   u0,  v0,  ucl, vct);
-    quad(cx_d,         py,           cw_d, bt,   ucl, v0,  ucr, vct);
-    quad(px + pw - br, py,           br,   bt,   ucr, v0,  u1,  vct);
-
-    // Middle row
-    if (ch_d > 0) {
-        quad(px,           cy_d, bl,   ch_d, u0,  vct, ucl, vcb);
-        if (center_mode != gui::SliceCenterMode::Hidden)
-            quad(cx_d, cy_d, cw_d, ch_d, ucl, vct, ucr, vcb);
-        quad(px + pw - br, cy_d, br,   ch_d, ucr, vct, u1,  vcb);
-    }
-
-    // Bottom row
-    quad(px,           py + ph - bb, bl,   bb,   u0,  vcb, ucl, v1);
-    quad(cx_d,         py + ph - bb, cw_d, bb,   ucl, vcb, ucr, v1);
-    quad(px + pw - br, py + ph - bb, br,   bb,   ucr, vcb, u1,  v1);
-}
-
-// ============================================================================
-// Replay ECS pool entries directly to the QuadRenderer (no collect mode).
-// ============================================================================
-
-static void replay_color_cmd(const gui::WidgetRenderInfo::ColorCmd& cmd) {
-    using namespace math;
-    float px = x(box_min(cmd.dest)), py = y(box_min(cmd.dest));
-    float pw = box_width(cmd.dest),  ph = box_height(cmd.dest);
-    if (cmd.shape == gui::DrawShape::Circle)
-        g_renderer->draw_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f,
-                                cmd.color.x, cmd.color.y, cmd.color.z, cmd.color.w);
-    else
-        g_renderer->draw_rect(px, py, pw, ph,
-                              cmd.color.x, cmd.color.y, cmd.color.z, cmd.color.w);
-}
-
-static void replay_texture_cmd(const gui::WidgetRenderInfo::TextureCmd& cmd) {
-    using namespace math;
-    if (cmd.atlas_layer < 0) return;
-    float px = x(box_min(cmd.dest)), py = y(box_min(cmd.dest));
-    float pw = box_width(cmd.dest),  ph = box_height(cmd.dest);
-    float u0 = x(box_min(cmd.uv)), v0 = y(box_min(cmd.uv));
-    float u1 = x(box_max(cmd.uv)), v1 = y(box_max(cmd.uv));
-    g_renderer->draw_texture(cmd.atlas_layer, u0, v0, u1, v1,
-                             px, py, pw, ph,
-                             cmd.tint.x, cmd.tint.y, cmd.tint.z, cmd.tint.w);
-}
-
-static void replay_slice9_cmd(const gui::WidgetRenderInfo::Slice9Cmd& cmd) {
-    using namespace math;
-    float px = x(box_min(cmd.dest)), py = y(box_min(cmd.dest));
-    float pw = box_width(cmd.dest),  ph = box_height(cmd.dest);
-    const auto& b = cmd.border;
-    if (cmd.atlas_layer < 0) {
-        draw_slice9_solid(px, py, pw, ph,
-                          b.left, b.top, b.right, b.bottom,
-                          cmd.color.x, cmd.color.y, cmd.color.z, cmd.color.w,
-                          cmd.center_mode);
-    } else {
-        float u0 = x(box_min(cmd.uv)), v0 = y(box_min(cmd.uv));
-        float u1 = x(box_max(cmd.uv)), v1 = y(box_max(cmd.uv));
-        draw_slice9_texture(px, py, pw, ph,
-                            u0, v0, u1, v1,
-                            b.left, b.top, b.right, b.bottom,
-                            math::x(cmd.source_size), math::y(cmd.source_size),
-                            cmd.atlas_layer,
-                            cmd.tint.x, cmd.tint.y, cmd.tint.z, cmd.tint.w,
-                            cmd.center_mode);
-    }
-}
-
-static void replay_text_cmd(const gui::WidgetRenderInfo::TextCmd& cmd) {
-    using namespace math;
-    if (cmd.text.empty() && !cmd.show_cursor) return;
-    float px = x(box_min(cmd.dest)), py = y(box_min(cmd.dest));
-    float pw = box_width(cmd.dest),  ph = box_height(cmd.dest);
-    font::IFontFace* face = (cmd.font_size <= 10.0f) ? g_font_small : g_font_ui;
-    if (!cmd.text.empty()) {
-        switch (cmd.alignment) {
-            case gui::Alignment::Center:
-                draw_text_center(cmd.text.c_str(), px, py, pw, ph, cmd.color, face);
-                break;
-            case gui::Alignment::CenterRight: {
-                TextEntry e = get_text_entry(cmd.text.c_str(), face);
-                if (e.layer >= 0)
-                    draw_texture_atlas(e.layer, e.u0, e.v0, e.u1, e.v1,
-                                       px + pw - e.width, py + (ph - e.height) * 0.5f,
-                                       (float)e.width, (float)e.height,
-                                       cmd.color.x, cmd.color.y, cmd.color.z, cmd.color.w);
-                break;
-            }
-            default: // CenterLeft and others — vertically centered, left-aligned
-                draw_text_vc(cmd.text.c_str(), px + 2, py, ph, cmd.color, face);
-                break;
-        }
-    }
-    // Draw blinking cursor if requested
-    if (cmd.show_cursor && fmodf(g_time, 1.0f) < 0.5f) {
-        float cx = px + 2 + measure_text_width_n(cmd.text.c_str(), cmd.cursor_pos, face);
-        draw_rect(cx, py + 3, 1.0f, ph - 6, cmd.cursor_color.x, cmd.cursor_color.y,
-                  cmd.cursor_color.z, cmd.cursor_color.w);
-    }
-}
-
-// Replay the draw order from ri to the renderer.
-// Clip changes are pre-detected by finalize() via DrawRef::clip_changed.
 static void draw_render_info(const gui::WidgetRenderInfo& ri) {
     using namespace math;
     using Pool = gui::WidgetRenderInfo::DrawRef::Pool;
@@ -719,10 +538,31 @@ static void draw_render_info(const gui::WidgetRenderInfo& ri) {
         }
 
         switch (ref.pool) {
-            case Pool::Color:   replay_color_cmd(ri.colors[ref.index]);     break;
-            case Pool::Texture: replay_texture_cmd(ri.textures[ref.index]); break;
-            case Pool::Slice9:  replay_slice9_cmd(ri.slices[ref.index]);    break;
-            case Pool::Text:    replay_text_cmd(ri.texts[ref.index]);       break;
+            case Pool::Color: {
+                const auto& cmd = ri.colors[ref.index];
+                float px = x(box_min(cmd.dest)), py = y(box_min(cmd.dest));
+                float pw = box_width(cmd.dest),  ph = box_height(cmd.dest);
+                if (cmd.shape == gui::DrawShape::Circle)
+                    g_renderer->draw_circle(px + pw*0.5f, py + ph*0.5f, pw*0.5f,
+                                            cmd.color.x, cmd.color.y, cmd.color.z, cmd.color.w);
+                else
+                    g_renderer->draw_rect(px, py, pw, ph,
+                                          cmd.color.x, cmd.color.y, cmd.color.z, cmd.color.w);
+                break;
+            }
+            case Pool::Texture: {
+                const auto& cmd = ri.textures[ref.index];
+                if (cmd.atlas_layer < 0) break;
+                float px = x(box_min(cmd.dest)), py = y(box_min(cmd.dest));
+                float pw = box_width(cmd.dest),  ph = box_height(cmd.dest);
+                float u0 = x(box_min(cmd.uv)),   v0 = y(box_min(cmd.uv));
+                float u1 = x(box_max(cmd.uv)),   v1 = y(box_max(cmd.uv));
+                g_renderer->draw_texture(cmd.atlas_layer, u0, v0, u1, v1,
+                                         px, py, pw, ph,
+                                         cmd.tint.x, cmd.tint.y, cmd.tint.z, cmd.tint.w);
+                break;
+            }
+            default: break; // Slice9 and Text already flattened away
         }
     }
 
@@ -1330,6 +1170,32 @@ struct FontTextMeasurer : ITextMeasurer {
     }
 };
 
+// IGuiTextRasterizer impl: wraps the existing text cache + font renderer
+// so that the GUI system can flatten TextCmd into textured quads internally.
+struct GuiTextRasterizer : IGuiTextRasterizer {
+    font::IFontFace* face_ui    = nullptr;
+    font::IFontFace* face_small = nullptr;
+
+    TextQuad rasterize(const char* text, float font_size, const char* /*font_name*/) override {
+        font::IFontFace* face = (font_size <= 10.0f) ? face_small : face_ui;
+        TextEntry e = get_text_entry(text, face);
+        TextQuad q;
+        q.atlas_layer = e.layer;
+        q.u0 = e.u0; q.v0 = e.v0;
+        q.u1 = e.u1; q.v1 = e.v1;
+        q.width = e.width; q.height = e.height;
+        return q;
+    }
+
+    float measure_advance(const char* text, int n, float font_size,
+                          const char* /*font_name*/) override {
+        font::IFontFace* face = (font_size <= 10.0f) ? face_small : face_ui;
+        return measure_text_width_n(text, n, face);
+    }
+
+    float get_time() const override { return g_time; }
+};
+
 struct EditboxContextMenuHandler : IEditBoxEventHandler {
     IGuiMenu* menu = nullptr;
     void on_text_changed() override {}
@@ -1565,6 +1431,12 @@ int main() {
     font_measurer.face = g_font_ui;
     widgets.editbox->set_text_measurer(&font_measurer);
     widgets.output_editbox->set_text_measurer(&font_measurer);
+
+    // Wire text rasterizer so get_render_info() flattens Text/Slice9 into Color+Texture
+    GuiTextRasterizer text_rasterizer;
+    text_rasterizer.face_ui    = g_font_ui;
+    text_rasterizer.face_small = g_font_small;
+    ctx->set_text_rasterizer(&text_rasterizer);
 
     // Register context-menu callbacks: widgets fire on_right_click → show appropriate menu
     EditboxContextMenuHandler editbox_handler;

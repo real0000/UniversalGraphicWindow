@@ -119,6 +119,11 @@ public:
     virtual void set_text_measurer(ITextMeasurer* measurer) = 0;
     virtual ITextMeasurer* get_text_measurer() const = 0;
 
+    // Text rasterizer — when set, get_render_info() calls flatten() to expand
+    // Slice9 and Text commands into Color + Texture primitives.
+    virtual void set_text_rasterizer(IGuiTextRasterizer* rasterizer) = 0;
+    virtual IGuiTextRasterizer* get_text_rasterizer() const = 0;
+
     // Style
     virtual const GuiStyle& get_default_style() const = 0;
     virtual void set_default_style(const GuiStyle& style) = 0;

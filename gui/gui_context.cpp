@@ -87,6 +87,7 @@ class GuiContext : public IGuiContext {
     GuiStyle default_style_=GuiStyle::default_style();
     LabelStyle default_label_style_=LabelStyle::default_style();
     ITextMeasurer* text_measurer_=nullptr;
+    IGuiTextRasterizer* text_rasterizer_=nullptr;
     std::unique_ptr<IGuiAnimationManager> anim_mgr_;
     bool debug_draw_=false;
     std::vector<std::unique_ptr<IGuiWidget>> owned_widgets_;
@@ -281,6 +282,8 @@ public:
         collect_recursive(&root_, frame_ri_, depth);
         for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth);
         frame_ri_.finalize();
+        if (text_rasterizer_)
+            frame_ri_.flatten(text_rasterizer_);
         return frame_ri_;
     }
 
@@ -317,6 +320,8 @@ public:
 
     void set_text_measurer(ITextMeasurer* m) override { text_measurer_=m; }
     ITextMeasurer* get_text_measurer() const override { return text_measurer_; }
+    void set_text_rasterizer(IGuiTextRasterizer* r) override { text_rasterizer_=r; }
+    IGuiTextRasterizer* get_text_rasterizer() const override { return text_rasterizer_; }
 
     const GuiStyle& get_default_style() const override { return default_style_; }
     void set_default_style(const GuiStyle& s) override { default_style_=s; }

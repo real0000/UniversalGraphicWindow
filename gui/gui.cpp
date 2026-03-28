@@ -6,6 +6,7 @@
  */
 
 #include "gui.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace window {
@@ -209,6 +210,151 @@ void WidgetRenderInfo::finalize() {
     }
 
     valid_ = true;
+}
+
+// ============================================================================
+// flatten() — expand Slice9 + Text into Color + Texture primitives
+// ============================================================================
+
+void WidgetRenderInfo::flatten(IGuiTextRasterizer* rasterizer) {
+    using namespace math;
+
+    // ---- Expand Slice9 entries ----
+    for (const auto& s : slices) {
+        float px = x(box_min(s.dest)), py = y(box_min(s.dest));
+        float pw = box_width(s.dest),  ph = box_height(s.dest);
+        float bl = std::min(s.border.left,   pw * 0.5f);
+        float br = std::min(s.border.right,  pw * 0.5f);
+        float bt = std::min(s.border.top,    ph * 0.5f);
+        float bb = std::min(s.border.bottom, ph * 0.5f);
+        float cx = px + bl,       cy = py + bt;
+        float cw = pw - bl - br,  ch = ph - bt - bb;
+
+        if (s.atlas_layer < 0) {
+            // Solid 9-slice → Color rects
+            auto emit = [&](float rx, float ry, float rw, float rh) {
+                if (rw > 0 && rh > 0)
+                    colors.push_back({make_box(rx,ry,rw,rh), s.color,
+                                      DrawShape::Rect, s.depth, s.clip});
+            };
+            // Top
+            emit(px, py, bl, bt);
+            emit(cx, py, cw, bt);
+            emit(px+pw-br, py, br, bt);
+            // Middle
+            if (ch > 0) {
+                emit(px, cy, bl, ch);
+                if (s.center_mode != SliceCenterMode::Hidden)
+                    emit(cx, cy, cw, ch);
+                emit(px+pw-br, cy, br, ch);
+            }
+            // Bottom
+            emit(px, py+ph-bb, bl, bb);
+            emit(cx, py+ph-bb, cw, bb);
+            emit(px+pw-br, py+ph-bb, br, bb);
+        } else {
+            // Textured 9-slice → Texture quads
+            float u0 = x(box_min(s.uv)), v0 = y(box_min(s.uv));
+            float u1 = x(box_max(s.uv)), v1 = y(box_max(s.uv));
+            float uw = u1 - u0, vh = v1 - v0;
+            float ssw = x(s.source_size), ssh = y(s.source_size);
+            float ucl, ucr, vct, vcb;
+            if (ssw > 0 && ssh > 0) {
+                ucl = u0 + (bl / ssw) * uw;
+                ucr = u1 - (br / ssw) * uw;
+                vct = v0 + (bt / ssh) * vh;
+                vcb = v1 - (bb / ssh) * vh;
+            } else {
+                ucl = u0 + uw * 0.25f; ucr = u0 + uw * 0.75f;
+                vct = v0 + vh * 0.25f; vcb = v0 + vh * 0.75f;
+            }
+            auto quad = [&](float dx, float dy, float dw, float dh,
+                            float su0, float sv0, float su1, float sv1) {
+                if (dw > 0 && dh > 0)
+                    textures.push_back({TextureSourceType::Memory, nullptr, nullptr, 0,
+                                        s.atlas_layer,
+                                        make_box(dx,dy,dw,dh),
+                                        make_box(su0,sv0,su1-su0,sv1-sv0),
+                                        s.tint, s.depth, s.clip});
+            };
+            // Top
+            quad(px,         py,         bl,   bt,   u0,  v0,  ucl, vct);
+            quad(cx,         py,         cw,   bt,   ucl, v0,  ucr, vct);
+            quad(px+pw-br,   py,         br,   bt,   ucr, v0,  u1,  vct);
+            // Middle
+            if (ch > 0) {
+                quad(px,       cy, bl, ch, u0,  vct, ucl, vcb);
+                if (s.center_mode != SliceCenterMode::Hidden)
+                    quad(cx,   cy, cw, ch, ucl, vct, ucr, vcb);
+                quad(px+pw-br, cy, br, ch, ucr, vct, u1,  vcb);
+            }
+            // Bottom
+            quad(px,         py+ph-bb, bl, bb, u0,  vcb, ucl, v1);
+            quad(cx,         py+ph-bb, cw, bb, ucl, vcb, ucr, v1);
+            quad(px+pw-br,   py+ph-bb, br, bb, ucr, vcb, u1,  v1);
+        }
+    }
+    slices.clear();
+
+    // ---- Expand Text entries ----
+    if (rasterizer) {
+        float time = rasterizer->get_time();
+        for (const auto& t : texts) {
+            float px = x(box_min(t.dest)), py = y(box_min(t.dest));
+            float pw = box_width(t.dest),  ph = box_height(t.dest);
+
+            // Rasterize text body
+            if (!t.text.empty()) {
+                auto q = rasterizer->rasterize(t.text.c_str(), t.font_size, nullptr);
+                if (q.valid()) {
+                    float tx = px, ty = py;
+                    // Alignment
+                    switch (t.alignment) {
+                        case Alignment::Center:
+                            tx = px + (pw - q.width) * 0.5f;
+                            ty = py + (ph - q.height) * 0.5f;
+                            break;
+                        case Alignment::CenterRight:
+                            tx = px + pw - q.width;
+                            ty = py + (ph - q.height) * 0.5f;
+                            break;
+                        default: // CenterLeft and others
+                            tx = px + 2;
+                            ty = py + (ph - q.height) * 0.5f;
+                            break;
+                    }
+                    textures.push_back({TextureSourceType::Memory, nullptr, nullptr, 0,
+                                        q.atlas_layer,
+                                        make_box(tx, ty, (float)q.width, (float)q.height),
+                                        make_box(q.u0, q.v0, q.u1 - q.u0, q.v1 - q.v0),
+                                        Vec4(t.color.x, t.color.y, t.color.z, t.color.w),
+                                        t.depth, t.clip});
+                }
+            }
+
+            // Selection highlight
+            if (t.sel_start >= 0 && t.sel_end > t.sel_start) {
+                float sx = px + 2 + rasterizer->measure_advance(t.text.c_str(), t.sel_start,
+                                                                  t.font_size, nullptr);
+                float ex = px + 2 + rasterizer->measure_advance(t.text.c_str(), t.sel_end,
+                                                                  t.font_size, nullptr);
+                colors.push_back({make_box(sx, py + 2, ex - sx, ph - 4),
+                                  t.sel_bg_color, DrawShape::Rect, t.depth - 1, t.clip});
+            }
+
+            // Blinking cursor
+            if (t.show_cursor && fmodf(time, 1.0f) < 0.5f) {
+                float cx_pos = px + 2 + rasterizer->measure_advance(
+                    t.text.c_str(), t.cursor_pos, t.font_size, nullptr);
+                colors.push_back({make_box(cx_pos, py + 3, 1.0f, ph - 6),
+                                  t.cursor_color, DrawShape::Rect, t.depth + 1, t.clip});
+            }
+        }
+    }
+    texts.clear();
+
+    // Re-finalize draw order with only Color + Texture entries
+    finalize();
 }
 
 // ============================================================================

@@ -260,6 +260,39 @@ public:
 };
 
 // ============================================================================
+// Text Rasterizer Interface (user provides implementation)
+//
+// Allows the GUI system to flatten TextCmd entries into textured quads during
+// get_render_info(), so the caller receives only Color + Texture draw commands.
+// ============================================================================
+
+class IGuiTextRasterizer {
+public:
+    virtual ~IGuiTextRasterizer() = default;
+
+    // Result of rasterizing a text string into the texture atlas.
+    struct TextQuad {
+        int32_t atlas_layer = -1;       // atlas layer (-1 = failed)
+        float   u0 = 0, v0 = 0;        // UV top-left
+        float   u1 = 0, v1 = 0;        // UV bottom-right
+        int     width  = 0;             // pixel width of rendered text
+        int     height = 0;             // pixel height of rendered text
+        bool valid() const { return atlas_layer >= 0 && width > 0 && height > 0; }
+    };
+
+    // Rasterize text and return atlas coordinates.  Called during flatten().
+    virtual TextQuad rasterize(const char* text, float font_size,
+                               const char* font_name = nullptr) = 0;
+
+    // Return pixel advance of the first n characters (for cursor placement).
+    virtual float measure_advance(const char* text, int n, float font_size,
+                                  const char* font_name = nullptr) = 0;
+
+    // Return current time in seconds (for cursor blink animation).
+    virtual float get_time() const = 0;
+};
+
+// ============================================================================
 // Viewport - Defines a view into the UI for a specific window
 // ============================================================================
 
@@ -460,6 +493,13 @@ struct WidgetRenderInfo {
     // Called automatically from IGuiWidget::get_render_info() after all
     // entries have been appended.
     void finalize();
+
+    // Expand Slice9 and Text commands into Color + Texture primitives, then
+    // re-finalize.  After this call the draw order contains only Color and
+    // Texture refs — no Slice9 or Text entries remain.
+    // `rasterizer` converts TextCmd strings into atlas textured quads.
+    // Safe to call multiple times (idempotent once flattened).
+    void flatten(IGuiTextRasterizer* rasterizer);
 
 private:
     std::vector<DrawRef>   draw_order_;
