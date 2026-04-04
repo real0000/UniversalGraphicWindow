@@ -120,7 +120,7 @@ public:
         ri_.push_outline(bx, by, bw, bh, math::Vec4(0.25f,0.25f,0.27f,1.0f), d, noclip);
         if (base_.has_focus())
             ri_.push_outline(bx-1, by-1, bw+2, bh+2, math::Vec4(0,0.48f,0.8f,1), d, noclip);
-        if (!text_.empty()) {
+        if (!text_.empty() || base_.has_focus()) {
             WidgetRenderInfo::TextCmd tc;
             tc.text      = text_;
             tc.dest      = math::make_box(bx+6, by, bw-12, bh);

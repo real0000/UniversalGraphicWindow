@@ -233,6 +233,9 @@ public:
     // Render info
     virtual void get_menu_bar_render_info(MenuBarRenderInfo* out_info) const = 0;
     virtual int get_visible_menu_bar_items(MenuBarItemRenderInfo* out_items, int max_items) const = 0;
+
+    // Close any currently open dropdown (call from on_menu_closed to sync state)
+    virtual void close_all() = 0;
 };
 
 } // namespace gui

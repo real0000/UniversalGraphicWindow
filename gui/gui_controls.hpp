@@ -21,6 +21,16 @@ enum class ButtonType : uint8_t {
     Checkbox        // Checkbox button
 };
 
+enum class ButtonStylePreset : uint8_t {
+    Default = 0,
+    Primary,     // Blue accent
+    Success,     // Green
+    Warning,     // Orange
+    Danger,      // Red
+    Ghost,       // Transparent fill, visible border
+    Flat         // No border, subtle hover
+};
+
 struct ButtonStyle {
     math::Vec4 background_color;
     math::Vec4 hover_color;
@@ -51,6 +61,70 @@ struct ButtonStyle {
         s.focus_border_color = color_rgba8(0, 122, 204);
         return s;
     }
+
+    static ButtonStyle from_preset(ButtonStylePreset preset) {
+        ButtonStyle s = default_style();
+        switch (preset) {
+            case ButtonStylePreset::Primary:
+                s.background_color = color_rgba8(0, 122, 204);
+                s.hover_color      = color_rgba8(0, 140, 230);
+                s.pressed_color    = color_rgba8(0, 100, 180);
+                s.border_color     = color_rgba8(0, 100, 170);
+                break;
+            case ButtonStylePreset::Success:
+                s.background_color = color_rgba8(40, 160, 80);
+                s.hover_color      = color_rgba8(50, 180, 90);
+                s.pressed_color    = color_rgba8(30, 140, 65);
+                s.border_color     = color_rgba8(30, 130, 60);
+                break;
+            case ButtonStylePreset::Warning:
+                s.background_color = color_rgba8(200, 130, 0);
+                s.hover_color      = color_rgba8(220, 148, 0);
+                s.pressed_color    = color_rgba8(175, 110, 0);
+                s.border_color     = color_rgba8(175, 110, 0);
+                s.text_color       = color_rgba8(255, 255, 255);
+                break;
+            case ButtonStylePreset::Danger:
+                s.background_color = color_rgba8(190, 40, 40);
+                s.hover_color      = color_rgba8(215, 50, 50);
+                s.pressed_color    = color_rgba8(165, 30, 30);
+                s.border_color     = color_rgba8(160, 30, 30);
+                break;
+            case ButtonStylePreset::Ghost:
+                s.background_color = color_rgba8(0, 0, 0, 0);
+                s.hover_color      = color_rgba8(255, 255, 255, 25);
+                s.pressed_color    = color_rgba8(255, 255, 255, 15);
+                s.border_color     = color_rgba8(150, 150, 150);
+                break;
+            case ButtonStylePreset::Flat:
+                s.background_color = color_rgba8(0, 0, 0, 0);
+                s.hover_color      = color_rgba8(255, 255, 255, 20);
+                s.pressed_color    = color_rgba8(255, 255, 255, 10);
+                s.border_color     = color_rgba8(0, 0, 0, 0);
+                s.border_width     = 0.0f;
+                break;
+            default: break;
+        }
+        return s;
+    }
+};
+
+// Per-state visual transform applied on top of the button's color
+struct ButtonTransitionState {
+    math::Vec4 tint   = {1.0f, 1.0f, 1.0f, 1.0f};  // Multiplicative color tint
+    float      scale  = 1.0f;                         // Uniform scale (1 = no change)
+    math::Vec2 offset = math::Vec2(0.0f, 0.0f);       // Pixel translation
+
+    static ButtonTransitionState identity() { return {}; }
+};
+
+// Transition animation settings for a button widget
+struct ButtonTransition {
+    ButtonTransitionState normal;
+    ButtonTransitionState hovered;
+    ButtonTransitionState pressed;
+    ButtonTransitionState disabled;
+    float duration = 0.12f;  // Blend duration in seconds (0 = instant snap)
 };
 
 class IButtonEventHandler {
@@ -91,6 +165,10 @@ public:
     // Style
     virtual const ButtonStyle& get_button_style() const = 0;
     virtual void set_button_style(const ButtonStyle& style) = 0;
+
+    // Transition animation
+    virtual const ButtonTransition& get_button_transition() const = 0;
+    virtual void set_button_transition(const ButtonTransition& transition) = 0;
 
     // Event handler
     virtual void set_button_event_handler(IButtonEventHandler* handler) = 0;

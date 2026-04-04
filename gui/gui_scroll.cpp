@@ -176,6 +176,7 @@ public:
     int get_child_count() const override { return base_.get_child_count(); }
     IGuiWidget* get_child(int i) const override { return base_.get_child(i); }
     bool add_child(IGuiWidget* c) override { return base_.add_child(c); }
+    bool insert_child_before(IGuiWidget* c, IGuiWidget* before) override { return base_.insert_child_before(c, before); }
     bool remove_child(IGuiWidget* c) override { return base_.remove_child(c); }
     bool remove_child_at(int i) override { return base_.remove_child_at(i); }
     void clear_children() override { base_.clear_children(); }

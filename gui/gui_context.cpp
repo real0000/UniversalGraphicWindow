@@ -249,7 +249,10 @@ public:
                 }
                 if (!new_focus) new_focus = find_focusable_at(&root_, pos);
             }
-            if (new_focus != focused_) {
+            // Only update focus when clicking on a focusable widget.
+            // Clicking on non-focusable areas (e.g. canvas) preserves current focus
+            // so property grid / text inputs keep receiving keyboard events.
+            if (new_focus != nullptr && new_focus != focused_) {
                 if (focused_) focused_->set_focus(false);
                 focused_ = new_focus;
                 if (focused_) focused_->set_focus(true);

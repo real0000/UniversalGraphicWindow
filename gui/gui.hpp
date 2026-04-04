@@ -625,6 +625,8 @@ public:
     virtual int get_child_count() const = 0;
     virtual IGuiWidget* get_child(int index) const = 0;
     virtual bool add_child(IGuiWidget* child) = 0;
+    // Insert child before the given sibling (nullptr = append)
+    virtual bool insert_child_before(IGuiWidget* child, IGuiWidget* before) = 0;
     virtual bool remove_child(IGuiWidget* child) = 0;
     virtual bool remove_child_at(int index) = 0;
     virtual void clear_children() = 0;

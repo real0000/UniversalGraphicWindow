@@ -17,8 +17,36 @@ class GuiButton : public WidgetBase<IGuiButton, WidgetType::Button> {
     int radio_group_ = 0;
     std::vector<IGuiButton*> radio_peers_;
     ButtonStyle style_ = ButtonStyle::default_style();
+    ButtonTransition transition_;
     IButtonEventHandler* handler_ = nullptr;
     mutable WidgetRenderInfo ri_;
+
+    // Transition animation state
+    mutable WidgetState anim_from_  = WidgetState::Normal;
+    mutable WidgetState anim_to_    = WidgetState::Normal;
+    mutable float       anim_t_     = 1.0f;  // 0=from, 1=fully at target
+
+    static const ButtonTransitionState& state_transition(const ButtonTransition& tr, WidgetState s) {
+        switch (s) {
+            case WidgetState::Hovered:  return tr.hovered;
+            case WidgetState::Pressed:  return tr.pressed;
+            case WidgetState::Disabled: return tr.disabled;
+            default:                   return tr.normal;
+        }
+    }
+
+    static ButtonTransitionState lerp_ts(const ButtonTransitionState& a,
+                                         const ButtonTransitionState& b, float t) {
+        ButtonTransitionState r;
+        r.tint.x  = a.tint.x  + (b.tint.x  - a.tint.x)  * t;
+        r.tint.y  = a.tint.y  + (b.tint.y  - a.tint.y)  * t;
+        r.tint.z  = a.tint.z  + (b.tint.z  - a.tint.z)  * t;
+        r.tint.w  = a.tint.w  + (b.tint.w  - a.tint.w)  * t;
+        r.scale   = a.scale   + (b.scale   - a.scale)   * t;
+        math::set_x(r.offset, math::x(a.offset) + (math::x(b.offset) - math::x(a.offset)) * t);
+        math::set_y(r.offset, math::y(a.offset) + (math::y(b.offset) - math::y(a.offset)) * t);
+        return r;
+    }
 
     void uncheck_radio_group() {
         // Deselect explicit peers (for standalone/overlay radio buttons)
@@ -72,7 +100,24 @@ public:
     void clear_radio_peers() override { radio_peers_.clear(); }
     const ButtonStyle& get_button_style() const override { return style_; }
     void set_button_style(const ButtonStyle& s) override { style_ = s; }
+    const ButtonTransition& get_button_transition() const override { return transition_; }
+    void set_button_transition(const ButtonTransition& t) override { transition_ = t; }
     void set_button_event_handler(IButtonEventHandler* h) override { handler_ = h; }
+
+    void update(float dt) override {
+        base_.update(dt);
+        WidgetState cur = base_.get_state();
+        if (cur != anim_to_) {
+            // State changed — start a new transition from current blend position
+            anim_from_ = anim_to_;
+            anim_to_   = cur;
+            anim_t_    = (transition_.duration > 0.0f) ? 0.0f : 1.0f;
+        }
+        if (anim_t_ < 1.0f && transition_.duration > 0.0f) {
+            anim_t_ += dt / transition_.duration;
+            if (anim_t_ > 1.0f) anim_t_ = 1.0f;
+        }
+    }
 
     const WidgetRenderInfo& get_render_info(Window*) const override {
         ri_.invalidate();
@@ -82,39 +127,60 @@ public:
         auto noclip = math::make_box(0,0,0,0);
         int32_t d = 0;
         const auto& s = style_;
+
+        // Compute blended transition state
+        ButtonTransitionState ts = lerp_ts(
+            state_transition(transition_, anim_from_),
+            state_transition(transition_, anim_to_),
+            anim_t_);
+
+        // Apply transition offset and scale to render bounds
+        float cx = bx + bw * 0.5f + math::x(ts.offset);
+        float cy = by + bh * 0.5f + math::y(ts.offset);
+        float rw = bw * ts.scale;
+        float rh = bh * ts.scale;
+        float rx = cx - rw * 0.5f;
+        float ry = cy - rh * 0.5f;
+
         bool is_radio = (type_ == ButtonType::Radio);
         bool is_check = (type_ == ButtonType::Checkbox);
         if (is_radio || is_check) {
             if (base_.has_focus())
-                ri_.push_outline(bx, by, bw, bh, s.focus_border_color, d, noclip);
+                ri_.push_outline(rx, ry, rw, rh, s.focus_border_color, d, noclip);
             if (is_check) {
-                float cbx = bx + 4, cby = by + bh/2 - 6;
-                ri_.push_rect(cbx, cby, 12, 12, s.background_color, d++, noclip);
+                float cbx = rx + 4, cby = ry + rh/2 - 6;
+                math::Vec4 bg = {s.background_color.x*ts.tint.x, s.background_color.y*ts.tint.y,
+                                 s.background_color.z*ts.tint.z, s.background_color.w*ts.tint.w};
+                ri_.push_rect(cbx, cby, 12, 12, bg, d++, noclip);
                 ri_.push_outline(cbx, cby, 12, 12, s.border_color, d, noclip);
                 if (checked_) ri_.push_rect(cbx+3, cby+3, 6, 6, s.checked_color, d++, noclip);
             } else {
-                float rcx = bx + 10, rcy = by + bh/2;
+                float rcx = rx + 10, rcy = ry + rh/2;
                 ri_.push_circle(rcx, rcy, 6, s.border_color, d++, noclip);
-                ri_.push_circle(rcx, rcy, 5, s.background_color, d++, noclip);
+                math::Vec4 bg = {s.background_color.x*ts.tint.x, s.background_color.y*ts.tint.y,
+                                 s.background_color.z*ts.tint.z, s.background_color.w*ts.tint.w};
+                ri_.push_circle(rcx, rcy, 5, bg, d++, noclip);
                 if (checked_) ri_.push_circle(rcx, rcy, 3, s.checked_color, d++, noclip);
             }
             if (!text_.empty())
-                ri_.push_text(text_.c_str(), bx+22, by, bw-22, bh,
+                ri_.push_text(text_.c_str(), rx+22, ry, rw-22, rh,
                               s.text_color, s.font_size, Alignment::CenterLeft, d++, noclip);
         } else {
-            math::Vec4 bg;
-            switch (base_.get_state()) {
-                case WidgetState::Pressed:  bg = s.pressed_color;  break;
-                case WidgetState::Hovered:  bg = s.hover_color;    break;
-                case WidgetState::Disabled: bg = s.disabled_color; break;
-                default: bg = checked_ ? s.checked_color : s.background_color; break;
+            math::Vec4 base_bg;
+            switch (anim_to_) {
+                case WidgetState::Pressed:  base_bg = s.pressed_color;  break;
+                case WidgetState::Hovered:  base_bg = s.hover_color;    break;
+                case WidgetState::Disabled: base_bg = s.disabled_color; break;
+                default: base_bg = checked_ ? s.checked_color : s.background_color; break;
             }
-            ri_.push_rect(bx, by, bw, bh, bg, d++, noclip);
-            ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
+            math::Vec4 bg = {base_bg.x*ts.tint.x, base_bg.y*ts.tint.y,
+                             base_bg.z*ts.tint.z, base_bg.w*ts.tint.w};
+            ri_.push_rect(rx, ry, rw, rh, bg, d++, noclip);
+            ri_.push_outline(rx, ry, rw, rh, s.border_color, d, noclip);
             if (base_.has_focus())
-                ri_.push_outline(bx-1, by-1, bw+2, bh+2, s.focus_border_color, d, noclip);
+                ri_.push_outline(rx-1, ry-1, rw+2, rh+2, s.focus_border_color, d, noclip);
             if (!text_.empty())
-                ri_.push_text(text_.c_str(), bx, by, bw, bh,
+                ri_.push_text(text_.c_str(), rx, ry, rw, rh,
                               s.text_color, s.font_size, Alignment::Center, d++, noclip);
         }
         ri_.finalize();

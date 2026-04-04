@@ -295,6 +295,7 @@ public:
         if (!second_panel_) { set_second_panel(child); return true; }
         return false;
     }
+    bool insert_child_before(IGuiWidget* child, IGuiWidget*) override { return add_child(child); }
 
     bool remove_child(IGuiWidget* child) override {
         if (first_panel_ == child) { first_panel_ = nullptr; return true; }
@@ -884,6 +885,7 @@ public:
         if (!center_content_) { set_center_content(child); return true; }
         return false;
     }
+    bool insert_child_before(IGuiWidget* child, IGuiWidget*) override { return add_child(child); }
 
     bool remove_child(IGuiWidget* child) override {
         for (auto& p : panels_) {

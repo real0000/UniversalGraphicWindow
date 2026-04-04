@@ -41,7 +41,22 @@ public:
     IGuiWidget* get_parent() const override { return parent_; }
     void set_parent(IGuiWidget* p) override { parent_ = p; }
     math::Box get_bounds() const override { return bounds_; }
-    void set_bounds(const math::Box& b) override { bounds_ = b; }
+    void set_bounds(const math::Box& b) override {
+        float dx = math::x(math::box_min(b)) - math::x(math::box_min(bounds_));
+        float dy = math::y(math::box_min(b)) - math::y(math::box_min(bounds_));
+        bounds_ = b;
+        if ((std::abs(dx) > 0.001f || std::abs(dy) > 0.001f) && !children_.empty()) {
+            for (auto* c : children_) {
+                auto cb = c->get_bounds();
+                c->set_bounds(math::make_box(
+                    math::x(math::box_min(cb)) + dx,
+                    math::y(math::box_min(cb)) + dy,
+                    math::box_width(cb),
+                    math::box_height(cb)
+                ));
+            }
+        }
+    }
     math::Vec2 get_preferred_size() const override { return preferred_size_; }
     math::Vec2 get_min_size() const override { return min_size_; }
     math::Vec2 get_max_size() const override { return max_size_; }
@@ -136,6 +151,14 @@ public:
     int get_child_count() const override { return (int)children_.size(); }
     IGuiWidget* get_child(int i) const override { return (i >= 0 && i < (int)children_.size()) ? children_[i] : nullptr; }
     bool add_child(IGuiWidget* c) override { if (!c) return false; children_.push_back(c); c->set_parent(this); return true; }
+    bool insert_child_before(IGuiWidget* c, IGuiWidget* before) override {
+        if (!c) return false;
+        if (!before) { children_.push_back(c); c->set_parent(this); return true; }
+        auto it = std::find(children_.begin(), children_.end(), before);
+        children_.insert(it == children_.end() ? children_.end() : it, c);
+        c->set_parent(this);
+        return true;
+    }
     bool remove_child(IGuiWidget* c) override {
         auto it = std::find(children_.begin(), children_.end(), c);
         if (it == children_.end()) return false;
@@ -238,6 +261,7 @@ public:
     int get_child_count() const override { return 0; }
     IGuiWidget* get_child(int) const override { return nullptr; }
     bool add_child(IGuiWidget*) override { return false; }
+    bool insert_child_before(IGuiWidget*, IGuiWidget*) override { return false; }
     bool remove_child(IGuiWidget*) override { return false; }
     bool remove_child_at(int) override { return false; }
     void clear_children() override {}

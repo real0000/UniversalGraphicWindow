@@ -129,7 +129,7 @@ public:
     IGuiMenu* get_submenu(int id) const override { int i=find_idx(id); return i>=0?items_[i].submenu:nullptr; }
     void show_at(const math::Vec2& pos) override {
         auto b=base_.get_bounds(); float w=math::box_width(b),h=math::box_height(b);
-        base_.set_bounds(math::make_box(math::x(pos),math::y(pos),math::x(pos)+w,math::y(pos)+h));
+        base_.set_bounds(math::make_box(math::x(pos),math::y(pos),w,h));
         open_=true; if(handler_) handler_->on_menu_opened();
     }
     void show_relative_to(const IGuiWidget* anchor, PopupPlacement placement) override {
@@ -139,7 +139,7 @@ public:
         float ah=math::box_height(ab);
         show_at(math::Vec2(ax,ay+ah));
     }
-    void hide() override { open_=false; if(handler_) handler_->on_menu_closed(); }
+    void hide() override { if(!open_) return; open_=false; if(handler_) handler_->on_menu_closed(); }
     bool is_open() const override { return open_; }
     void set_item_user_data(int id, void* d) override { int i=find_idx(id); if(i>=0) items_[i].user_data=d; }
     void* get_item_user_data(int id) const override { int i=find_idx(id); return i>=0?items_[i].user_data:nullptr; }
@@ -274,6 +274,7 @@ public:
         }
     }
     int get_open_menu() const { return open_menu_; }
+    void close_all() override { open_menu_ = -1; }
     int add_menu(const char* text, IGuiMenu* menu) override {
         int id=next_id_++; entries_.push_back({id,text?text:"",menu,true}); return id;
     }
@@ -326,16 +327,8 @@ public:
         }
         // Bottom border line
         ri_.push_rect(bx, by+bh-1, bw, 1, math::Vec4(0.2f,0.2f,0.22f,1.0f), d++, noclip);
-        // Render open dropdown menu
-        for (int i = 0; i < (int)entries_.size(); i++) {
-            if (entries_[i].id == open_menu_ && entries_[i].menu) {
-                const auto& mri = entries_[i].menu->get_render_info(nullptr);
-                for (auto cmd : mri.colors)   { cmd.depth += d; ri_.colors.push_back(cmd); }
-                for (auto cmd : mri.texts)    { cmd.depth += d; ri_.texts.push_back(cmd); }
-                for (auto cmd : mri.textures) { cmd.depth += d; ri_.textures.push_back(cmd); }
-                for (auto cmd : mri.slices)   { cmd.depth += d; ri_.slices.push_back(cmd); }
-            }
-        }
+        // Dropdown menus are registered as overlays on the context, so they
+        // render on top of everything via collect_recursive — not composited here.
         ri_.finalize(); base_.clear_dirty(); return ri_;
     }
 };

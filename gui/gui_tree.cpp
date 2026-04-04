@@ -19,6 +19,15 @@ class GuiTreeView : public WidgetBase<IGuiTreeView, WidgetType::TreeView> {
     TreeViewStyle style_=TreeViewStyle::default_style();
     ITreeViewEventHandler* handler_=nullptr;
     mutable WidgetRenderInfo ri_;
+
+    // Drag-drop state
+    int   drag_node_id_   = -1;    // node being dragged
+    float drag_start_y_   = 0.0f;  // mouse y at press
+    bool  dragging_       = false;
+    // Drop target
+    int   drop_row_       = -1;    // visible row index of drop target
+    bool  drop_as_child_  = false; // drop as child of that row's node
+    bool  drop_after_     = false; // insert after that row's node (lower half)
     int find_idx(int id) const { for(int i=0;i<(int)nodes_.size();++i) if(nodes_[i].id==id) return i; return -1; }
     // Collect visible nodes by walking tree depth-first, respecting expanded state
     void collect_visible(int node_id, int depth, std::vector<std::pair<int,int>>& out) const {
@@ -46,6 +55,20 @@ class GuiTreeView : public WidgetBase<IGuiTreeView, WidgetType::TreeView> {
         if (scroll_y_ < 0) scroll_y_ = 0;
         if (scroll_y_ > max_scroll) scroll_y_ = max_scroll;
     }
+    // Returns true if ancestor_id is an ancestor (or equal) of node_id
+    bool is_ancestor_or_self(int node_id, int ancestor_id) const {
+        int cur = node_id;
+        while (cur >= 0) {
+            if (cur == ancestor_id) return true;
+            int i = find_idx(cur);
+            if (i < 0) break;
+            cur = nodes_[i].parent_id;
+        }
+        return false;
+    }
+
+    void cancel_drag() { dragging_ = false; drag_node_id_ = -1; drop_row_ = -1; drop_as_child_ = false; drop_after_ = false; }
+
 public:
     bool handle_mouse_scroll(float, float dy) override {
         if (dy == 0) return false;
@@ -59,11 +82,106 @@ public:
             set_scroll_offset(scrollbar_offset_from_mouse(base_.get_bounds(), content_h, math::y(p)));
             return true;
         }
+        if (drag_reorder_ && drag_node_id_ >= 0) {
+            float dy = math::y(p) - drag_start_y_;
+            if (!dragging_ && std::abs(dy) > 4.0f)
+                dragging_ = true;
+            if (dragging_) {
+                auto b = base_.get_bounds();
+                float row_h = style_.row_height;
+                float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
+                std::vector<std::pair<int,int>> visible;
+                collect_all_visible(visible);
+                int row = (row_h > 0) ? (int)(rel_y / row_h) : 0;
+                row = std::max(0, std::min(row, (int)visible.size() - 1));
+                float frac = (row_h > 0) ? (rel_y - row * row_h) / row_h : 0.5f;
+                float rel_x = math::x(p) - math::x(math::box_min(b));
+                if (row < (int)visible.size()) {
+                    int target_node = nodes_[visible[row].first].id;
+                    // drop_as_child_: cursor in middle vertical band AND x is indented enough,
+                    // AND target is not the drag node itself or one of its descendants
+                    bool target_is_valid = (target_node != drag_node_id_) &&
+                                           !is_ancestor_or_self(target_node, drag_node_id_);
+                    int depth = visible[row].second;
+                    float child_threshold = (depth + 1) * style_.indent_width + 24.0f;
+                    // Middle 40% of row height => drop as child; top/bottom 30% => sibling
+                    bool mid_zone = (frac >= 0.3f && frac <= 0.7f);
+                    drop_as_child_ = mid_zone && (rel_x > child_threshold) && target_is_valid;
+                    drop_after_    = !drop_as_child_ && (frac > 0.5f);
+                } else {
+                    drop_as_child_ = false;
+                    drop_after_    = true;
+                }
+                drop_row_ = row;
+                return true;
+            }
+        }
         return base_.handle_mouse_move(p);
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
-        if (!base_.is_enabled() || !hit_test(p)) return false;
-        if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; }
+        // Allow release outside bounds to commit a drag
+        bool in_bounds = hit_test(p);
+        if (!base_.is_enabled()) return false;
+        if (!in_bounds && !dragging_ && !sb_drag_) return false;
+
+        if (btn == MouseButton::Left && !pressed) {
+            sb_drag_ = false;
+            if (dragging_ && drag_node_id_ >= 0 && drop_row_ >= 0) {
+                // Commit the drop
+                std::vector<std::pair<int,int>> visible;
+                collect_all_visible(visible);
+                if (drop_row_ < (int)visible.size()) {
+                    int target_idx = visible[drop_row_].first;
+                    int target_id  = nodes_[target_idx].id;
+                    bool valid_target = (target_id != drag_node_id_) &&
+                                        !is_ancestor_or_self(target_id, drag_node_id_);
+                    if (valid_target) {
+                        int new_parent_id, before_id;
+                        if (drop_as_child_) {
+                            // Drop as last child of target
+                            new_parent_id = target_id;
+                            before_id     = -1;
+                        } else if (drop_after_) {
+                            // Insert after target: find the next sibling
+                            new_parent_id = nodes_[target_idx].parent_id;
+                            before_id = -1; // default append
+                            if (new_parent_id >= 0) {
+                                int pi = find_idx(new_parent_id);
+                                if (pi >= 0) {
+                                    auto& siblings = nodes_[pi].children;
+                                    for (int si = 0; si < (int)siblings.size(); ++si) {
+                                        if (siblings[si] == target_id) {
+                                            before_id = (si + 1 < (int)siblings.size())
+                                                        ? siblings[si + 1] : -1;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Root-level nodes: find next root
+                                bool found = false;
+                                for (int ni = 0; ni < (int)nodes_.size(); ++ni) {
+                                    if (nodes_[ni].parent_id < 0) {
+                                        if (found) { before_id = nodes_[ni].id; break; }
+                                        if (nodes_[ni].id == target_id) found = true;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Insert before target (upper half)
+                            new_parent_id = nodes_[target_idx].parent_id;
+                            before_id     = target_id;
+                        }
+                        if (handler_)
+                            handler_->on_node_moved(drag_node_id_, new_parent_id, before_id);
+                    }
+                }
+            }
+            cancel_drag();
+            if (!in_bounds) return true;
+            return base_.handle_mouse_button(btn, pressed, p);
+        }
+
         if (btn == MouseButton::Left && pressed) {
             float content_h = get_total_content_height();
             if (scrollbar_hit_test(base_.get_bounds(), content_h, p)) {
@@ -75,29 +193,34 @@ public:
             float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
             int row = (style_.row_height > 0) ? (int)(rel_y / style_.row_height) : -1;
 
-            // Build visible list to find which node this row corresponds to
             std::vector<std::pair<int,int>> visible;
             collect_all_visible(visible);
 
             if (row >= 0 && row < (int)visible.size()) {
-                int idx = visible[row].first;
+                int idx   = visible[row].first;
                 int depth = visible[row].second;
-                float rel_x = math::x(p) - math::x(math::box_min(b));
+                float rel_x   = math::x(p) - math::x(math::box_min(b));
                 float indent_x = depth * style_.indent_width;
 
-                // Click on expand/collapse indicator area
                 if (!nodes_[idx].children.empty() && rel_x >= indent_x && rel_x < indent_x + 16) {
                     nodes_[idx].expanded = !nodes_[idx].expanded;
                     if (handler_) handler_->on_node_expanded(nodes_[idx].id, nodes_[idx].expanded);
                 } else {
-                    // Select node
                     int old = selected_;
                     selected_ = nodes_[idx].id;
                     if (selected_ != old && handler_) handler_->on_node_selected(selected_);
+                    // Start potential drag
+                    if (drag_reorder_) {
+                        drag_node_id_ = nodes_[idx].id;
+                        drag_start_y_ = math::y(p);
+                        dragging_     = false;
+                        drop_row_     = -1;
+                    }
                 }
             }
         }
         if (btn == MouseButton::Right && pressed) {
+            cancel_drag();
             if (handler_) handler_->on_right_click(p);
             return true;
         }
@@ -110,7 +233,7 @@ public:
         return id;
     }
     bool remove_node(int id) override { int i=find_idx(id); if(i<0)return false; nodes_.erase(nodes_.begin()+i); return true; }
-    void clear_nodes() override { nodes_.clear(); selected_=-1; }
+    void clear_nodes() override { nodes_.clear(); selected_=-1; next_id_=0; }
     int get_node_count() const override { return (int)nodes_.size(); }
     const char* get_node_text(int id) const override { int i=find_idx(id); return i>=0?nodes_[i].text.c_str():""; }
     void set_node_text(int id,const char* t) override { int i=find_idx(id); if(i>=0)nodes_[i].text=t?t:""; }
@@ -247,11 +370,30 @@ public:
             // Icon placeholder
             math::Vec4 icon_col(s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.5f);
             ri_.push_rect(indent+12, ry+row_h/2-4, 8, 8, icon_col, d++, clip);
+            // Drag source: dim it
+            if (dragging_ && nodes_[idx].id == drag_node_id_)
+                ri_.push_rect(bx, ry, bw, row_h, math::Vec4(0,0,0,0.4f), d++, clip);
+
             // Node text
             if (!nodes_[idx].text.empty()) {
                 math::Vec4 tc = is_sel ? math::Vec4(1,1,1,1) : s.text_color;
                 ri_.push_text(nodes_[idx].text.c_str(), indent+24, ry, bw-(indent+24-bx)-12, row_h,
                               tc, 11.0f, Alignment::CenterLeft, d++, clip);
+            }
+
+            // Drop indicator line
+            if (dragging_ && i == drop_row_) {
+                if (drop_as_child_) {
+                    // Highlight target row as drop container
+                    ri_.push_rect(bx+1, ry+1, bw-2, row_h-2, math::Vec4(0.2f,0.5f,1.0f,0.25f), d++, clip);
+                    ri_.push_outline(bx+1, ry+1, bw-2, row_h-2, math::Vec4(0.2f,0.6f,1.0f,0.8f), d, clip);
+                } else {
+                    // Horizontal line at top of the row
+                    float depth_off = visible[i].second * s.indent_width + 4;
+                    ri_.push_rect(bx + depth_off, ry, bw - depth_off, 2, math::Vec4(0.2f,0.6f,1.0f,1.0f), d++, clip);
+                    // Small circle on the left
+                    ri_.push_rect(bx + depth_off - 1, ry - 2, 5, 5, math::Vec4(0.2f,0.6f,1.0f,1.0f), d++, clip);
+                }
             }
         }
         // Embedded scrollbar

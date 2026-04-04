@@ -82,6 +82,8 @@ public:
     virtual void on_node_expanded(int node_id, bool expanded) = 0;
     virtual void on_node_double_clicked(int node_id) = 0;
     virtual void on_right_click(const math::Vec2& pos) {}
+    // Drag-drop reorder: dragged_id moved under new_parent_id, before before_id (-1 = append)
+    virtual void on_node_moved(int dragged_id, int new_parent_id, int before_id) {}
 };
 
 class IGuiTreeView : public IGuiWidget {

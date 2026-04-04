@@ -764,6 +764,11 @@ target_include_directories(window PUBLIC
 target_compile_definitions(window PUBLIC ${WINDOW_DEFINES})
 target_link_libraries(window PUBLIC ${WINDOW_LIBS})
 
+# Fix parallel PDB write contention on MSVC debug builds
+if(MSVC)
+    target_compile_options(window PRIVATE /FS)
+endif()
+
 # SIMD math acceleration
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86|x86_64|AMD64|i[3-6]86")
     if(WINDOW_MATH_SSE)
@@ -943,6 +948,19 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         add_executable(example_metal examples/metal.mm)
         target_link_libraries(example_metal PRIVATE window)
     endif()
+endif()
+
+#=============================================================================
+# GUI Editor Sub-project
+#=============================================================================
+
+option(WINDOW_BUILD_GUI_EDITOR "Build GUI editor application" ON)
+
+if(WINDOW_BUILD_GUI_EDITOR AND WINDOW_ENABLE_GUI AND WINDOW_ENABLE_FONT)
+    add_subdirectory(gui/editor)
+    message(STATUS "GUI Editor: enabled")
+else()
+    message(STATUS "GUI Editor: disabled (requires GUI and Font support)")
 endif()
 
 #=============================================================================
