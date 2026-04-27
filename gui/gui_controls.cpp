@@ -430,7 +430,7 @@ public:
 // Simple HSV->RGB helper (local, not exposed)
 static void hue_to_rgb_simple(float h, float& r, float& g, float& b) {
     float hp = h / 60.0f;
-    float x = 1.0f - std::fabsf(std::fmodf(hp, 2.0f) - 1.0f);
+    float x = 1.0f - std::fabs(std::fmod(hp, 2.0f) - 1.0f);
     if      (hp < 1) { r=1; g=x; b=0; }
     else if (hp < 2) { r=x; g=1; b=0; }
     else if (hp < 3) { r=0; g=1; b=x; }

@@ -17,6 +17,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cctype>
 #include <vector>
 #include <fstream>
 #include <cmath>
@@ -514,8 +515,128 @@ void FreeTypeFontLibrary::enumerate_system_fonts(std::vector<FontDescriptor>& ou
     out_fonts.clear();
 }
 
+// Forward-declared in font_linux.cpp when fontconfig is available.
+#ifdef FONT_SUPPORT_FONTCONFIG
+bool find_system_font_fontconfig(const FontDescriptor& descriptor, std::string& out_path);
+#endif
+
+namespace {
+
+bool ends_with_icase(const std::string& s, const char* suffix) {
+    size_t slen = s.size();
+    size_t suflen = std::strlen(suffix);
+    if (suflen > slen) return false;
+    for (size_t i = 0; i < suflen; ++i) {
+        char a = s[slen - suflen + i];
+        char b = suffix[i];
+        if (std::tolower(static_cast<unsigned char>(a)) !=
+            std::tolower(static_cast<unsigned char>(b))) return false;
+    }
+    return true;
+}
+
+bool family_matches(const std::string& filename, const std::string& family) {
+    auto strip = [](const std::string& s) {
+        std::string r;
+        r.reserve(s.size());
+        for (char c : s) {
+            if (c != ' ' && c != '-' && c != '_')
+                r.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        return r;
+    };
+
+    std::string a = strip(filename);  // e.g. "notosanscjkregular.ttc"
+    std::string b = strip(family);    // e.g. "notosanscjksc"
+    if (b.empty()) return false;
+
+    // Direct case-insensitive substring match handles the simple cases
+    // ("Liberation Sans" -> "LiberationSans-Regular.ttf").
+    if (a.find(b) != std::string::npos) return true;
+
+    // Many multi-region/multi-style fonts ship in a single file whose name
+    // omits the region/style suffix (Noto Sans CJK SC ↔ NotoSansCJK-Regular.ttc).
+    // Strip well-known trailing tokens from the requested family and try again.
+    static const char* const suffixes[] = {
+        // CJK regions
+        "sc", "tc", "jp", "kr", "hk",
+        // styles
+        "regular", "bold", "italic", "oblique",
+        "light", "medium", "black", "thin", "extralight", "semibold",
+        nullptr
+    };
+    std::string b2 = b;
+    bool stripped_any = false;
+    bool keep_stripping = true;
+    while (keep_stripping) {
+        keep_stripping = false;
+        for (int i = 0; suffixes[i]; ++i) {
+            size_t slen = std::strlen(suffixes[i]);
+            if (b2.size() > slen && b2.compare(b2.size() - slen, slen, suffixes[i]) == 0) {
+                b2.resize(b2.size() - slen);
+                stripped_any = true;
+                keep_stripping = true;
+                break;
+            }
+        }
+    }
+    // Require at least 4 chars after stripping to avoid pathological matches.
+    if (stripped_any && b2.size() >= 4 && a.find(b2) != std::string::npos) {
+        return true;
+    }
+
+    return false;
+}
+
+} // namespace
+} // namespace font
+
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
+
+namespace font {
+
+#if defined(__linux__) && !defined(__ANDROID__)
+// Recursively walk `dir`, collecting any font file whose stem matches `family`.
+// Stops at the first match and writes its absolute path to `out_path`.
+static bool walk_dir_for_font(const std::string& dir, const std::string& family,
+                              std::string& out_path, int depth = 0) {
+    if (depth > 6) return false;  // safety cap
+    DIR* d = opendir(dir.c_str());
+    if (!d) return false;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        std::string full = dir + "/" + ent->d_name;
+        struct stat st;
+        if (stat(full.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (walk_dir_for_font(full, family, out_path, depth + 1)) {
+                closedir(d);
+                return true;
+            }
+        } else if (S_ISREG(st.st_mode)) {
+            std::string name = ent->d_name;
+            if ((ends_with_icase(name, ".ttf") || ends_with_icase(name, ".otf") ||
+                 ends_with_icase(name, ".ttc")) && family_matches(name, family)) {
+                out_path = std::move(full);
+                closedir(d);
+                return true;
+            }
+        }
+    }
+    closedir(d);
+    return false;
+}
+#endif
+
 bool FreeTypeFontLibrary::find_system_font(const FontDescriptor& descriptor,
                                             std::string& out_path) const {
+#ifdef FONT_SUPPORT_FONTCONFIG
+    if (find_system_font_fontconfig(descriptor, out_path)) return true;
+#endif
 
     // Platform-specific font search paths
 #ifdef _WIN32
@@ -534,20 +655,28 @@ bool FreeTypeFontLibrary::find_system_font(const FontDescriptor& descriptor,
     const char* extensions[] = {".ttf", ".otf", ".ttc", ".dfont", nullptr};
 #else
     const char* search_paths[] = {
-        "/usr/share/fonts/",
-        "/usr/local/share/fonts/",
-        "~/.fonts/",
-        "~/.local/share/fonts/",
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        "~/.fonts",
+        "~/.local/share/fonts",
         nullptr
     };
     const char* extensions[] = {".ttf", ".otf", ".ttc", nullptr};
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+    // Linux distributes fonts under nested directories (e.g.
+    // /usr/share/fonts/truetype/liberation/), so flat lookup is useless.
+    // Walk the search roots looking for a stem-matching font file.
+    for (int p = 0; search_paths[p]; ++p) {
+        if (walk_dir_for_font(search_paths[p], descriptor.family, out_path)) {
+            return true;
+        }
+    }
+#else
     for (int p = 0; search_paths[p]; ++p) {
         for (int e = 0; extensions[e]; ++e) {
             std::string test_path = std::string(search_paths[p]) + descriptor.family + extensions[e];
-
-            // Check if file exists
             std::ifstream file(test_path);
             if (file.good()) {
                 out_path = std::move(test_path);
@@ -555,6 +684,8 @@ bool FreeTypeFontLibrary::find_system_font(const FontDescriptor& descriptor,
             }
         }
     }
+#endif
+    (void)extensions;
 
     return false;
 }

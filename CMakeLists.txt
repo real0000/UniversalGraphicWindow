@@ -53,6 +53,7 @@ option(WINDOW_MATH_SVE "Enable SVE SIMD acceleration for math (ARM)" OFF)
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF CACHE BOOL "" FORCE)
+set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/third" CACHE PATH "" FORCE)
 
 # Helper function to declare FetchContent with git progress
 # Usage: window_fetch_content(name GIT_REPOSITORY url GIT_TAG tag [other args...])
@@ -238,13 +239,50 @@ else()
     set(BOOST_INCLUDE_DIR "${Boost_INCLUDE_DIRS}")
 endif()
 
+# FreeType — fetched up-front (before HarfBuzz) so HarfBuzz can be built
+# with HB_HAVE_FREETYPE=ON, which is required by font_harfbuzz.cpp's call
+# to hb_ft_font_create.
+# On Linux, FreeType is the only working font renderer (font_linux.cpp is a
+# fontconfig-discovery wrapper, not a renderer), so auto-enable it.
+if(WINDOW_PLATFORM STREQUAL "X11" OR WINDOW_PLATFORM STREQUAL "WAYLAND")
+    set(WINDOW_ENABLE_FREETYPE ON CACHE BOOL "" FORCE)
+endif()
+
+set(FREETYPE_AVAILABLE FALSE)
+if(WINDOW_ENABLE_FREETYPE AND WINDOW_ENABLE_FONT)
+    find_package(Freetype QUIET)
+    if(FREETYPE_FOUND)
+        message(STATUS "FreeType: system package")
+        set(FREETYPE_AVAILABLE TRUE)
+    else()
+        message(STATUS "FreeType not found - fetching from GitHub...")
+        set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+        set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+        set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+        set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+        set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+        window_fetch_content(freetype
+            GIT_REPOSITORY https://github.com/freetype/freetype.git
+            GIT_TAG VER-2-13-3
+        )
+        FetchContent_MakeAvailable(freetype)
+        message(STATUS "FreeType fetched: 2.13.3")
+        set(FREETYPE_AVAILABLE TRUE)
+        set(FREETYPE_FETCHED TRUE)
+    endif()
+endif()
+
 # HarfBuzz (text shaping)
 if(WINDOW_ENABLE_HARFBUZZ AND WINDOW_ENABLE_FONT)
     find_package(harfbuzz QUIET)
     if(NOT harfbuzz_FOUND)
         message(STATUS "HarfBuzz not found - fetching from GitHub...")
         set(HB_BUILD_SUBSET OFF CACHE BOOL "" FORCE)
-        set(HB_HAVE_FREETYPE OFF CACHE BOOL "" FORCE)
+        if(FREETYPE_AVAILABLE)
+            set(HB_HAVE_FREETYPE ON CACHE BOOL "" FORCE)
+        else()
+            set(HB_HAVE_FREETYPE OFF CACHE BOOL "" FORCE)
+        endif()
         set(HB_HAVE_GLIB OFF CACHE BOOL "" FORCE)
         set(HB_HAVE_ICU OFF CACHE BOOL "" FORCE)
         set(HB_HAVE_GOBJECT OFF CACHE BOOL "" FORCE)
@@ -254,7 +292,7 @@ if(WINDOW_ENABLE_HARFBUZZ AND WINDOW_ENABLE_FONT)
             GIT_TAG 9.0.0
         )
         FetchContent_MakeAvailable(harfbuzz)
-        message(STATUS "HarfBuzz fetched: 9.0.0")
+        message(STATUS "HarfBuzz fetched: 9.0.0 (FreeType integration: ${FREETYPE_AVAILABLE})")
     else()
         message(STATUS "HarfBuzz found")
     endif()
@@ -263,24 +301,92 @@ endif()
 
 # FriBidi (bidirectional text)
 if(WINDOW_ENABLE_FRIBIDI AND WINDOW_ENABLE_FONT)
-    find_package(PkgConfig QUIET)
-    set(FRIBIDI_FOUND FALSE)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(FRIBIDI fribidi QUIET)
-    endif()
-    if(NOT FRIBIDI_FOUND)
-        message(STATUS "FriBidi not found - fetching release tarball...")
-        window_fetch_content(fribidi
-            URL https://github.com/fribidi/fribidi/releases/download/v1.0.15/fribidi-1.0.15.tar.xz
-        )
+    message(STATUS "FriBidi - fetching from GitHub...")
+    window_fetch_content(fribidi
+        GIT_REPOSITORY https://github.com/fribidi/fribidi.git
+        GIT_TAG v1.0.15
+        GIT_SHALLOW TRUE
+    )
         FetchContent_GetProperties(fribidi)
         if(NOT fribidi_POPULATED)
             FetchContent_Populate(fribidi)
         endif()
         # FriBidi uses Meson natively; build a minimal CMake target from sources
-        # Release tarball includes pre-generated .tab.i files in lib/
         set(FRIBIDI_SRC_DIR "${fribidi_SOURCE_DIR}")
         set(FRIBIDI_BUILD_DIR "${fribidi_BINARY_DIR}")
+
+        # Generate fribidi-unicode-version.h (needed by generators and library)
+        if(NOT EXISTS "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h")
+            file(WRITE "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h"
+                "#ifndef FRIBIDI_UNICODE_VERSION_H\n"
+                "#define FRIBIDI_UNICODE_VERSION_H\n"
+                "#define FRIBIDI_UNICODE_VERSION \"15.1.0\"\n"
+                "#define FRIBIDI_UNICODE_MAJOR_VERSION 15\n"
+                "#define FRIBIDI_UNICODE_MINOR_VERSION 1\n"
+                "#define FRIBIDI_UNICODE_MICRO_VERSION 0\n"
+                "#endif\n"
+            )
+        endif()
+
+        # Generate .tab.i files from Unicode data (git clone does not include them)
+        set(FRIBIDI_GEN_DIR "${FRIBIDI_SRC_DIR}/gen.tab")
+        set(FRIBIDI_UNIDATA_DIR "${FRIBIDI_GEN_DIR}/unidata")
+        set(FRIBIDI_COMPRESSION "2")
+        set(FRIBIDI_GEN_NATIVE_ARGS -DHAVE_STRINGIZE -DHAVE_STDLIB_H -DHAVE_STRING_H -DDONT_HAVE_FRIBIDI_CONFIG_H)
+
+        # Helper macro: compile a gen-*-tab.c tool via try_compile, then run it
+        file(MAKE_DIRECTORY "${FRIBIDI_BUILD_DIR}/gen")
+        macro(fribidi_gen_tab tab_name)
+            set(_gen_name "gen-${tab_name}-tab")
+            set(_tab_output "${FRIBIDI_SRC_DIR}/lib/${tab_name}.tab.i")
+            set(_gen_exe "${FRIBIDI_BUILD_DIR}/gen/bin/${_gen_name}${CMAKE_EXECUTABLE_SUFFIX}")
+            # Treat zero-byte tab.i as missing (a previous failed run can leave
+            # behind a truncated stub that would otherwise be reused).
+            set(_tab_needs_regen TRUE)
+            if(EXISTS "${_tab_output}")
+                file(SIZE "${_tab_output}" _tab_size)
+                if(_tab_size GREATER 0)
+                    set(_tab_needs_regen FALSE)
+                endif()
+            endif()
+            if(_tab_needs_regen)
+                file(MAKE_DIRECTORY "${FRIBIDI_BUILD_DIR}/gen/bin")
+                try_compile(_compiled_${tab_name}
+                    "${FRIBIDI_BUILD_DIR}/gen/${_gen_name}"
+                    SOURCES
+                        "${FRIBIDI_GEN_DIR}/${_gen_name}.c"
+                        "${FRIBIDI_GEN_DIR}/packtab.c"
+                    CMAKE_FLAGS
+                        "-DINCLUDE_DIRECTORIES:STRING=${FRIBIDI_SRC_DIR}/lib"
+                    COMPILE_DEFINITIONS
+                        ${FRIBIDI_GEN_NATIVE_ARGS}
+                    COPY_FILE "${_gen_exe}"
+                    OUTPUT_VARIABLE _compile_output
+                )
+                if(NOT _compiled_${tab_name})
+                    message(STATUS "try_compile output: ${_compile_output}")
+                    message(FATAL_ERROR "Failed to compile ${_gen_name}")
+                endif()
+                execute_process(
+                    COMMAND "${_gen_exe}"
+                        ${FRIBIDI_COMPRESSION} ${ARGN} ${_gen_name}
+                    OUTPUT_FILE "${_tab_output}"
+                    RESULT_VARIABLE _gen_result
+                )
+                if(NOT _gen_result EQUAL 0)
+                    message(FATAL_ERROR "Failed to generate ${tab_name}.tab.i")
+                endif()
+                message(STATUS "FriBidi: generated ${tab_name}.tab.i")
+            endif()
+        endmacro()
+
+        # Generate .tab.i files from Unicode data (git clone does not include them)
+        fribidi_gen_tab(bidi-type       "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt")
+        fribidi_gen_tab(joining-type    "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt" "${FRIBIDI_UNIDATA_DIR}/ArabicShaping.txt")
+        fribidi_gen_tab(arabic-shaping  "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt")
+        fribidi_gen_tab(mirroring       "${FRIBIDI_UNIDATA_DIR}/BidiMirroring.txt")
+        fribidi_gen_tab(brackets        "${FRIBIDI_UNIDATA_DIR}/BidiBrackets.txt" "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt")
+        fribidi_gen_tab(brackets-type   "${FRIBIDI_UNIDATA_DIR}/BidiBrackets.txt")
         # Generate fribidi-config.h and fribidi-unicode-version.h
         file(MAKE_DIRECTORY "${FRIBIDI_BUILD_DIR}/lib")
         file(WRITE "${FRIBIDI_BUILD_DIR}/lib/fribidi-config.h"
@@ -300,18 +406,7 @@ if(WINDOW_ENABLE_FRIBIDI AND WINDOW_ENABLE_FONT)
             "#endif\n"
             "#endif\n"
         )
-        # fribidi-unicode-version.h is needed by fribidi-unicode.h
-        if(NOT EXISTS "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h")
-            file(WRITE "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h"
-                "#ifndef FRIBIDI_UNICODE_VERSION_H\n"
-                "#define FRIBIDI_UNICODE_VERSION_H\n"
-                "#define FRIBIDI_UNICODE_VERSION \"15.1.0\"\n"
-                "#define FRIBIDI_UNICODE_MAJOR_VERSION 15\n"
-                "#define FRIBIDI_UNICODE_MINOR_VERSION 1\n"
-                "#define FRIBIDI_UNICODE_MICRO_VERSION 0\n"
-                "#endif\n"
-            )
-        endif()
+        # fribidi-unicode-version.h already generated above (before .tab.i generation)
         file(GLOB FRIBIDI_SOURCES "${FRIBIDI_SRC_DIR}/lib/*.c")
         # Remove charset-related sources (we only need the core BiDi algorithm)
         list(FILTER FRIBIDI_SOURCES EXCLUDE REGEX "fribidi-char-sets.*\\.c$")
@@ -325,10 +420,7 @@ if(WINDOW_ENABLE_FRIBIDI AND WINDOW_ENABLE_FONT)
         if(MSVC)
             target_compile_options(fribidi PRIVATE /wd4244 /wd4267 /wd4018)
         endif()
-        message(STATUS "FriBidi fetched: 1.0.15")
-    else()
-        message(STATUS "FriBidi found")
-    endif()
+    message(STATUS "FriBidi fetched: 1.0.15")
     set(FRIBIDI_AVAILABLE TRUE)
 endif()
 
@@ -339,14 +431,25 @@ if(WINDOW_ENABLE_OPENGL)
         list(APPEND WINDOW_LIBS opengl32)
         list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
     elseif(WINDOW_PLATFORM STREQUAL "X11")
-        list(APPEND WINDOW_SOURCES api/api_opengl_glx.cpp)
+        list(APPEND WINDOW_SOURCES api/api_opengl_glx.cpp api/glad.c)
         find_package(OpenGL REQUIRED)
         list(APPEND WINDOW_LIBS OpenGL::GL)
         list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
     elseif(WINDOW_PLATFORM STREQUAL "WAYLAND")
-        list(APPEND WINDOW_SOURCES api/api_opengl_egl.cpp)
-        find_package(OpenGL REQUIRED COMPONENTS EGL)
-        list(APPEND WINDOW_LIBS OpenGL::EGL OpenGL::GL)
+        list(APPEND WINDOW_SOURCES api/api_opengl_egl.cpp api/glad.c)
+        # Try the proper CMake target first; fall back to bare libraries when
+        # the dev headers/pkg-config files aren't installed (the Wayland
+        # bootstrap above already wired the EGL libs into WINDOW_LIBS).
+        find_package(OpenGL QUIET COMPONENTS EGL)
+        if(TARGET OpenGL::EGL)
+            list(APPEND WINDOW_LIBS OpenGL::EGL OpenGL::GL)
+        else()
+            find_library(WL_GL_LIB NAMES GL libGL.so.1)
+            if(WL_GL_LIB)
+                list(APPEND WINDOW_LIBS ${WL_GL_LIB})
+            endif()
+            # WL_EGL_RUNTIME_LIB is set in the Wayland bootstrap block.
+        endif()
         list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_OPENGL)
     elseif(WINDOW_PLATFORM STREQUAL "MACOS")
         list(APPEND WINDOW_SOURCES api/api_opengl_cocoa.mm)
@@ -373,20 +476,54 @@ endif()
 
 # Vulkan
 if(WINDOW_ENABLE_VULKAN)
+    set(_vulkan_ok FALSE)
+    set(_vulkan_target "")
+
     find_package(Vulkan QUIET)
     if(Vulkan_FOUND)
+        set(_vulkan_ok TRUE)
+        set(_vulkan_target Vulkan::Vulkan)
+        message(STATUS "Vulkan: system SDK")
+    else()
+        # No SDK installed — fetch Khronos headers and look for the loader
+        # library (libvulkan.so.1 / vulkan-1.dll) that the OS already ships.
+        # Distros without -dev installed only have the SO-version symlink
+        # (e.g. libvulkan.so.1), not the unversioned libvulkan.so, so search
+        # both names explicitly.
+        find_library(VULKAN_LOADER_LIB NAMES vulkan vulkan-1 libvulkan.so.1)
+        if(VULKAN_LOADER_LIB)
+            message(STATUS "Vulkan loader found: ${VULKAN_LOADER_LIB}")
+            message(STATUS "Vulkan headers not found - fetching from GitHub...")
+            window_fetch_content(vulkan_headers
+                GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
+                GIT_TAG v1.3.290
+            )
+            FetchContent_MakeAvailable(vulkan_headers)
+            # Don't link Vulkan::Headers as a library — it's not in our
+            # install export set. Just pull its include directory directly
+            # so `#include <vulkan/vulkan.h>` resolves.
+            list(APPEND WINDOW_LIBS ${VULKAN_LOADER_LIB})
+            include_directories("${vulkan_headers_SOURCE_DIR}/include")
+            set(_vulkan_ok TRUE)
+            message(STATUS "Vulkan: fetched headers + system loader")
+        else()
+            message(STATUS "Vulkan not found (no headers and no libvulkan), disabled")
+        endif()
+    endif()
+
+    if(_vulkan_ok)
         if(WINDOW_PLATFORM STREQUAL "WIN32" OR
            WINDOW_PLATFORM STREQUAL "X11" OR
            WINDOW_PLATFORM STREQUAL "WAYLAND" OR
            WINDOW_PLATFORM STREQUAL "MACOS" OR
            WINDOW_PLATFORM STREQUAL "ANDROID")
             list(APPEND WINDOW_SOURCES api/api_vulkan.cpp)
-            list(APPEND WINDOW_LIBS Vulkan::Vulkan)
+            if(_vulkan_target)
+                list(APPEND WINDOW_LIBS ${_vulkan_target})
+            endif()
             list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VULKAN)
             message(STATUS "Vulkan support enabled")
         endif()
-    else()
-        message(STATUS "Vulkan not found, Vulkan support disabled")
     endif()
 endif()
 
@@ -638,18 +775,17 @@ if(WINDOW_ENABLE_FONT)
     list(APPEND WINDOW_SOURCES gui/font/font.cpp)
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_FONT)
 
-    # FreeType backend (cross-platform)
-    if(WINDOW_ENABLE_FREETYPE)
-        find_package(Freetype QUIET)
-        if(FREETYPE_FOUND)
-            list(APPEND WINDOW_SOURCES gui/font/font_freetype.cpp)
+    # FreeType is fetched/located up-front (above) so HarfBuzz can link
+    # against it. Just hook it into the source list here.
+    if(FREETYPE_AVAILABLE)
+        list(APPEND WINDOW_SOURCES gui/font/font_freetype.cpp)
+        if(FREETYPE_FETCHED)
+            list(APPEND WINDOW_LIBS freetype)
+        else()
             list(APPEND WINDOW_LIBS ${FREETYPE_LIBRARIES})
             include_directories(${FREETYPE_INCLUDE_DIRS})
-            list(APPEND WINDOW_DEFINES FONT_SUPPORT_FREETYPE)
-            message(STATUS "Font backend: FreeType2")
-        else()
-            message(STATUS "FreeType2 not found - FreeType backend disabled")
         endif()
+        list(APPEND WINDOW_DEFINES FONT_SUPPORT_FREETYPE)
     endif()
 
     # Platform-specific native font implementation
@@ -666,17 +802,23 @@ if(WINDOW_ENABLE_FONT)
         list(APPEND WINDOW_LIBS "-framework CoreText" "-framework CoreGraphics")
         message(STATUS "Font backend: Core Text")
     elseif(WINDOW_PLATFORM STREQUAL "X11" OR WINDOW_PLATFORM STREQUAL "WAYLAND")
-        list(APPEND WINDOW_SOURCES gui/font/font_linux.cpp)
-        # Try to find fontconfig
+        # Try to find fontconfig — purely for richer font discovery. Without
+        # it, FreeType's built-in path-walk in find_system_font is used.
         find_package(PkgConfig QUIET)
+        set(_fc_found FALSE)
         if(PkgConfig_FOUND)
             pkg_check_modules(FONTCONFIG fontconfig)
             if(FONTCONFIG_FOUND)
+                list(APPEND WINDOW_SOURCES gui/font/font_linux.cpp)
                 list(APPEND WINDOW_LIBS ${FONTCONFIG_LIBRARIES})
                 include_directories(${FONTCONFIG_INCLUDE_DIRS})
                 list(APPEND WINDOW_DEFINES FONT_SUPPORT_FONTCONFIG)
-                message(STATUS "Font backend: Fontconfig + FreeType")
+                message(STATUS "Font discovery: Fontconfig + FreeType")
+                set(_fc_found TRUE)
             endif()
+        endif()
+        if(NOT _fc_found)
+            message(STATUS "Font discovery: FreeType built-in path search (libfontconfig-dev not installed)")
         endif()
     endif()
 
@@ -710,20 +852,224 @@ elseif(WINDOW_PLATFORM STREQUAL "UWP")
 elseif(WINDOW_PLATFORM STREQUAL "X11")
     find_package(X11 REQUIRED)
     list(APPEND WINDOW_LIBS ${X11_LIBRARIES})
-    # Xrandr for monitor enumeration
-    if(X11_Xrandr_FOUND)
+    # Xrandr for monitor enumeration — optional. Without it we fall back
+    # to single-monitor enumeration via DisplayWidth/Height.
+    if(X11_Xrandr_FOUND AND X11_Xrandr_INCLUDE_PATH)
         list(APPEND WINDOW_LIBS ${X11_Xrandr_LIB})
+        list(APPEND WINDOW_DEFINES WINDOW_HAS_XRANDR)
+        message(STATUS "Xrandr: enabled (multi-monitor support)")
     else()
-        find_library(XRANDR_LIB Xrandr)
-        if(XRANDR_LIB)
-            list(APPEND WINDOW_LIBS ${XRANDR_LIB})
-        endif()
+        message(STATUS "Xrandr: disabled (libxrandr-dev not installed; single-monitor fallback)")
     endif()
 elseif(WINDOW_PLATFORM STREQUAL "WAYLAND")
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(WAYLAND REQUIRED wayland-client wayland-egl)
-    list(APPEND WINDOW_LIBS ${WAYLAND_LIBRARIES})
-    include_directories(${WAYLAND_INCLUDE_DIRS})
+    # Try the system pkg-config first (fast path on a properly-set-up dev box).
+    # If not found, fetch everything we need: libexpat (for the scanner),
+    # wayland (for headers + scanner + libwayland sources),
+    # wayland-protocols (for xdg-shell.xml), and xkbcommon headers. Runtime
+    # libraries (libwayland-client.so.0, libwayland-egl.so.1, libxkbcommon.so.0)
+    # are taken from the system since we'd otherwise be vendoring an entire
+    # display protocol implementation.
+    find_package(PkgConfig QUIET)
+    set(_wl_system_ok FALSE)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(WAYLAND wayland-client wayland-egl xkbcommon)
+        if(WAYLAND_FOUND)
+            list(APPEND WINDOW_LIBS ${WAYLAND_LIBRARIES})
+            include_directories(${WAYLAND_INCLUDE_DIRS})
+            set(_wl_system_ok TRUE)
+            message(STATUS "Wayland: system packages")
+        endif()
+    endif()
+
+    if(NOT _wl_system_ok)
+        message(STATUS "Wayland dev packages not found - bootstrapping from sources")
+
+        # ----- libexpat (used by wayland-scanner to parse protocol XML) -----
+        find_library(WL_EXPAT_LIB NAMES expat libexpat.so.1)
+        if(NOT WL_EXPAT_LIB)
+            message(FATAL_ERROR "libexpat runtime not found — install libexpat1 or libexpat-dev")
+        endif()
+        message(STATUS "Wayland: expat runtime: ${WL_EXPAT_LIB}")
+
+        set(EXPAT_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+        set(EXPAT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(EXPAT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(EXPAT_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+        set(EXPAT_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        window_fetch_content(expat_src
+            GIT_REPOSITORY https://github.com/libexpat/libexpat.git
+            GIT_TAG R_2_6_2
+            SOURCE_SUBDIR expat
+        )
+        FetchContent_GetProperties(expat_src)
+        if(NOT expat_src_POPULATED)
+            FetchContent_Populate(expat_src)
+        endif()
+        # Just need expat headers for the scanner — link to system libexpat.so.1
+        set(WL_EXPAT_INCLUDE "${expat_src_SOURCE_DIR}/expat/lib")
+
+        # ----- wayland source tree (for src/scanner.c and protocol/wayland.xml) -----
+        window_fetch_content(wayland_src
+            GIT_REPOSITORY https://gitlab.freedesktop.org/wayland/wayland.git
+            GIT_TAG 1.23.0
+        )
+        FetchContent_GetProperties(wayland_src)
+        if(NOT wayland_src_POPULATED)
+            FetchContent_Populate(wayland_src)
+        endif()
+
+        # ----- wayland-protocols (xdg-shell.xml etc.) -----
+        window_fetch_content(wayland_protocols_src
+            GIT_REPOSITORY https://gitlab.freedesktop.org/wayland/wayland-protocols.git
+            GIT_TAG 1.36
+        )
+        FetchContent_GetProperties(wayland_protocols_src)
+        if(NOT wayland_protocols_src_POPULATED)
+            FetchContent_Populate(wayland_protocols_src)
+        endif()
+
+        # ----- Build wayland-scanner from its single C file -----
+        # wayland-version.h is normally generated by Meson at configure time;
+        # write it ourselves so the scanner compiles.
+        set(WL_VERSION_H_DIR "${CMAKE_BINARY_DIR}/wayland-bootstrap-include")
+        file(MAKE_DIRECTORY "${WL_VERSION_H_DIR}")
+        configure_file(
+            "${wayland_src_SOURCE_DIR}/src/wayland-version.h.in"
+            "${WL_VERSION_H_DIR}/wayland-version.h"
+            @ONLY
+        )
+        # Match the FetchContent tag.
+        set(WAYLAND_VERSION_MAJOR 1)
+        set(WAYLAND_VERSION_MINOR 23)
+        set(WAYLAND_VERSION_MICRO 0)
+        set(WAYLAND_VERSION "1.23.0")
+        configure_file(
+            "${wayland_src_SOURCE_DIR}/src/wayland-version.h.in"
+            "${WL_VERSION_H_DIR}/wayland-version.h"
+            @ONLY
+        )
+
+        set(WL_SCANNER_BIN "${CMAKE_BINARY_DIR}/wayland-scanner-bootstrap")
+        add_executable(wayland-scanner-bootstrap
+            ${wayland_src_SOURCE_DIR}/src/scanner.c
+            ${wayland_src_SOURCE_DIR}/src/wayland-util.c
+        )
+        target_include_directories(wayland-scanner-bootstrap PRIVATE
+            ${WL_EXPAT_INCLUDE}
+            ${wayland_src_SOURCE_DIR}/src
+            ${WL_VERSION_H_DIR}
+        )
+        target_link_libraries(wayland-scanner-bootstrap PRIVATE ${WL_EXPAT_LIB})
+        # scanner.c uses some POSIX features; suppress fcommon warnings on GCC
+        target_compile_definitions(wayland-scanner-bootstrap PRIVATE
+            _POSIX_C_SOURCE=200809L
+            HAVE_STRNDUP=1
+        )
+        set_target_properties(wayland-scanner-bootstrap PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        )
+
+        # Helper: run scanner to generate {client-header,private-code} for an XML protocol.
+        # Outputs go into ${WL_GEN_DIR} as <name>-client-protocol.h and <name>-protocol.c.
+        set(WL_GEN_DIR "${CMAKE_BINARY_DIR}/wayland-generated")
+        file(MAKE_DIRECTORY "${WL_GEN_DIR}")
+        function(window_wl_scan name xml_path out_header_var out_source_var)
+            set(_h "${WL_GEN_DIR}/${name}-client-protocol.h")
+            set(_c "${WL_GEN_DIR}/${name}-protocol.c")
+            add_custom_command(
+                OUTPUT "${_h}"
+                COMMAND wayland-scanner-bootstrap client-header "${xml_path}" "${_h}"
+                DEPENDS wayland-scanner-bootstrap "${xml_path}"
+                VERBATIM
+            )
+            add_custom_command(
+                OUTPUT "${_c}"
+                COMMAND wayland-scanner-bootstrap private-code "${xml_path}" "${_c}"
+                DEPENDS wayland-scanner-bootstrap "${xml_path}"
+                VERBATIM
+            )
+            set(${out_header_var} "${_h}" PARENT_SCOPE)
+            set(${out_source_var} "${_c}" PARENT_SCOPE)
+        endfunction()
+
+        # Generate the core wayland protocol — its .h is what `<wayland-client.h>`
+        # ultimately includes via wayland-client-protocol.h. The matching .c is
+        # already in libwayland-client.so (we link to the system runtime), so we
+        # only consume the header here.
+        window_wl_scan(wayland
+            "${wayland_src_SOURCE_DIR}/protocol/wayland.xml"
+            WL_CORE_HEADER WL_CORE_SOURCE)
+        window_wl_scan(xdg-shell
+            "${wayland_protocols_src_SOURCE_DIR}/stable/xdg-shell/xdg-shell.xml"
+            WL_XDG_HEADER WL_XDG_SOURCE)
+
+        # ----- xkbcommon headers (we vendor only the public subset) -----
+        # Fetch the xkbcommon repo just to get include/xkbcommon/*.h. Runtime
+        # links against system libxkbcommon.so.0.
+        window_fetch_content(xkbcommon_src
+            GIT_REPOSITORY https://github.com/xkbcommon/libxkbcommon.git
+            GIT_TAG xkbcommon-1.7.0
+        )
+        FetchContent_GetProperties(xkbcommon_src)
+        if(NOT xkbcommon_src_POPULATED)
+            FetchContent_Populate(xkbcommon_src)
+        endif()
+        find_library(WL_XKB_LIB NAMES xkbcommon libxkbcommon.so.0)
+        if(NOT WL_XKB_LIB)
+            message(FATAL_ERROR "libxkbcommon runtime not found")
+        endif()
+
+        # ----- EGL / Khronos registry headers (for api_opengl_egl.cpp) -----
+        window_fetch_content(egl_registry
+            GIT_REPOSITORY https://github.com/KhronosGroup/EGL-Registry.git
+            GIT_TAG main
+        )
+        FetchContent_GetProperties(egl_registry)
+        if(NOT egl_registry_POPULATED)
+            FetchContent_Populate(egl_registry)
+        endif()
+        window_fetch_content(opengl_registry
+            GIT_REPOSITORY https://github.com/KhronosGroup/OpenGL-Registry.git
+            GIT_TAG main
+        )
+        FetchContent_GetProperties(opengl_registry)
+        if(NOT opengl_registry_POPULATED)
+            FetchContent_Populate(opengl_registry)
+        endif()
+
+        # ----- Runtime libraries we link against -----
+        find_library(WL_CLIENT_LIB NAMES wayland-client libwayland-client.so.0)
+        find_library(WL_EGL_LIB NAMES wayland-egl libwayland-egl.so.1)
+        find_library(WL_EGL_RUNTIME_LIB NAMES EGL libEGL.so.1)
+        if(NOT WL_CLIENT_LIB OR NOT WL_EGL_LIB OR NOT WL_EGL_RUNTIME_LIB)
+            message(FATAL_ERROR
+                "Wayland runtime not complete: client=${WL_CLIENT_LIB}, "
+                "wayland-egl=${WL_EGL_LIB}, EGL=${WL_EGL_RUNTIME_LIB}")
+        endif()
+
+        # ----- Hook everything into the build -----
+        list(APPEND WINDOW_SOURCES
+            ${WL_CORE_HEADER}    # generated, ensures the header is built before window/
+            ${WL_XDG_HEADER}
+            ${WL_XDG_SOURCE})    # contains xdg_wm_base_interface etc. used by window_wayland.cpp
+
+        # Headers: scanner output, xkbcommon public, EGL/OpenGL registry,
+        # wayland source tree (for wayland-egl.h, wayland-client-core.h, etc.)
+        include_directories(
+            ${WL_GEN_DIR}
+            ${WL_VERSION_H_DIR}
+            ${xkbcommon_src_SOURCE_DIR}/include
+            ${egl_registry_SOURCE_DIR}/api
+            ${opengl_registry_SOURCE_DIR}/api
+            ${wayland_src_SOURCE_DIR}/src       # wayland-client-core.h, wayland-util.h
+            ${wayland_src_SOURCE_DIR}/egl       # wayland-egl-core.h
+        )
+
+        list(APPEND WINDOW_LIBS
+            ${WL_CLIENT_LIB} ${WL_EGL_LIB} ${WL_EGL_RUNTIME_LIB} ${WL_XKB_LIB})
+
+        message(STATUS "Wayland: bootstrapped (scanner+xdg-shell+xkbcommon headers fetched)")
+    endif()
 elseif(WINDOW_PLATFORM STREQUAL "MACOS")
     find_library(COCOA_FRAMEWORK Cocoa)
     find_library(IOKIT_FRAMEWORK IOKit)
@@ -877,7 +1223,7 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
     endif()
 
     # Vulkan example
-    if(Vulkan_FOUND AND "WINDOW_SUPPORT_VULKAN" IN_LIST WINDOW_DEFINES)
+    if("WINDOW_SUPPORT_VULKAN" IN_LIST WINDOW_DEFINES)
         add_executable(example_vulkan examples/vulkan.cpp)
         target_link_libraries(example_vulkan PRIVATE window)
     endif()
@@ -1034,7 +1380,11 @@ message(STATUS "")
 message(STATUS "Window Library Configuration:")
 message(STATUS "  Platform:    ${WINDOW_PLATFORM}")
 message(STATUS "  OpenGL:      ${WINDOW_ENABLE_OPENGL}")
-message(STATUS "  Vulkan:      ${Vulkan_FOUND}")
+if("WINDOW_SUPPORT_VULKAN" IN_LIST WINDOW_DEFINES)
+    message(STATUS "  Vulkan:      ON")
+else()
+    message(STATUS "  Vulkan:      OFF")
+endif()
 if(WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
     message(STATUS "  D3D11:       ${WINDOW_ENABLE_D3D11}")
     message(STATUS "  D3D12:       ${WINDOW_ENABLE_D3D12}")

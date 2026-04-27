@@ -37,169 +37,11 @@
 #define WINDOW_HAS_VULKAN 1
 #endif
 
-// XDG Shell protocol definitions
-extern "C" {
-    struct xdg_wm_base;
-    struct xdg_surface;
-    struct xdg_toplevel;
-
-    extern const struct wl_interface xdg_wm_base_interface;
-
-    #define XDG_WM_BASE_DESTROY 0
-    #define XDG_WM_BASE_CREATE_POSITIONER 1
-    #define XDG_WM_BASE_GET_XDG_SURFACE 2
-    #define XDG_WM_BASE_PONG 3
-
-    static inline void xdg_wm_base_pong(struct xdg_wm_base *xdg_wm_base, uint32_t serial) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_wm_base, XDG_WM_BASE_PONG, serial);
-    }
-
-    static inline void xdg_wm_base_destroy(struct xdg_wm_base *xdg_wm_base) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_wm_base, XDG_WM_BASE_DESTROY);
-        wl_proxy_destroy((struct wl_proxy *)xdg_wm_base);
-    }
-
-    extern const struct wl_interface xdg_surface_interface;
-
-    static inline struct xdg_surface* xdg_wm_base_get_xdg_surface(struct xdg_wm_base *xdg_wm_base, struct wl_surface *surface) {
-        struct wl_proxy *id;
-        id = wl_proxy_marshal_constructor((struct wl_proxy *)xdg_wm_base, XDG_WM_BASE_GET_XDG_SURFACE, &xdg_surface_interface, NULL, surface);
-        return (struct xdg_surface *)id;
-    }
-
-    #define XDG_SURFACE_DESTROY 0
-    #define XDG_SURFACE_GET_TOPLEVEL 1
-    #define XDG_SURFACE_ACK_CONFIGURE 4
-
-    extern const struct wl_interface xdg_toplevel_interface;
-
-    static inline struct xdg_toplevel* xdg_surface_get_toplevel(struct xdg_surface *xdg_surface) {
-        struct wl_proxy *id;
-        id = wl_proxy_marshal_constructor((struct wl_proxy *)xdg_surface, XDG_SURFACE_GET_TOPLEVEL, &xdg_toplevel_interface, NULL);
-        return (struct xdg_toplevel *)id;
-    }
-
-    static inline void xdg_surface_ack_configure(struct xdg_surface *xdg_surface, uint32_t serial) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_surface, XDG_SURFACE_ACK_CONFIGURE, serial);
-    }
-
-    static inline void xdg_surface_destroy(struct xdg_surface *xdg_surface) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_surface, XDG_SURFACE_DESTROY);
-        wl_proxy_destroy((struct wl_proxy *)xdg_surface);
-    }
-
-    #define XDG_TOPLEVEL_DESTROY 0
-    #define XDG_TOPLEVEL_SET_PARENT 1
-    #define XDG_TOPLEVEL_SET_TITLE 2
-    #define XDG_TOPLEVEL_SET_APP_ID 3
-    #define XDG_TOPLEVEL_SET_MIN_SIZE 7
-    #define XDG_TOPLEVEL_SET_MAX_SIZE 8
-    #define XDG_TOPLEVEL_SET_FULLSCREEN 10
-    #define XDG_TOPLEVEL_UNSET_FULLSCREEN 11
-
-    static inline void xdg_toplevel_set_title(struct xdg_toplevel *xdg_toplevel, const char *title) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_SET_TITLE, title);
-    }
-
-    static inline void xdg_toplevel_set_min_size(struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_SET_MIN_SIZE, width, height);
-    }
-
-    static inline void xdg_toplevel_set_max_size(struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_SET_MAX_SIZE, width, height);
-    }
-
-    static inline void xdg_toplevel_set_fullscreen(struct xdg_toplevel *xdg_toplevel, struct wl_output *output) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_SET_FULLSCREEN, output);
-    }
-
-    static inline void xdg_toplevel_unset_fullscreen(struct xdg_toplevel *xdg_toplevel) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_UNSET_FULLSCREEN);
-    }
-
-    static inline void xdg_toplevel_destroy(struct xdg_toplevel *xdg_toplevel) {
-        wl_proxy_marshal((struct wl_proxy *)xdg_toplevel, XDG_TOPLEVEL_DESTROY);
-        wl_proxy_destroy((struct wl_proxy *)xdg_toplevel);
-    }
-
-    struct xdg_wm_base_listener {
-        void (*ping)(void *data, struct xdg_wm_base *xdg_wm_base, uint32_t serial);
-    };
-
-    struct xdg_surface_listener {
-        void (*configure)(void *data, struct xdg_surface *xdg_surface, uint32_t serial);
-    };
-
-    struct xdg_toplevel_listener {
-        void (*configure)(void *data, struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height, struct wl_array *states);
-        void (*close)(void *data, struct xdg_toplevel *xdg_toplevel);
-    };
-
-    static inline int xdg_wm_base_add_listener(struct xdg_wm_base *xdg_wm_base, const struct xdg_wm_base_listener *listener, void *data) {
-        return wl_proxy_add_listener((struct wl_proxy *)xdg_wm_base, (void (**)(void))listener, data);
-    }
-
-    static inline int xdg_surface_add_listener(struct xdg_surface *xdg_surface, const struct xdg_surface_listener *listener, void *data) {
-        return wl_proxy_add_listener((struct wl_proxy *)xdg_surface, (void (**)(void))listener, data);
-    }
-
-    static inline int xdg_toplevel_add_listener(struct xdg_toplevel *xdg_toplevel, const struct xdg_toplevel_listener *listener, void *data) {
-        return wl_proxy_add_listener((struct wl_proxy *)xdg_toplevel, (void (**)(void))listener, data);
-    }
-
-    // wl_subcompositor interface (for subsurfaces)
-    #define WL_SUBCOMPOSITOR_DESTROY 0
-    #define WL_SUBCOMPOSITOR_GET_SUBSURFACE 1
-
-    static inline struct wl_subsurface* wl_subcompositor_get_subsurface(struct wl_subcompositor *subcompositor,
-                                                                         struct wl_surface *surface,
-                                                                         struct wl_surface *parent) {
-        struct wl_proxy *id;
-        id = wl_proxy_marshal_constructor((struct wl_proxy *)subcompositor,
-                                           WL_SUBCOMPOSITOR_GET_SUBSURFACE,
-                                           &wl_subsurface_interface, NULL, surface, parent);
-        return (struct wl_subsurface *)id;
-    }
-
-    // wl_subsurface interface
-    #define WL_SUBSURFACE_DESTROY 0
-    #define WL_SUBSURFACE_SET_POSITION 1
-    #define WL_SUBSURFACE_PLACE_ABOVE 2
-    #define WL_SUBSURFACE_PLACE_BELOW 3
-    #define WL_SUBSURFACE_SET_SYNC 4
-    #define WL_SUBSURFACE_SET_DESYNC 5
-
-    static inline void wl_subsurface_set_position(struct wl_subsurface *subsurface, int32_t x, int32_t y) {
-        wl_proxy_marshal((struct wl_proxy *)subsurface, WL_SUBSURFACE_SET_POSITION, x, y);
-    }
-
-    static inline void wl_subsurface_set_desync(struct wl_subsurface *subsurface) {
-        wl_proxy_marshal((struct wl_proxy *)subsurface, WL_SUBSURFACE_SET_DESYNC);
-    }
-
-    static inline void wl_subsurface_destroy(struct wl_subsurface *subsurface) {
-        wl_proxy_marshal((struct wl_proxy *)subsurface, WL_SUBSURFACE_DESTROY);
-        wl_proxy_destroy((struct wl_proxy *)subsurface);
-    }
-
-    // wl_output listener
-    struct wl_output_listener {
-        void (*geometry)(void *data, struct wl_output *output, int32_t x, int32_t y,
-                        int32_t physical_width, int32_t physical_height, int32_t subpixel,
-                        const char *make, const char *model, int32_t transform);
-        void (*mode)(void *data, struct wl_output *output, uint32_t flags,
-                    int32_t width, int32_t height, int32_t refresh);
-        void (*done)(void *data, struct wl_output *output);
-        void (*scale)(void *data, struct wl_output *output, int32_t factor);
-        void (*name)(void *data, struct wl_output *output, const char *name);
-        void (*description)(void *data, struct wl_output *output, const char *description);
-    };
-
-    static inline int wl_output_add_listener(struct wl_output *output,
-                                              const struct wl_output_listener *listener, void *data) {
-        return wl_proxy_add_listener((struct wl_proxy *)output, (void (**)(void))listener, data);
-    }
-}
+// XDG Shell protocol bindings: previously hand-rolled inside a vendored
+// extern "C" block; now provided by scanner-generated headers (xdg-shell.xml
+// → xdg-shell-client-protocol.h, wayland.xml → wayland-client-protocol.h).
+// `wayland-client.h` already pulls in the core protocol header.
+#include "xdg-shell-client-protocol.h"
 
 namespace window {
 
@@ -245,8 +87,12 @@ struct WaylandContext {
 
     // XKB keyboard state (shared across all windows)
     xkb_context* xkb_ctx = nullptr;
-    xkb_keymap* xkb_keymap = nullptr;
-    xkb_state* xkb_state = nullptr;
+    // Field names match the typedef they store; rename to avoid the
+    // -Wchanges-meaning warning (and the "declaration changes meaning"
+    // hard-error under newer GCC) when the surrounding code still refers
+    // to the typedef itself.
+    ::xkb_keymap* keymap = nullptr;
+    ::xkb_state* keymap_state = nullptr;
     KeyMod current_mods = KeyMod::None;
 
     // Reference count for cleanup
@@ -450,8 +296,10 @@ struct Window::Impl {
 // Wayland Context Callbacks (for root surface and global state)
 //=============================================================================
 
-// Forward declarations for seat listener
-static const wl_seat_listener ctx_seat_listener;
+// Forward declaration: defined later in the file. Modern GCC rejects an
+// uninitialised `static const` redeclaration, so use `extern` here and let
+// the actual definition below provide the storage.
+extern const wl_seat_listener ctx_seat_listener;
 
 static void output_geometry(void* data, wl_output* output, int32_t x, int32_t y,
                             int32_t physical_width, int32_t physical_height,
@@ -584,21 +432,21 @@ static void ctx_keyboard_keymap(void* data, wl_keyboard* keyboard,
         ctx->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     }
 
-    if (ctx->xkb_keymap) {
-        xkb_keymap_unref(ctx->xkb_keymap);
+    if (ctx->keymap) {
+        xkb_keymap_unref(ctx->keymap);
     }
-    ctx->xkb_keymap = xkb_keymap_new_from_string(ctx->xkb_ctx, map_shm,
+    ctx->keymap = xkb_keymap_new_from_string(ctx->xkb_ctx, map_shm,
                                                   XKB_KEYMAP_FORMAT_TEXT_V1,
                                                   XKB_KEYMAP_COMPILE_NO_FLAGS);
 
     munmap(map_shm, size);
     close(fd);
 
-    if (ctx->xkb_state) {
-        xkb_state_unref(ctx->xkb_state);
+    if (ctx->keymap_state) {
+        xkb_state_unref(ctx->keymap_state);
     }
-    if (ctx->xkb_keymap) {
-        ctx->xkb_state = xkb_state_new(ctx->xkb_keymap);
+    if (ctx->keymap) {
+        ctx->keymap_state = xkb_state_new(ctx->keymap);
     }
 }
 
@@ -611,15 +459,15 @@ static void ctx_keyboard_enter(void* data, wl_keyboard* keyboard,
     if (it != ctx->surface_to_window.end()) {
         Window* win = it->second;
         ctx->focused_window = win;
-        win->impl->focused = true;
+        internal_get_impl(win)->focused = true;
 
-        if (win->impl->callbacks.focus_callback) {
+        if (internal_get_impl(win)->callbacks.focus_callback) {
             WindowFocusEvent event;
             event.type = EventType::WindowFocus;
             event.window = win;
             event.timestamp = get_event_timestamp();
             event.focused = true;
-            win->impl->callbacks.focus_callback(event);
+            internal_get_impl(win)->callbacks.focus_callback(event);
         }
     }
 }
@@ -631,17 +479,17 @@ static void ctx_keyboard_leave(void* data, wl_keyboard* keyboard,
     auto it = ctx->surface_to_window.find(surface);
     if (it != ctx->surface_to_window.end()) {
         Window* win = it->second;
-        win->impl->focused = false;
-        win->impl->keyboard_device.reset();
-        win->impl->mouse_device.reset();
+        internal_get_impl(win)->focused = false;
+        internal_get_impl(win)->keyboard_device.reset();
+        internal_get_impl(win)->mouse_device.reset();
 
-        if (win->impl->callbacks.focus_callback) {
+        if (internal_get_impl(win)->callbacks.focus_callback) {
             WindowFocusEvent event;
             event.type = EventType::WindowBlur;
             event.window = win;
             event.timestamp = get_event_timestamp();
             event.focused = false;
-            win->impl->callbacks.focus_callback(event);
+            internal_get_impl(win)->callbacks.focus_callback(event);
         }
     }
     ctx->focused_window = nullptr;
@@ -657,17 +505,22 @@ static void ctx_keyboard_key(void* data, wl_keyboard* keyboard,
     Key key = translate_linux_keycode(keycode);
     bool pressed = (state == WL_KEYBOARD_KEY_STATE_PRESSED);
 
-    // Dispatch through keyboard device
+    // Dispatch through keyboard device. Wayland doesn't tell us whether a key
+    // is an OS-level repeat (the compositor leaves that to the client), so
+    // pass repeat=false; clients that want repeat synthesise it themselves.
+    double ts = get_event_timestamp();
     if (pressed) {
-        win->impl->keyboard_device.inject_key_down(key, keycode, ctx->current_mods, get_event_timestamp());
+        internal_get_impl(win)->keyboard_device.inject_key_down(
+            key, ctx->current_mods, static_cast<int>(keycode), false, ts);
     } else {
-        win->impl->keyboard_device.inject_key_up(key, keycode, ctx->current_mods, get_event_timestamp());
+        internal_get_impl(win)->keyboard_device.inject_key_up(
+            key, ctx->current_mods, static_cast<int>(keycode), ts);
     }
 
     // Character input
-    if (pressed && ctx->xkb_state) {
+    if (pressed && ctx->keymap_state) {
         char utf8[8];
-        int len = xkb_state_key_get_utf8(ctx->xkb_state, keycode + 8, utf8, sizeof(utf8));
+        int len = xkb_state_key_get_utf8(ctx->keymap_state, keycode + 8, utf8, sizeof(utf8));
         if (len > 0) {
             unsigned char* p = (unsigned char*)utf8;
             uint32_t codepoint = 0;
@@ -683,7 +536,7 @@ static void ctx_keyboard_key(void* data, wl_keyboard* keyboard,
             }
 
             if (codepoint >= 32 || codepoint == '\t' || codepoint == '\n' || codepoint == '\r') {
-                win->impl->keyboard_device.inject_char(codepoint, ctx->current_mods, get_event_timestamp());
+                internal_get_impl(win)->keyboard_device.inject_char(codepoint, ctx->current_mods, get_event_timestamp());
             }
         }
     }
@@ -695,8 +548,8 @@ static void ctx_keyboard_modifiers(void* data, wl_keyboard* keyboard,
                                    uint32_t group) {
     WaylandContext* ctx = static_cast<WaylandContext*>(data);
 
-    if (ctx->xkb_state) {
-        xkb_state_update_mask(ctx->xkb_state, mods_depressed, mods_latched, mods_locked, 0, 0, group);
+    if (ctx->keymap_state) {
+        xkb_state_update_mask(ctx->keymap_state, mods_depressed, mods_latched, mods_locked, 0, 0, group);
     }
 
     // Update current modifiers
@@ -738,9 +591,9 @@ static void ctx_pointer_enter(void* data, wl_pointer* pointer,
     if (it != ctx->surface_to_window.end()) {
         Window* win = it->second;
         ctx->pointer_window = win;
-        win->impl->mouse_in_window = true;
+        internal_get_impl(win)->mouse_in_window = true;
         // Coordinates are relative to the subsurface
-        win->impl->mouse_device.inject_move(wl_fixed_to_int(x), wl_fixed_to_int(y),
+        internal_get_impl(win)->mouse_device.inject_move(wl_fixed_to_int(x), wl_fixed_to_int(y),
                                              ctx->current_mods, get_event_timestamp());
     }
 }
@@ -752,7 +605,7 @@ static void ctx_pointer_leave(void* data, wl_pointer* pointer,
     auto it = ctx->surface_to_window.find(surface);
     if (it != ctx->surface_to_window.end()) {
         Window* win = it->second;
-        win->impl->mouse_in_window = false;
+        internal_get_impl(win)->mouse_in_window = false;
     }
     ctx->pointer_window = nullptr;
 }
@@ -766,7 +619,7 @@ static void ctx_pointer_motion(void* data, wl_pointer* pointer,
     int new_x = wl_fixed_to_int(x);
     int new_y = wl_fixed_to_int(y);
 
-    win->impl->mouse_device.inject_move(new_x, new_y, ctx->current_mods, get_event_timestamp());
+    internal_get_impl(win)->mouse_device.inject_move(new_x, new_y, ctx->current_mods, get_event_timestamp());
 }
 
 static void ctx_pointer_button(void* data, wl_pointer* pointer,
@@ -779,12 +632,12 @@ static void ctx_pointer_button(void* data, wl_pointer* pointer,
     MouseButton btn = translate_wayland_button(button);
     bool pressed = (state == WL_POINTER_BUTTON_STATE_PRESSED);
     int x, y;
-    win->impl->mouse_device.get_position(&x, &y);
+    internal_get_impl(win)->mouse_device.get_position(&x, &y);
 
     if (pressed) {
-        win->impl->mouse_device.inject_button_down(btn, x, y, 1, ctx->current_mods, get_event_timestamp());
+        internal_get_impl(win)->mouse_device.inject_button_down(btn, x, y, 1, ctx->current_mods, get_event_timestamp());
     } else {
-        win->impl->mouse_device.inject_button_up(btn, x, y, ctx->current_mods, get_event_timestamp());
+        internal_get_impl(win)->mouse_device.inject_button_up(btn, x, y, ctx->current_mods, get_event_timestamp());
     }
 }
 
@@ -802,8 +655,8 @@ static void ctx_pointer_axis(void* data, wl_pointer* pointer,
         dx = scroll_value;
     }
     int x, y;
-    win->impl->mouse_device.get_position(&x, &y);
-    win->impl->mouse_device.inject_wheel(dx, dy, x, y, ctx->current_mods, get_event_timestamp());
+    internal_get_impl(win)->mouse_device.get_position(&x, &y);
+    internal_get_impl(win)->mouse_device.inject_wheel(dx, dy, x, y, ctx->current_mods, get_event_timestamp());
 }
 
 static void ctx_pointer_frame(void* data, wl_pointer* pointer) {}
@@ -852,7 +705,8 @@ static void ctx_seat_capabilities(void* data, wl_seat* seat, uint32_t capabiliti
 
 static void ctx_seat_name(void* data, wl_seat* seat, const char* name) {}
 
-static const wl_seat_listener ctx_seat_listener = {
+// Definition matches the `extern` forward declaration earlier in the file.
+const wl_seat_listener ctx_seat_listener = {
     ctx_seat_capabilities,
     ctx_seat_name
 };
@@ -881,7 +735,7 @@ static void root_xdg_toplevel_close_handler(void* data, xdg_toplevel* toplevel) 
     // When root surface is closed, mark all windows for close
     WaylandContext* ctx = static_cast<WaylandContext*>(data);
     for (auto& pair : ctx->surface_to_window) {
-        pair.second->impl->should_close_flag = true;
+        internal_get_impl(pair.second)->should_close_flag = true;
     }
 }
 
@@ -994,8 +848,8 @@ static void wayland_context_unref() {
         if (g_wayland_ctx->root_xdg_surface) xdg_surface_destroy(g_wayland_ctx->root_xdg_surface);
         if (g_wayland_ctx->root_surface) wl_surface_destroy(g_wayland_ctx->root_surface);
 
-        if (g_wayland_ctx->xkb_state) xkb_state_unref(g_wayland_ctx->xkb_state);
-        if (g_wayland_ctx->xkb_keymap) xkb_keymap_unref(g_wayland_ctx->xkb_keymap);
+        if (g_wayland_ctx->keymap_state) xkb_state_unref(g_wayland_ctx->keymap_state);
+        if (g_wayland_ctx->keymap) xkb_keymap_unref(g_wayland_ctx->keymap);
         if (g_wayland_ctx->xkb_ctx) xkb_context_unref(g_wayland_ctx->xkb_ctx);
 
         if (g_wayland_ctx->keyboard) wl_keyboard_destroy(g_wayland_ctx->keyboard);
@@ -1041,43 +895,43 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 
     Window* window = new Window();
     window->impl = new Window::Impl();
-    window->impl->owner = window;
-    window->impl->width = win_cfg.width;
-    window->impl->height = win_cfg.height;
-    window->impl->title = win_cfg.title;
-    window->impl->name = win_cfg.name;
-    window->impl->style = win_cfg.style;
+    internal_get_impl(window)->owner = window;
+    internal_get_impl(window)->width = win_cfg.width;
+    internal_get_impl(window)->height = win_cfg.height;
+    internal_get_impl(window)->title = win_cfg.title;
+    internal_get_impl(window)->name = win_cfg.name;
+    internal_get_impl(window)->style = win_cfg.style;
 
     // Calculate position (use config or default to center)
     if (win_cfg.x >= 0) {
-        window->impl->x = win_cfg.x;
+        internal_get_impl(window)->x = win_cfg.x;
     } else {
         // Center on primary output
         if (!ctx->outputs.empty()) {
-            window->impl->x = ctx->outputs[0].x + (ctx->outputs[0].width - win_cfg.width) / 2;
+            internal_get_impl(window)->x = ctx->outputs[0].x + (ctx->outputs[0].width - win_cfg.width) / 2;
         } else {
-            window->impl->x = 100;
+            internal_get_impl(window)->x = 100;
         }
     }
     if (win_cfg.y >= 0) {
-        window->impl->y = win_cfg.y;
+        internal_get_impl(window)->y = win_cfg.y;
     } else {
         if (!ctx->outputs.empty()) {
-            window->impl->y = ctx->outputs[0].y + (ctx->outputs[0].height - win_cfg.height) / 2;
+            internal_get_impl(window)->y = ctx->outputs[0].y + (ctx->outputs[0].height - win_cfg.height) / 2;
         } else {
-            window->impl->y = 100;
+            internal_get_impl(window)->y = 100;
         }
     }
 
     // Initialize input systems
-    window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
-    window->impl->mouse_device.set_window(window);
-    window->impl->keyboard_device.set_dispatcher(&window->impl->keyboard_dispatcher);
-    window->impl->keyboard_device.set_window(window);
+    internal_get_impl(window)->mouse_device.set_dispatcher(&internal_get_impl(window)->mouse_dispatcher);
+    internal_get_impl(window)->mouse_device.set_window(window);
+    internal_get_impl(window)->keyboard_device.set_dispatcher(&internal_get_impl(window)->keyboard_dispatcher);
+    internal_get_impl(window)->keyboard_device.set_window(window);
 
     // Create subsurface
-    window->impl->surface = wl_compositor_create_surface(ctx->compositor);
-    if (!window->impl->surface) {
+    internal_get_impl(window)->surface = wl_compositor_create_surface(ctx->compositor);
+    if (!internal_get_impl(window)->surface) {
         delete window->impl;
         delete window;
         wayland_context_unref();
@@ -1085,10 +939,10 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         return nullptr;
     }
 
-    window->impl->subsurface = wl_subcompositor_get_subsurface(
-        ctx->subcompositor, window->impl->surface, ctx->root_surface);
-    if (!window->impl->subsurface) {
-        wl_surface_destroy(window->impl->surface);
+    internal_get_impl(window)->subsurface = wl_subcompositor_get_subsurface(
+        ctx->subcompositor, internal_get_impl(window)->surface, ctx->root_surface);
+    if (!internal_get_impl(window)->subsurface) {
+        wl_surface_destroy(internal_get_impl(window)->surface);
         delete window->impl;
         delete window;
         wayland_context_unref();
@@ -1097,11 +951,11 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     }
 
     // Position the subsurface within root surface
-    wl_subsurface_set_position(window->impl->subsurface, window->impl->x, window->impl->y);
-    wl_subsurface_set_desync(window->impl->subsurface);  // Independent updates
+    wl_subsurface_set_position(internal_get_impl(window)->subsurface, internal_get_impl(window)->x, internal_get_impl(window)->y);
+    wl_subsurface_set_desync(internal_get_impl(window)->subsurface);  // Independent updates
 
     // Register surface for input routing
-    ctx->surface_to_window[window->impl->surface] = window;
+    ctx->surface_to_window[internal_get_impl(window)->surface] = window;
 
     // Create or share graphics context
     Graphics* gfx = nullptr;
@@ -1109,11 +963,11 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     if (config.shared_graphics) {
         // Use shared graphics context
         gfx = config.shared_graphics;
-        window->impl->owns_graphics = false;
+        internal_get_impl(window)->owns_graphics = false;
     } else if (ctx->shared_graphics) {
         // Use context's shared graphics
         gfx = ctx->shared_graphics;
-        window->impl->owns_graphics = false;
+        internal_get_impl(window)->owns_graphics = false;
     } else {
         // Create new graphics context
         Backend requested = config.backend;
@@ -1124,13 +978,13 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         switch (requested) {
 #ifdef WINDOW_HAS_OPENGL
             case Backend::OpenGL:
-                gfx = create_opengl_graphics_wayland(ctx->display, window->impl->surface,
+                gfx = create_opengl_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
                                                       win_cfg.width, win_cfg.height, config);
                 break;
 #endif
 #ifdef WINDOW_HAS_VULKAN
             case Backend::Vulkan:
-                gfx = create_vulkan_graphics_wayland(ctx->display, window->impl->surface,
+                gfx = create_vulkan_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
                                                       win_cfg.width, win_cfg.height, config);
                 break;
 #endif
@@ -1144,13 +998,13 @@ Window* create_window_impl(const Config& config, Result* out_result) {
             switch (fallback) {
 #ifdef WINDOW_HAS_OPENGL
                 case Backend::OpenGL:
-                    gfx = create_opengl_graphics_wayland(ctx->display, window->impl->surface,
+                    gfx = create_opengl_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
                                                           win_cfg.width, win_cfg.height, config);
                     break;
 #endif
 #ifdef WINDOW_HAS_VULKAN
                 case Backend::Vulkan:
-                    gfx = create_vulkan_graphics_wayland(ctx->display, window->impl->surface,
+                    gfx = create_vulkan_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
                                                           win_cfg.width, win_cfg.height, config);
                     break;
 #endif
@@ -1160,15 +1014,15 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         }
 
         if (gfx) {
-            window->impl->owns_graphics = true;
+            internal_get_impl(window)->owns_graphics = true;
             ctx->shared_graphics = gfx;  // Share for future windows
         }
     }
 
     if (!gfx) {
-        ctx->surface_to_window.erase(window->impl->surface);
-        wl_subsurface_destroy(window->impl->subsurface);
-        wl_surface_destroy(window->impl->surface);
+        ctx->surface_to_window.erase(internal_get_impl(window)->surface);
+        wl_subsurface_destroy(internal_get_impl(window)->subsurface);
+        wl_surface_destroy(internal_get_impl(window)->surface);
         delete window->impl;
         delete window;
         wayland_context_unref();
@@ -1176,11 +1030,11 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         return nullptr;
     }
 
-    window->impl->gfx = gfx;
-    window->impl->visible = win_cfg.visible;
+    internal_get_impl(window)->gfx = gfx;
+    internal_get_impl(window)->visible = win_cfg.visible;
 
     // Commit the surface
-    wl_surface_commit(window->impl->surface);
+    wl_surface_commit(internal_get_impl(window)->surface);
     wl_surface_commit(ctx->root_surface);
     wl_display_flush(ctx->display);
 

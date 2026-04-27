@@ -14,6 +14,16 @@
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
+
+// X11 defines `None` and `Success` as macros that collide with enum members
+// in window.hpp (MessageBoxIcon::None, Result::Success, ...).
+#ifdef None
+#undef None
+#endif
+#ifdef Success
+#undef Success
+#endif
+
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
@@ -358,6 +368,10 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
     window->impl->mouse_device.set_window(window);
 
+    // Initialize keyboard input system
+    window->impl->keyboard_device.set_dispatcher(&window->impl->keyboard_dispatcher);
+    window->impl->keyboard_device.set_window(window);
+
     // Initialize XIM for text input
     window->impl->xim = XOpenIM(display, nullptr, nullptr, nullptr);
     if (window->impl->xim) {
@@ -369,25 +383,21 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     }
 
     // Set window title
-    XStoreName(display, xwindow, win_cfg.title);
+    XStoreName(display, xwindow, win_cfg.title.c_str());
 
     // Set _NET_WM_NAME for UTF-8 support
     Atom net_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
     Atom utf8_string = XInternAtom(display, "UTF8_STRING", False);
     XChangeProperty(display, xwindow, net_wm_name, utf8_string, 8, PropModeReplace,
-                    (unsigned char*)win_cfg.title, strlen(win_cfg.title));
+                    reinterpret_cast<const unsigned char*>(win_cfg.title.c_str()),
+                    static_cast<int>(win_cfg.title.size()));
 
     // Handle window close
     window->impl->wm_protocols = XInternAtom(display, "WM_PROTOCOLS", False);
     window->impl->wm_delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(display, xwindow, &window->impl->wm_delete_window, 1);
 
-    // Combine config.style with legacy config.resizable flag
     WindowStyle effective_style = win_cfg.style;
-    if (!win_cfg.resizable) {
-        effective_style = effective_style & ~WindowStyle::Resizable;
-    }
-
     window->impl->style = effective_style;
 
     // Set resizable hints
@@ -789,8 +799,8 @@ void Window::poll_events() {
 
             case FocusOut:
                 impl->focused = false;
-                // Reset key states on focus loss
-                memset(impl->key_states, 0, sizeof(impl->key_states));
+                // Reset input state on focus loss to avoid stuck keys
+                impl->keyboard_device.reset();
                 impl->mouse_device.reset();
                 if (impl->callbacks.focus_callback) {
                     WindowFocusEvent focus_event;
@@ -815,27 +825,15 @@ void Window::poll_events() {
                 }
 
                 Key key = translate_keysym(keysym);
-                if (key != Key::Unknown && static_cast<int>(key) < 512) {
-                    impl->key_states[static_cast<int>(key)] = true;
-                }
+                KeyMod mods = get_x11_modifiers(event.xkey.state);
+                double ts = get_event_timestamp();
 
-                if (impl->callbacks.key_callback) {
-                    KeyEvent key_event;
-                    key_event.type = EventType::KeyDown;
-                    key_event.window = impl->owner;
-                    key_event.timestamp = get_event_timestamp();
-                    key_event.key = key;
-                    key_event.modifiers = get_x11_modifiers(event.xkey.state);
-                    key_event.scancode = event.xkey.keycode;
-                    key_event.repeat = false;
-                    impl->callbacks.key_callback(key_event, impl->callbacks.key_user_data);
-                }
+                impl->keyboard_device.inject_key_down(key, mods, event.xkey.keycode, false, ts);
 
-                // Character input
-                if (len > 0 && impl->callbacks.char_callback) {
+                // Character input — decode UTF-8 to codepoint
+                if (len > 0) {
                     text[len] = '\0';
-                    // Decode UTF-8 to get codepoint
-                    unsigned char* p = (unsigned char*)text;
+                    unsigned char* p = reinterpret_cast<unsigned char*>(text);
                     uint32_t codepoint = 0;
                     if (p[0] < 0x80) {
                         codepoint = p[0];
@@ -849,64 +847,35 @@ void Window::poll_events() {
                     }
 
                     if (codepoint >= 32 || codepoint == '\t' || codepoint == '\n' || codepoint == '\r') {
-                        CharEvent char_event;
-                        char_event.type = EventType::CharInput;
-                        char_event.window = impl->owner;
-                        char_event.timestamp = get_event_timestamp();
-                        char_event.codepoint = codepoint;
-                        char_event.modifiers = get_x11_modifiers(event.xkey.state);
-                        impl->callbacks.char_callback(char_event, impl->callbacks.char_user_data);
+                        impl->keyboard_device.inject_char(codepoint, mods, ts);
                     }
                 }
                 break;
             }
 
             case KeyRelease: {
-                // Check for key repeat (X11 generates KeyRelease+KeyPress for repeats)
+                // X11 generates KeyRelease+KeyPress pairs for auto-repeat — collapse them
+                // into a single KeyRepeat event.
                 if (XPending(impl->display)) {
                     XEvent next;
                     XPeekEvent(impl->display, &next);
                     if (next.type == KeyPress && next.xkey.time == event.xkey.time &&
                         next.xkey.keycode == event.xkey.keycode) {
-                        // This is a repeat, skip the release
-                        XNextEvent(impl->display, &next);  // Consume the KeyPress
+                        XNextEvent(impl->display, &next);  // Consume the paired KeyPress
 
                         KeySym keysym = XkbKeycodeToKeysym(impl->display, event.xkey.keycode, 0, 0);
                         Key key = translate_keysym(keysym);
-
-                        if (impl->callbacks.key_callback) {
-                            KeyEvent key_event;
-                            key_event.type = EventType::KeyRepeat;
-                            key_event.window = impl->owner;
-                            key_event.timestamp = get_event_timestamp();
-                            key_event.key = key;
-                            key_event.modifiers = get_x11_modifiers(event.xkey.state);
-                            key_event.scancode = event.xkey.keycode;
-                            key_event.repeat = true;
-                            impl->callbacks.key_callback(key_event, impl->callbacks.key_user_data);
-                        }
+                        KeyMod mods = get_x11_modifiers(event.xkey.state);
+                        // inject_key_down with repeat=true produces a KeyRepeat event
+                        impl->keyboard_device.inject_key_down(key, mods, event.xkey.keycode, true, get_event_timestamp());
                         break;
                     }
                 }
 
                 KeySym keysym = XkbKeycodeToKeysym(impl->display, event.xkey.keycode, 0, 0);
                 Key key = translate_keysym(keysym);
-
-                if (key != Key::Unknown && static_cast<int>(key) < 512) {
-                    impl->key_states[static_cast<int>(key)] = false;
-                }
-
-                if (impl->callbacks.key_callback) {
-                    KeyEvent key_event;
-                    key_event.type = EventType::KeyUp;
-                    key_event.window = impl->owner;
-                    key_event.timestamp = get_event_timestamp();
-                    key_event.key = key;
-                    key_event.modifiers = get_x11_modifiers(event.xkey.state);
-                    key_event.scancode = event.xkey.keycode;
-                    key_event.repeat = false;
-                    impl->callbacks.key_callback(key_event, impl->callbacks.key_user_data);
-                }
+                KeyMod mods = get_x11_modifiers(event.xkey.state);
+                impl->keyboard_device.inject_key_up(key, mods, event.xkey.keycode, get_event_timestamp());
                 break;
             }
 

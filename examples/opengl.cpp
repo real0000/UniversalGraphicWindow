@@ -18,6 +18,14 @@
 #else
     #include <GL/gl.h>
     #include <GL/glx.h>
+    // X11 (pulled in by glx.h) defines `None` and `Success` macros that
+    // collide with window:: enum members.
+    #ifdef None
+    #undef None
+    #endif
+    #ifdef Success
+    #undef Success
+    #endif
 #endif
 
 int main() {

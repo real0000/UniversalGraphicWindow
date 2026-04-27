@@ -16,7 +16,9 @@
 
 #ifdef WINDOW_PLATFORM_X11
 #include <X11/Xlib.h>
+#ifdef WINDOW_HAS_XRANDR
 #include <X11/extensions/Xrandr.h>
+#endif
 #endif
 
 namespace window {
@@ -108,16 +110,18 @@ int enumerate_devices(Backend backend, DeviceEnumeration* out_devices) {
         }
 
         // Set vendor name
-        strncpy(device.vendor, vendor_id_to_name(device.vendor_id), MAX_DEVICE_NAME_LENGTH - 1);
+        device.vendor = vendor_id_to_name(device.vendor_id);
 
         // Try to get device name from various sources
         bool got_name = false;
+        char name_buf[256];
 
         // Try debugfs first (requires root)
         char debugfs_path[512];
         snprintf(debugfs_path, sizeof(debugfs_path), "/sys/kernel/debug/dri/%s/name",
                  entry->d_name + 4); // Skip "card" prefix
-        if (read_sysfs_string(debugfs_path, device.name, MAX_DEVICE_NAME_LENGTH)) {
+        if (read_sysfs_string(debugfs_path, name_buf, sizeof(name_buf))) {
+            device.name = name_buf;
             got_name = true;
         }
 
@@ -130,12 +134,14 @@ int enumerate_devices(Backend backend, DeviceEnumeration* out_devices) {
                 char line[256];
                 while (fgets(line, sizeof(line), f)) {
                     if (strncmp(line, "PCI_SLOT_NAME=", 14) == 0) {
-                        // Use PCI slot as name fallback
-                        snprintf(device.name, MAX_DEVICE_NAME_LENGTH, "%s GPU (%s)",
-                                 device.vendor, line + 14);
-                        // Remove newline
-                        char* nl = strchr(device.name, '\n');
-                        if (nl) *nl = '\0';
+                        char slot[128];
+                        snprintf(slot, sizeof(slot), "%s", line + 14);
+                        // Trim trailing newline
+                        size_t slen = strlen(slot);
+                        if (slen > 0 && slot[slen - 1] == '\n') slot[slen - 1] = '\0';
+                        snprintf(name_buf, sizeof(name_buf), "%s GPU (%s)",
+                                 device.vendor.c_str(), slot);
+                        device.name = name_buf;
                         got_name = true;
                         break;
                     }
@@ -146,8 +152,9 @@ int enumerate_devices(Backend backend, DeviceEnumeration* out_devices) {
 
         // Fallback name
         if (!got_name) {
-            snprintf(device.name, MAX_DEVICE_NAME_LENGTH, "%s Graphics (%s)",
-                     device.vendor, entry->d_name);
+            snprintf(name_buf, sizeof(name_buf), "%s Graphics (%s)",
+                     device.vendor.c_str(), entry->d_name);
+            device.name = name_buf;
         }
 
         // Try to get memory info (may not be available)
@@ -194,6 +201,7 @@ int enumerate_monitors(MonitorEnumeration* out_monitors) {
     if (!display) return 0;
 
     int screen = DefaultScreen(display);
+#ifdef WINDOW_HAS_XRANDR
     Window root = RootWindow(display, screen);
 
     // Check if XRandR is available
@@ -201,7 +209,7 @@ int enumerate_monitors(MonitorEnumeration* out_monitors) {
     if (!XRRQueryExtension(display, &event_base, &error_base)) {
         // Fallback: use default screen info
         MonitorInfo& monitor = out_monitors->monitors[0];
-        strncpy(monitor.name, "Default", MAX_DEVICE_NAME_LENGTH - 1);
+        monitor.name = "Default";
         monitor.x = 0;
         monitor.y = 0;
         monitor.width = DisplayWidth(display, screen);
@@ -253,7 +261,7 @@ int enumerate_monitors(MonitorEnumeration* out_monitors) {
         MonitorInfo& monitor = out_monitors->monitors[out_monitors->monitor_count];
 
         // Copy name
-        strncpy(monitor.name, output->name, MAX_DEVICE_NAME_LENGTH - 1);
+        monitor.name = output->name ? output->name : "";
 
         // Position and size from CRTC
         monitor.x = crtc->x;
@@ -330,6 +338,27 @@ int enumerate_monitors(MonitorEnumeration* out_monitors) {
     XCloseDisplay(display);
 
     return out_monitors->monitor_count;
+#else
+    // Xrandr unavailable: report a single default monitor matching the screen
+    MonitorInfo& monitor = out_monitors->monitors[0];
+    monitor.name = "Default";
+    monitor.x = 0;
+    monitor.y = 0;
+    monitor.width = DisplayWidth(display, screen);
+    monitor.height = DisplayHeight(display, screen);
+    monitor.refresh_rate = 60;
+    monitor.is_primary = true;
+    monitor.monitor_index = 0;
+    monitor.mode_count = 1;
+    monitor.modes[0].width = monitor.width;
+    monitor.modes[0].height = monitor.height;
+    monitor.modes[0].refresh_rate = 60;
+    monitor.modes[0].bits_per_pixel = DefaultDepth(display, screen);
+    monitor.modes[0].is_native = true;
+    out_monitors->monitor_count = 1;
+    XCloseDisplay(display);
+    return 1;
+#endif
 }
 
 #endif // WINDOW_PLATFORM_X11
@@ -347,7 +376,7 @@ int enumerate_monitors(MonitorEnumeration* out_monitors) {
 
     // Try to get info from environment or return default
     MonitorInfo& monitor = out_monitors->monitors[0];
-    strncpy(monitor.name, "Wayland Display", MAX_DEVICE_NAME_LENGTH - 1);
+    monitor.name = "Wayland Display";
     monitor.x = 0;
     monitor.y = 0;
 

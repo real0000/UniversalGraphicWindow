@@ -563,10 +563,12 @@ TEST(render_info) {
     IGuiButton* btn = ctx->create_button();
     btn->set_bounds(window::math::make_box(0, 0, 100, 30));
 
-    WidgetRenderInfo info;
-    btn->get_render_info(nullptr, &info);
-    ASSERT(!info.textures.empty());
-    ASSERT_EQ(info.textures[0].source_type, TextureSourceType::Generated);
+    const WidgetRenderInfo& info = btn->get_render_info(nullptr);
+    // A default button (no icon image) emits color rects for its background
+    // and outline; texture quads are reserved for content like icons or
+    // 9-slice skins.
+    ASSERT(!info.colors.empty());
+    ASSERT(!info.get_draw_order().empty());
 
     destroy_gui_context(ctx);
 }

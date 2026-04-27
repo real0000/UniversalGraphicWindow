@@ -10,7 +10,6 @@
 #include <EGL/egl.h>
 #include <string>
 #include <cstdint>
-#include "opengl_caps.inl"
 
 #ifdef __ANDROID__
 #include <android/native_window.h>
@@ -22,8 +21,20 @@
 #include "glad_es.h"
 #else
 #include <wayland-egl.h>
+// Pull in core GL types + GL 3.0+ prototypes (used by opengl_caps.inl).
+// Must come before the .inl include. glad.h is incompatible with system
+// GL headers in the same TU, so use <GL/gl.h> + <GL/glext.h> instead.
+#define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
-#include "glad.h"
+#include <GL/glext.h>
+#endif
+
+#include "opengl_caps.inl"
+
+// Forward-declared for the desktop-GL branch — glad.c is linked in but glad.h
+// can't be included (it conflicts with <GL/gl.h> already pulled in above).
+#if !defined(__ANDROID__) && !defined(WINDOW_PLATFORM_UWP)
+extern "C" int gladLoadGL(void);
 #endif
 
 namespace window {
@@ -115,13 +126,24 @@ public:
 //=============================================================================
 
 static EGLConfig choose_egl_config(EGLDisplay display, const Config& config, bool opengl_es) {
+    // Derive per-channel bit depths from Config::color_bits (the API no longer
+    // exposes red/green/blue/alpha_bits separately).
+    int red_bits = 8, green_bits = 8, blue_bits = 8, alpha_bits = 8;
+    if (config.color_bits == 24) {
+        alpha_bits = 0;
+    } else if (config.color_bits == 16) {
+        red_bits = 5; green_bits = 6; blue_bits = 5; alpha_bits = 0;
+    } else if (config.color_bits == 64) {
+        red_bits = green_bits = blue_bits = alpha_bits = 16;
+    }
+
     EGLint attribs[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, opengl_es ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_BIT,
-        EGL_RED_SIZE, config.red_bits,
-        EGL_GREEN_SIZE, config.green_bits,
-        EGL_BLUE_SIZE, config.blue_bits,
-        EGL_ALPHA_SIZE, config.alpha_bits,
+        EGL_RED_SIZE, red_bits,
+        EGL_GREEN_SIZE, green_bits,
+        EGL_BLUE_SIZE, blue_bits,
+        EGL_ALPHA_SIZE, alpha_bits,
         EGL_DEPTH_SIZE, config.depth_bits,
         EGL_STENCIL_SIZE, config.stencil_bits,
         EGL_SAMPLES, config.samples > 1 ? config.samples : 0,

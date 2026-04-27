@@ -6,13 +6,22 @@
 
 #if defined(WINDOW_PLATFORM_X11) && !defined(WINDOW_NO_OPENGL)
 
+// Must come before any GL header so glext.h emits prototypes for GL 3.0+
+// functions we use in opengl_caps.inl (glGetStringi, glGetIntegeri_v).
+#define GL_GLEXT_PROTOTYPES 1
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <GL/glx.h>
 #include <GL/gl.h>
+#include <GL/glext.h>
 #include <cstring>
 #include <string>
 #include "opengl_caps.inl"
+
+// Forward-declared because including glad.h directly conflicts with the
+// <GL/gl.h> / <GL/glx.h> headers already pulled in above. glad.c provides
+// the definition (linked into the window static library).
+extern "C" int gladLoadGL(void);
 
 typedef GLXContext (*PFNGLXCREATECONTEXTATTRIBSARBPROC)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
 
@@ -84,15 +93,26 @@ bool select_glx_fbconfig(void* display_ptr, int screen, const Config& config,
                          void** out_fbconfig, void** out_visual, int* out_depth) {
     Display* display = static_cast<Display*>(display_ptr);
 
+    // Derive per-channel bit depths from Config::color_bits.
+    // 32 -> 8/8/8/8, 24 -> 8/8/8/0, 16 -> 5/6/5/0, 64 -> 16/16/16/16 (HDR).
+    int red_bits = 8, green_bits = 8, blue_bits = 8, alpha_bits = 8;
+    if (config.color_bits == 24) {
+        alpha_bits = 0;
+    } else if (config.color_bits == 16) {
+        red_bits = 5; green_bits = 6; blue_bits = 5; alpha_bits = 0;
+    } else if (config.color_bits == 64) {
+        red_bits = green_bits = blue_bits = alpha_bits = 16;
+    }
+
     int glx_attribs[] = {
         GLX_X_RENDERABLE, True,
         GLX_DRAWABLE_TYPE, GLX_WINDOW_BIT,
         GLX_RENDER_TYPE, GLX_RGBA_BIT,
         GLX_X_VISUAL_TYPE, GLX_TRUE_COLOR,
-        GLX_RED_SIZE, config.red_bits,
-        GLX_GREEN_SIZE, config.green_bits,
-        GLX_BLUE_SIZE, config.blue_bits,
-        GLX_ALPHA_SIZE, config.alpha_bits,
+        GLX_RED_SIZE, red_bits,
+        GLX_GREEN_SIZE, green_bits,
+        GLX_BLUE_SIZE, blue_bits,
+        GLX_ALPHA_SIZE, alpha_bits,
         GLX_DEPTH_SIZE, config.depth_bits,
         GLX_STENCIL_SIZE, config.stencil_bits,
         GLX_DOUBLEBUFFER, True,
@@ -174,6 +194,14 @@ Graphics* create_opengl_graphics_x11(void* display_ptr, unsigned long window,
     }
 
     glXMakeCurrent(display, window, glx_context);
+
+    // Load GLAD function pointers so examples and tools that include api/glad.h
+    // can call core GL 3.3+ functions through glad_glXXX symbols.
+    if (!gladLoadGL()) {
+        glXMakeCurrent(display, None, nullptr);
+        glXDestroyContext(display, glx_context);
+        return nullptr;
+    }
 
     // Enable vsync if available
     typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display*, GLXDrawable, int);

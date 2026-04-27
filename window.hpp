@@ -683,7 +683,14 @@ private:
 
     // Friend function for internal window creation (implemented per-platform)
     friend Window* create_window_impl(const Config& config, Result* out_result);
+
+    // Platform-internal accessor — used by Wayland event callbacks (and any
+    // other free function in a platform .cpp) to reach the impl. Not part of
+    // the public API; do not call from application code.
+    friend Impl* internal_get_impl(Window* w);
 };
+
+inline Window::Impl* internal_get_impl(Window* w) { return w ? w->impl : nullptr; }
 
 //-----------------------------------------------------------------------------
 // Utility Functions

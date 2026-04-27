@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <string>
 #include <vector>
 #include <unordered_map>
 
@@ -1423,7 +1424,7 @@ IFontFallbackChain* create_fallback_chain_with_defaults(IFontLibrary* library,
     for (int i = 0; g_fallback_families[i] != nullptr; ++i) {
         const char* family = g_fallback_families[i];
 
-        // Skip if already loaded
+        // Skip if the requested family was already loaded
         bool skip = false;
         for (auto& l : loaded) {
             if (l == family) { skip = true; break; }
@@ -1433,9 +1434,28 @@ IFontFallbackChain* create_fallback_chain_with_defaults(IFontLibrary* library,
         FontDescriptor desc = FontDescriptor::create(family, size);
         Result r;
         IFontFace* face = library->load_system_font(desc, &r);
-        if (face) {
-            chain->add_fallback(face);
-            loaded.push_back(family);
+        if (!face) continue;
+
+        // Also dedup by *actual* family name returned by the loaded face — on
+        // Linux several requested families (Noto Sans CJK SC/TC/JP/KR) often
+        // resolve to the same physical font (face 0 of NotoSansCJK-Regular.ttc).
+        // Without this check we'd load the same face 4× and burn atlas slots.
+        const char* loaded_name = face->get_family_name();
+        bool dup = false;
+        if (loaded_name && loaded_name[0]) {
+            for (auto& l : loaded) {
+                if (l == loaded_name) { dup = true; break; }
+            }
+        }
+        if (dup) {
+            library->destroy_font(face);
+            continue;
+        }
+
+        chain->add_fallback(face);
+        loaded.push_back(family);
+        if (loaded_name && loaded_name[0] && std::string(loaded_name) != family) {
+            loaded.push_back(loaded_name);
         }
     }
 
