@@ -269,7 +269,8 @@ private:
 static QuadRenderer*     g_renderer    = nullptr;
 static font::IFontAtlas* g_font_atlas  = nullptr;
 static float g_time = 0;
-static int   g_window_h = 720;
+static int   g_window_h = 720;        // logical px
+static float g_dpi_scale = 1.0f;       // physical / logical
 
 // ============================================================================
 // Text rendering (same pattern as gui.cpp)
@@ -331,9 +332,11 @@ static void draw_render_info(const gui::WidgetRenderInfo& ri) {
     for (const auto& ref : ri.get_draw_order()) {
         if (ref.clip_changed) {
             if (!box_is_empty(ref.clip)) {
+                // Logical → physical for glScissor.
+                float s = g_dpi_scale;
                 float bx=x(box_min(ref.clip)), by=y(box_min(ref.clip));
                 float bw=box_width(ref.clip), bh=box_height(ref.clip);
-                g_renderer->set_scissor_state(true, (int)bx, g_window_h-(int)(by+bh), (int)bw, (int)bh);
+                g_renderer->set_scissor_state(true, (int)(bx*s), (int)((g_window_h-(by+bh))*s), (int)(bw*s), (int)(bh*s));
                 scissor_on = true;
             } else {
                 g_renderer->set_scissor_state(false);
@@ -667,9 +670,14 @@ int main() {
     if (!ctx) { printf("Failed to create GUI context\n"); return 1; }
 
     ctx->attach_window(win);
-    gui::Viewport vp; vp.id=0; vp.bounds=make_box(0,0,1280,720); vp.scale=1.f;
+    // Logical-extent layout. See gui.cpp/editor for details.
+    float dpi_scale = win->get_dpi_scale();
+    g_dpi_scale = dpi_scale;
+    int sw_phys, sh_phys; win->get_size(&sw_phys, &sh_phys);
+    float vw = sw_phys / dpi_scale, vh = sh_phys / dpi_scale;
+    gui::Viewport vp; vp.id=0; vp.bounds=make_box(0,0,vw,vh); vp.scale=1.f;
     ctx->add_viewport(vp);
-    ctx->get_root()->set_bounds(make_box(0,0,1280,720));
+    ctx->get_root()->set_bounds(make_box(0,0,vw,vh));
 
     // Text measurer & rasterizer
     FontTextMeasurer text_measurer; text_measurer.face = g_font_ui;
@@ -783,11 +791,15 @@ int main() {
         prev_time = current_time;
         g_time = current_time;
 
-        int sw, sh;
-        win->get_size(&sw, &sh);
+        int sw_p, sh_p;
+        win->get_size(&sw_p, &sh_p);
+        dpi_scale = win->get_dpi_scale();
+        g_dpi_scale = dpi_scale;
+        int sw = (int)(sw_p / dpi_scale);
+        int sh = (int)(sh_p / dpi_scale);
         g_window_h = sh;
 
-        // Update viewport
+        // Update viewport (logical-px space)
         vp.bounds = make_box(0, 0, (float)sw, (float)sh);
         ctx->update_viewport(vp);
         ctx->get_root()->set_bounds(make_box(0, 0, (float)sw, (float)sh));
@@ -802,8 +814,8 @@ int main() {
         ctx->begin_frame(dt);
         ctx->end_frame();
 
-        // Render
-        glViewport(0, 0, sw, sh);
+        // Render: glViewport in physical px, projection in logical px.
+        glViewport(0, 0, sw_p, sh_p);
         glClearColor(0.12f, 0.12f, 0.13f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         glEnable(GL_BLEND);

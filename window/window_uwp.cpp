@@ -204,6 +204,7 @@ struct Window::Impl {
     int width = 0;
     int height = 0;
     float dpi = 96.0f;
+    float dpi_scale = 1.0f;
     std::string title;
     Graphics* gfx = nullptr;
     bool owns_graphics = true;  // Whether this window owns its graphics context
@@ -253,14 +254,15 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     window->impl->mouse_device.set_dispatcher(&window->impl->mouse_dispatcher);
     window->impl->mouse_device.set_window(window);
 
-    // Get window size
-    auto bounds = core_window.Bounds();
-    window->impl->width = static_cast<int>(bounds.Width);
-    window->impl->height = static_cast<int>(bounds.Height);
-
-    // Get DPI
+    // Get DPI first so we can scale CoreWindow's logical (DIP) bounds.
     DisplayInformation display_info = DisplayInformation::GetForCurrentView();
     window->impl->dpi = display_info.LogicalDpi();
+    window->impl->dpi_scale = window->impl->dpi / 96.0f;
+
+    // CoreWindow.Bounds() is in DIPs; convert to physical px.
+    auto bounds = core_window.Bounds();
+    window->impl->width = static_cast<int>(bounds.Width * window->impl->dpi_scale + 0.5f);
+    window->impl->height = static_cast<int>(bounds.Height * window->impl->dpi_scale + 0.5f);
 
     g_uwp_window = window;
 
@@ -281,8 +283,9 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 
     core_window.SizeChanged([](CoreWindow const&, WindowSizeChangedEventArgs const& args) {
         if (g_uwp_window && g_uwp_window->impl) {
-            g_uwp_window->impl->width = static_cast<int>(args.Size().Width);
-            g_uwp_window->impl->height = static_cast<int>(args.Size().Height);
+            float s = g_uwp_window->impl->dpi_scale;
+            g_uwp_window->impl->width = static_cast<int>(args.Size().Width * s + 0.5f);
+            g_uwp_window->impl->height = static_cast<int>(args.Size().Height * s + 0.5f);
 
             if (g_uwp_window->impl->callbacks.resize_callback) {
                 WindowResizeEvent event;
@@ -293,6 +296,22 @@ Window* create_window_impl(const Config& config, Result* out_result) {
                 event.height = g_uwp_window->impl->height;
                 event.minimized = false;
                 g_uwp_window->impl->callbacks.resize_callback(event);
+            }
+        }
+    });
+
+    display_info.DpiChanged([](DisplayInformation const& di, IInspectable const&) {
+        if (g_uwp_window && g_uwp_window->impl) {
+            g_uwp_window->impl->dpi = di.LogicalDpi();
+            g_uwp_window->impl->dpi_scale = g_uwp_window->impl->dpi / 96.0f;
+            if (g_uwp_window->impl->callbacks.dpi_change_callback) {
+                DpiChangeEvent ev;
+                ev.type = EventType::DpiChange;
+                ev.window = g_uwp_window->impl->owner;
+                ev.timestamp = get_event_timestamp();
+                ev.dpi = static_cast<int>(g_uwp_window->impl->dpi + 0.5f);
+                ev.scale = g_uwp_window->impl->dpi_scale;
+                g_uwp_window->impl->callbacks.dpi_change_callback(ev);
             }
         }
     });
@@ -708,6 +727,9 @@ void* Window::native_handle() const {
 void* Window::native_display() const {
     return nullptr;
 }
+
+float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
+int   Window::get_dpi() const       { return impl ? static_cast<int>(impl->dpi + 0.5f) : 96; }
 
 //=============================================================================
 // Event Callback Setters

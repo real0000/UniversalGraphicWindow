@@ -262,8 +262,10 @@ struct Window::Impl {
     bool should_close_flag = false;
     bool visible = false;
     bool focused = false;
-    int width = 0;
+    int width = 0;     // physical (framebuffer) px
     int height = 0;
+    int dpi = 96;
+    float dpi_scale = 1.0f;
     std::string title;
     std::string name;  // Window identifier
     Graphics* gfx = nullptr;
@@ -896,28 +898,42 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     Window* window = new Window();
     window->impl = new Window::Impl();
     internal_get_impl(window)->owner = window;
-    internal_get_impl(window)->width = win_cfg.width;
-    internal_get_impl(window)->height = win_cfg.height;
+
+    // Pick the target output's scale (compositor advertises an integer scale
+    // per output via wl_output.scale; use primary output if any).
+    int32_t out_scale = 1;
+    if (!ctx->outputs.empty() && ctx->outputs[0].scale > 0) {
+        out_scale = ctx->outputs[0].scale;
+    }
+    internal_get_impl(window)->dpi = 96 * out_scale;
+    internal_get_impl(window)->dpi_scale = static_cast<float>(out_scale);
+
+    int phys_w = win_cfg.width  * out_scale;
+    int phys_h = win_cfg.height * out_scale;
+
+    internal_get_impl(window)->width  = phys_w;
+    internal_get_impl(window)->height = phys_h;
     internal_get_impl(window)->title = win_cfg.title;
     internal_get_impl(window)->name = win_cfg.name;
     internal_get_impl(window)->style = win_cfg.style;
 
-    // Calculate position (use config or default to center)
+    // Calculate position (use config or default to center). Positions in
+    // Wayland are within the root surface, which is in physical px.
     if (win_cfg.x >= 0) {
-        internal_get_impl(window)->x = win_cfg.x;
+        internal_get_impl(window)->x = win_cfg.x * out_scale;
     } else {
         // Center on primary output
         if (!ctx->outputs.empty()) {
-            internal_get_impl(window)->x = ctx->outputs[0].x + (ctx->outputs[0].width - win_cfg.width) / 2;
+            internal_get_impl(window)->x = ctx->outputs[0].x + (ctx->outputs[0].width - phys_w) / 2;
         } else {
             internal_get_impl(window)->x = 100;
         }
     }
     if (win_cfg.y >= 0) {
-        internal_get_impl(window)->y = win_cfg.y;
+        internal_get_impl(window)->y = win_cfg.y * out_scale;
     } else {
         if (!ctx->outputs.empty()) {
-            internal_get_impl(window)->y = ctx->outputs[0].y + (ctx->outputs[0].height - win_cfg.height) / 2;
+            internal_get_impl(window)->y = ctx->outputs[0].y + (ctx->outputs[0].height - phys_h) / 2;
         } else {
             internal_get_impl(window)->y = 100;
         }
@@ -937,6 +953,12 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         wayland_context_unref();
         set_result(Result::ErrorWindowCreation);
         return nullptr;
+    }
+
+    // Buffer scale tells the compositor we're already rendering at the output's
+    // pixel density, so it shouldn't upscale the buffer.
+    if (out_scale > 1) {
+        wl_surface_set_buffer_scale(internal_get_impl(window)->surface, out_scale);
     }
 
     internal_get_impl(window)->subsurface = wl_subcompositor_get_subsurface(
@@ -979,13 +1001,13 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 #ifdef WINDOW_HAS_OPENGL
             case Backend::OpenGL:
                 gfx = create_opengl_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
-                                                      win_cfg.width, win_cfg.height, config);
+                                                      phys_w, phys_h, config);
                 break;
 #endif
 #ifdef WINDOW_HAS_VULKAN
             case Backend::Vulkan:
                 gfx = create_vulkan_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
-                                                      win_cfg.width, win_cfg.height, config);
+                                                      phys_w, phys_h, config);
                 break;
 #endif
             default:
@@ -999,13 +1021,13 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 #ifdef WINDOW_HAS_OPENGL
                 case Backend::OpenGL:
                     gfx = create_opengl_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
-                                                          win_cfg.width, win_cfg.height, config);
+                                                          phys_w, phys_h, config);
                     break;
 #endif
 #ifdef WINDOW_HAS_VULKAN
                 case Backend::Vulkan:
                     gfx = create_vulkan_graphics_wayland(ctx->display, internal_get_impl(window)->surface,
-                                                          win_cfg.width, win_cfg.height, config);
+                                                          phys_w, phys_h, config);
                     break;
 #endif
                 default:
@@ -1249,6 +1271,9 @@ void Window::poll_events() {
 Graphics* Window::graphics() const { return impl ? impl->gfx : nullptr; }
 void* Window::native_handle() const { return impl ? impl->surface : nullptr; }
 void* Window::native_display() const { return g_wayland_ctx ? g_wayland_ctx->display : nullptr; }
+
+float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
+int   Window::get_dpi() const       { return impl ? impl->dpi       : 96;  }
 
 //=============================================================================
 // Event Callback Setters

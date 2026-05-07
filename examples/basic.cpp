@@ -38,7 +38,8 @@ int main() {
     printf("Window created!\n");
     printf("Backend: %s\n", gfx->get_backend_name());
     printf("Device: %s\n", gfx->get_device_name());
-    printf("Size: %dx%d\n", win->get_width(), win->get_height());
+    printf("Size: %dx%d (physical px)\n", win->get_width(), win->get_height());
+    printf("DPI: %d (scale %.2fx)\n", win->get_dpi(), win->get_dpi_scale());
 
     if (win->supports_position()) {
         int x, y;

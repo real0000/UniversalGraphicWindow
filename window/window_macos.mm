@@ -203,10 +203,12 @@ struct Window::Impl {
     bool should_close_flag = false;
     bool visible = false;
     bool focused = false;
-    int width = 0;
+    int width = 0;       // physical (backing) px
     int height = 0;
     int x = 0;
     int y = 0;
+    int dpi = 96;
+    float dpi_scale = 1.0f;
     std::string title;
     Graphics* gfx = nullptr;
     bool owns_graphics = true;  // Whether this window owns its graphics context
@@ -651,6 +653,23 @@ static NSWindowStyleMask style_to_ns_style_mask(WindowStyle style) {
     }
 }
 
+- (void)windowDidChangeBackingProperties:(NSNotification*)notification {
+    if (_impl && _impl->ns_window) {
+        CGFloat scale = [_impl->ns_window backingScaleFactor];
+        _impl->dpi_scale = static_cast<float>(scale);
+        _impl->dpi = static_cast<int>(96.0 * scale + 0.5);
+        if (_impl->callbacks.dpi_change_callback) {
+            window::DpiChangeEvent ev;
+            ev.type = window::EventType::DpiChange;
+            ev.window = _impl->owner;
+            ev.timestamp = window::get_event_timestamp();
+            ev.scale = _impl->dpi_scale;
+            ev.dpi = _impl->dpi;
+            _impl->callbacks.dpi_change_callback(ev);
+        }
+    }
+}
+
 @end
 
 //=============================================================================
@@ -753,8 +772,12 @@ Window* create_window_impl(const Config& config, Result* out_result) {
             window->impl->y = static_cast<int>(windowFrame.origin.y);
         }
 
-        // Update actual size with retina scale
+        // Update actual size with retina scale. NSWindow takes points
+        // (logical px) for its frame; backingScaleFactor turns them into
+        // physical pixels for the graphics backend.
         CGFloat scale = [nsWindow backingScaleFactor];
+        window->impl->dpi_scale = static_cast<float>(scale);
+        window->impl->dpi = static_cast<int>(96.0 * scale + 0.5);
         window->impl->width = static_cast<int>(win_cfg.width * scale);
         window->impl->height = static_cast<int>(win_cfg.height * scale);
 
@@ -1032,6 +1055,9 @@ void* Window::native_handle() const {
 void* Window::native_display() const {
     return nullptr;
 }
+
+float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
+int   Window::get_dpi() const       { return impl ? impl->dpi       : 96;  }
 
 //=============================================================================
 // Event Callback Setters

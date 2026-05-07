@@ -451,8 +451,14 @@ void GuiEditor::layout_editor(float w, float h) {
 void GuiEditor::update(float delta_time) {
     if (!m_initialized) return;
 
-    int sw = 1440, sh = 900;
-    if (m_window) m_window->get_size(&sw, &sh);
+    // Layout in *logical* px so hardcoded sizes (MENUBAR_H, panel widths)
+    // keep their physical size on Hi-DPI screens.
+    int sw_p = 1440, sh_p = 900;
+    if (m_window) m_window->get_size(&sw_p, &sh_p);
+    float scale = m_window ? m_window->get_dpi_scale() : 1.0f;
+    if (scale <= 0.0f) scale = 1.0f;
+    int sw = static_cast<int>(sw_p / scale);
+    int sh = static_cast<int>(sh_p / scale);
 
     layout_editor(static_cast<float>(sw), static_cast<float>(sh));
 
@@ -791,9 +797,13 @@ void GuiEditor::on_right_click(const math::Vec2& pos) {
     m_tree_context_menu->set_item_enabled(m_cm_delete - MENU_CONTEXT, has_sel);
     m_tree_context_menu->set_item_enabled(m_cm_rename - MENU_CONTEXT, has_sel);
 
-    // Clamp so the popup stays within the window
-    int sw = 1440, sh = 900;
-    if (m_window) m_window->get_size(&sw, &sh);
+    // Clamp so the popup stays within the window (logical px space).
+    int sw_p = 1440, sh_p = 900;
+    if (m_window) m_window->get_size(&sw_p, &sh_p);
+    float scale = m_window ? m_window->get_dpi_scale() : 1.0f;
+    if (scale <= 0.0f) scale = 1.0f;
+    int sw = static_cast<int>(sw_p / scale);
+    int sh = static_cast<int>(sh_p / scale);
     const MenuStyle& ms = m_tree_context_menu->get_menu_style();
     // Estimate menu height: items × item_height + separators × separator_height
     // Context menu has 19 normal items and 5 separators

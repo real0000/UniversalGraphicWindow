@@ -268,7 +268,8 @@ private:
 static QuadRenderer*     g_renderer    = nullptr;
 static font::IFontAtlas* g_font_atlas  = nullptr;
 static float g_time = 0;
-static int   g_window_h = 720;
+static int   g_window_h = 720;     // logical px
+static float g_dpi_scale = 1.0f;   // physical / logical
 
 static font::IFontRenderer* g_font_renderer = nullptr;
 static font::ITextShaper*   g_text_shaper   = nullptr;
@@ -339,9 +340,11 @@ static void draw_render_info(const gui::WidgetRenderInfo& ri) {
     for (const auto& ref : ri.get_draw_order()) {
         if (ref.clip_changed) {
             if (!box_is_empty(ref.clip)) {
+                // Logical → physical for glScissor.
+                float s = g_dpi_scale;
                 float bx=x(box_min(ref.clip)), by=y(box_min(ref.clip));
                 float bw=box_width(ref.clip), bh=box_height(ref.clip);
-                g_renderer->set_scissor_state(true, (int)bx, g_window_h-(int)(by+bh), (int)bw, (int)bh);
+                g_renderer->set_scissor_state(true, (int)(bx*s), (int)((g_window_h-(by+bh))*s), (int)(bw*s), (int)(bh*s));
                 scissor_on = true;
             } else {
                 g_renderer->set_scissor_state(false);
@@ -390,8 +393,11 @@ static void draw_canvas_overlay(const GuiEditor& editor, int window_h) {
         float vpx = x(box_min(vp)), vpy = y(box_min(vp));
         float vpw = box_width(vp), vph = box_height(vp);
 
-        // Enable scissor for canvas area
-        g_renderer->set_scissor_state(true, (int)vpx, window_h-(int)(vpy+vph), (int)vpw, (int)vph);
+        // Enable scissor for canvas area (logical → physical px).
+        {
+            float s = g_dpi_scale;
+            g_renderer->set_scissor_state(true, (int)(vpx*s), (int)((window_h-(vpy+vph))*s), (int)(vpw*s), (int)(vph*s));
+        }
 
         float zoom = canvas.get_zoom();
         Vec2 pan = canvas.get_pan();
@@ -487,8 +493,11 @@ static void draw_design_widgets(const GuiEditor& editor, IGuiContext* design_ctx
     float vpx = x(box_min(vp)), vpy = y(box_min(vp));
     float vpw = box_width(vp), vph = box_height(vp);
 
-    // Clip to canvas viewport
-    g_renderer->set_scissor_state(true, (int)vpx, window_h-(int)(vpy+vph), (int)vpw, (int)vph);
+    // Clip to canvas viewport (logical → physical px).
+    {
+        float s = g_dpi_scale;
+        g_renderer->set_scissor_state(true, (int)(vpx*s), (int)((window_h-(vpy+vph))*s), (int)(vpw*s), (int)(vph*s));
+    }
 
     // Draw a canvas background
     g_renderer->draw_rect(vpx, vpy, vpw, vph, 0.16f, 0.16f, 0.17f, 1.0f);
@@ -600,18 +609,20 @@ struct EditorMouseHandler : public input::IMouseHandler {
     bool is_near_tree_splitter(float x, float y) const {
         if (!win) return false;
         int sw2, sh2; win->get_size(&sw2, &sh2);
+        float lh = sh2 / g_dpi_scale;
         float tree_x = editor->get_tree_panel_w();
         float top = 26.0f + 32.0f;
-        float bot = (float)sh2 - 24.0f;
+        float bot = lh - 24.0f;
         return (x >= tree_x - SPLITTER_HIT_W && x <= tree_x + SPLITTER_HIT_W &&
                 y >= top && y <= bot);
     }
     bool is_near_insp_splitter(float x, float y) const {
         if (!win) return false;
         int sw2, sh2; win->get_size(&sw2, &sh2);
-        float insp_x = (float)sw2 - editor->get_inspector_w();
+        float lw = sw2 / g_dpi_scale, lh = sh2 / g_dpi_scale;
+        float insp_x = lw - editor->get_inspector_w();
         float top = 26.0f + 32.0f;
-        float bot = (float)sh2 - 24.0f;
+        float bot = lh - 24.0f;
         return (x >= insp_x - SPLITTER_HIT_W && x <= insp_x + SPLITTER_HIT_W &&
                 y >= top && y <= bot);
     }
@@ -619,7 +630,8 @@ struct EditorMouseHandler : public input::IMouseHandler {
     bool on_mouse_button(const MouseButtonEvent& event) override {
         if (!editor) return false;
         EditorCanvas& canvas = editor->get_canvas();
-        math::Vec2 pos((float)event.x, (float)event.y);
+        // Window events report physical px; editor works in logical px.
+        math::Vec2 pos((float)event.x / g_dpi_scale, (float)event.y / g_dpi_scale);
         bool pressed = (event.type == EventType::MouseDown);
 
         // Splitter release
@@ -669,7 +681,7 @@ struct EditorMouseHandler : public input::IMouseHandler {
     bool on_mouse_move(const MouseMoveEvent& event) override {
         if (!editor) return false;
         EditorCanvas& canvas = editor->get_canvas();
-        math::Vec2 pos((float)event.x, (float)event.y);
+        math::Vec2 pos((float)event.x / g_dpi_scale, (float)event.y / g_dpi_scale);
 
         // Splitter drag
         if (drag_splitter != SplitterDrag::None) {
@@ -690,7 +702,7 @@ struct EditorMouseHandler : public input::IMouseHandler {
     bool on_mouse_wheel(const MouseWheelEvent& event) override {
         if (!editor) return false;
         EditorCanvas& canvas = editor->get_canvas();
-        math::Vec2 pos((float)event.x, (float)event.y);
+        math::Vec2 pos((float)event.x / g_dpi_scale, (float)event.y / g_dpi_scale);
         if (!math::box_contains(canvas.get_viewport_bounds(), pos)) return false;
         return canvas.handle_mouse_scroll(event.dx, event.dy);
     }
@@ -853,9 +865,17 @@ int main(int argc, char* argv[]) {
     if (!editor_ctx) { printf("Failed to create GUI context\n"); return 1; }
 
     editor_ctx->attach_window(win);
-    gui::Viewport vp; vp.id=0; vp.bounds=make_box(0,0,1440,900); vp.scale=1.f;
+    // Logical-extent layout: Viewport bounds and root bounds use logical
+    // (CSS-style) px, so the editor's hardcoded sizes (MENUBAR_H = 26 etc)
+    // keep their physical size on Hi-DPI. The renderer projects logical-px
+    // space onto a physical-px glViewport.
+    float dpi_scale = win->get_dpi_scale();
+    g_dpi_scale = dpi_scale;
+    int   sw_phys, sh_phys; win->get_size(&sw_phys, &sh_phys);
+    float lw = sw_phys / dpi_scale, lh = sh_phys / dpi_scale;
+    gui::Viewport vp; vp.id=0; vp.bounds=make_box(0,0,lw,lh); vp.scale=1.f;
     editor_ctx->add_viewport(vp);
-    editor_ctx->get_root()->set_bounds(make_box(0,0,1440,900));
+    editor_ctx->get_root()->set_bounds(make_box(0,0,lw,lh));
 
     // Text measurer & rasterizer
     FontTextMeasurer text_measurer; text_measurer.face = g_font_ui;
@@ -914,11 +934,16 @@ int main(int argc, char* argv[]) {
         prev_time = current_time;
         g_time = current_time;
 
-        int sw, sh;
-        win->get_size(&sw, &sh);
+        int sw_p, sh_p;
+        win->get_size(&sw_p, &sh_p);
+        // Refresh in case the window moved to a monitor with different DPI.
+        dpi_scale = win->get_dpi_scale();
+        g_dpi_scale = dpi_scale;
+        int sw = (int)(sw_p / dpi_scale);
+        int sh = (int)(sh_p / dpi_scale);
         g_window_h = sh;
 
-        // Update viewport
+        // Update viewport (logical-px space).
         vp.bounds = make_box(0, 0, (float)sw, (float)sh);
         editor_ctx->update_viewport(vp);
         editor_ctx->get_root()->set_bounds(make_box(0, 0, (float)sw, (float)sh));
@@ -935,8 +960,9 @@ int main(int argc, char* argv[]) {
             design_ctx->end_frame();
         }
 
-        // Render
-        glViewport(0, 0, sw, sh);
+        // Render: glViewport covers physical px, projection covers logical
+        // px. The vertex shader maps logical units → NDC → physical.
+        glViewport(0, 0, sw_p, sh_p);
         glClearColor(0.12f, 0.12f, 0.13f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         glEnable(GL_BLEND);

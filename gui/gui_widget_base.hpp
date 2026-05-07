@@ -44,7 +44,17 @@ public:
     void set_bounds(const math::Box& b) override {
         float dx = math::x(math::box_min(b)) - math::x(math::box_min(bounds_));
         float dy = math::y(math::box_min(b)) - math::y(math::box_min(bounds_));
+        float dw = math::box_width(b)  - math::box_width(bounds_);
+        float dh = math::box_height(b) - math::box_height(bounds_);
         bounds_ = b;
+        // Cached render_info stores draw cmds in absolute coords (bg.dest =
+        // bounds_), so any bounds change must invalidate the cache or the
+        // widget will keep rendering at its old position even though
+        // hit-tests already use the new bounds.
+        if (std::abs(dx) > 0.001f || std::abs(dy) > 0.001f ||
+            std::abs(dw) > 0.001f || std::abs(dh) > 0.001f) {
+            mark_dirty();
+        }
         if ((std::abs(dx) > 0.001f || std::abs(dy) > 0.001f) && !children_.empty()) {
             for (auto* c : children_) {
                 auto cb = c->get_bounds();

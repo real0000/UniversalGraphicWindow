@@ -12,6 +12,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#include <X11/Xresource.h>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
 
@@ -209,10 +210,12 @@ struct Window::Impl {
     Atom wm_protocols = 0;
     bool should_close_flag = false;
     bool visible = false;
-    int width = 0;
+    int width = 0;        // physical (framebuffer) pixels
     int height = 0;
     int x = 0;
     int y = 0;
+    int dpi = 96;
+    float dpi_scale = 1.0f;
     std::string title;
     Graphics* gfx = nullptr;
     bool owns_graphics = true;  // Whether this window owns its graphics context
@@ -247,6 +250,45 @@ struct Window::Impl {
     void* fb_config = nullptr;
 #endif
 };
+
+// Detect screen DPI on X11.
+// Priority:
+//   1. GDK_DPI_SCALE / GDK_SCALE env vars (HiDPI fractional/integer hint)
+//   2. Xft.dpi from RESOURCE_MANAGER (set by GNOME / DE)
+//   3. Physical screen size from XDisplayWidth/HeightMM (often unreliable)
+//   4. 96
+static int detect_x11_dpi(Display* display, int screen) {
+    // 1. GDK_SCALE (integer multiplier — only honour for HiDPI)
+    int gdk_scale = 1;
+    if (const char* s = std::getenv("GDK_SCALE")) {
+        int v = std::atoi(s);
+        if (v >= 1 && v <= 4) gdk_scale = v;
+    }
+    // 2. Xft.dpi from XResources
+    char* rm = XResourceManagerString(display);
+    if (rm && *rm) {
+        XrmDatabase db = XrmGetStringDatabase(rm);
+        if (db) {
+            char* type = nullptr;
+            XrmValue val = {};
+            if (XrmGetResource(db, "Xft.dpi", "Xft.Dpi", &type, &val) && val.addr) {
+                double dpi = std::atof(val.addr);
+                XrmDestroyDatabase(db);
+                if (dpi > 0) return static_cast<int>(dpi * gdk_scale + 0.5);
+            }
+            XrmDestroyDatabase(db);
+        }
+    }
+    // 3. Physical size fallback
+    int wpx = DisplayWidth(display, screen);
+    int wmm = DisplayWidthMM(display, screen);
+    if (wmm > 0) {
+        double dpi = (static_cast<double>(wpx) / wmm) * 25.4;
+        // X often reports a fake 96 DPI; only trust values clearly above that.
+        if (dpi > 100.0) return static_cast<int>(dpi * gdk_scale + 0.5);
+    }
+    return 96 * gdk_scale;
+}
 
 // Helper to send _NET_WM_STATE client message
 static void send_wm_state_event(Display* display, ::Window window, bool add, Atom state1, Atom state2 = 0) {
@@ -288,8 +330,11 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     window->impl = new Window::Impl();
     window->impl->display = display;
     window->impl->screen = screen;
-    window->impl->width = win_cfg.width;
-    window->impl->height = win_cfg.height;
+    window->impl->dpi = detect_x11_dpi(display, screen);
+    window->impl->dpi_scale = static_cast<float>(window->impl->dpi) / 96.0f;
+    // Convert logical → physical px.
+    window->impl->width = static_cast<int>(win_cfg.width  * window->impl->dpi_scale + 0.5f);
+    window->impl->height = static_cast<int>(win_cfg.height * window->impl->dpi_scale + 0.5f);
     window->impl->title = win_cfg.title;
 
     Visual* visual = DefaultVisual(display, screen);
@@ -337,14 +382,14 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 
     unsigned long attr_mask = CWBackPixel | CWEventMask | CWColormap | CWBorderPixel;
 
-    int pos_x = win_cfg.x >= 0 ? win_cfg.x : 0;
-    int pos_y = win_cfg.y >= 0 ? win_cfg.y : 0;
+    int pos_x = win_cfg.x >= 0 ? static_cast<int>(win_cfg.x * window->impl->dpi_scale + 0.5f) : 0;
+    int pos_y = win_cfg.y >= 0 ? static_cast<int>(win_cfg.y * window->impl->dpi_scale + 0.5f) : 0;
 
     ::Window xwindow = XCreateWindow(
         display,
         RootWindow(display, screen),
         pos_x, pos_y,
-        win_cfg.width, win_cfg.height,
+        window->impl->width, window->impl->height,
         0,
         depth,
         InputOutput,
@@ -404,8 +449,8 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     if (!has_style(effective_style, WindowStyle::Resizable)) {
         XSizeHints* hints = XAllocSizeHints();
         hints->flags = PMinSize | PMaxSize;
-        hints->min_width = hints->max_width = win_cfg.width;
-        hints->min_height = hints->max_height = win_cfg.height;
+        hints->min_width = hints->max_width = window->impl->width;
+        hints->min_height = hints->max_height = window->impl->height;
         XSetWMNormalHints(display, xwindow, hints);
         XFree(hints);
     }
@@ -429,14 +474,14 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     if (win_cfg.x < 0 || win_cfg.y < 0) {
         int screen_width = DisplayWidth(display, screen);
         int screen_height = DisplayHeight(display, screen);
-        int new_x = (screen_width - win_cfg.width) / 2;
-        int new_y = (screen_height - win_cfg.height) / 2;
+        int new_x = (screen_width - window->impl->width) / 2;
+        int new_y = (screen_height - window->impl->height) / 2;
         XMoveWindow(display, xwindow, new_x, new_y);
         window->impl->x = new_x;
         window->impl->y = new_y;
     } else {
-        window->impl->x = win_cfg.x;
-        window->impl->y = win_cfg.y;
+        window->impl->x = pos_x;
+        window->impl->y = pos_y;
     }
 
     // Use shared graphics if provided, otherwise create new one
@@ -452,7 +497,7 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 #endif
 #ifdef WINDOW_HAS_VULKAN
             case Backend::Vulkan:
-                gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
+                gfx = create_vulkan_graphics_xlib(display, xwindow, window->impl->width, window->impl->height, config);
                 break;
 #endif
             default:
@@ -464,7 +509,7 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         if (!gfx && config.backend != Backend::Auto) {
 #ifdef WINDOW_HAS_VULKAN
             if (requested != Backend::Vulkan) {
-                gfx = create_vulkan_graphics_xlib(display, xwindow, win_cfg.width, win_cfg.height, config);
+                gfx = create_vulkan_graphics_xlib(display, xwindow, window->impl->width, window->impl->height, config);
             }
 #endif
         }
@@ -950,6 +995,9 @@ void* Window::native_handle() const {
 void* Window::native_display() const {
     return impl ? impl->display : nullptr;
 }
+
+float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
+int   Window::get_dpi() const       { return impl ? impl->dpi       : 96;  }
 
 //=============================================================================
 // Event Callback Setters

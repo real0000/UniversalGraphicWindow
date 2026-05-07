@@ -19,6 +19,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <shellscalingapi.h>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -215,10 +216,12 @@ struct Window::Impl {
     Window* owner = nullptr;  // Back-pointer to Window for event dispatch
     bool should_close_flag = false;
     bool visible = false;
-    int width = 0;
+    int width = 0;            // physical (framebuffer) pixels
     int height = 0;
     int x = 0;
     int y = 0;
+    int dpi = 96;
+    float dpi_scale = 1.0f;
     std::string title;
     Graphics* gfx = nullptr;
     bool owns_graphics = true;  // Whether this window owns its graphics context
@@ -244,6 +247,38 @@ struct Window::Impl {
     bool mouse_in_window = false;
     bool focused = true;
 };
+
+// Query DPI for a monitor (per-monitor v2 if available, fall back to system).
+static int query_dpi_for_monitor(HMONITOR mon) {
+    typedef HRESULT (WINAPI *PFN_GetDpiForMonitor)(HMONITOR, int, UINT*, UINT*);
+    static PFN_GetDpiForMonitor pGetDpiForMonitor = []() -> PFN_GetDpiForMonitor {
+        HMODULE shcore = LoadLibraryW(L"shcore.dll");
+        return shcore ? reinterpret_cast<PFN_GetDpiForMonitor>(GetProcAddress(shcore, "GetDpiForMonitor")) : nullptr;
+    }();
+    if (pGetDpiForMonitor && mon) {
+        UINT dx = 96, dy = 96;
+        if (SUCCEEDED(pGetDpiForMonitor(mon, 0 /*MDT_EFFECTIVE_DPI*/, &dx, &dy))) {
+            return static_cast<int>(dx);
+        }
+    }
+    HDC hdc = GetDC(nullptr);
+    int dpi = hdc ? GetDeviceCaps(hdc, LOGPIXELSX) : 96;
+    if (hdc) ReleaseDC(nullptr, hdc);
+    return dpi > 0 ? dpi : 96;
+}
+
+static int query_dpi_for_window(HWND hwnd) {
+    typedef UINT (WINAPI *PFN_GetDpiForWindow)(HWND);
+    static PFN_GetDpiForWindow pGetDpiForWindow = []() -> PFN_GetDpiForWindow {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        return user32 ? reinterpret_cast<PFN_GetDpiForWindow>(GetProcAddress(user32, "GetDpiForWindow")) : nullptr;
+    }();
+    if (pGetDpiForWindow && hwnd) {
+        UINT d = pGetDpiForWindow(hwnd);
+        if (d != 0) return static_cast<int>(d);
+    }
+    return query_dpi_for_monitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
+}
 
 // Helper function to convert WindowStyle flags to Win32 style
 static DWORD style_to_win32_style(WindowStyle style) {
@@ -516,17 +551,21 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
             return 0;
 
         case WM_DPICHANGED:
-            if (impl && impl->callbacks.dpi_change_callback) {
+            if (impl) {
                 int dpi = HIWORD(wparam);
-                DpiChangeEvent event;
-                event.type = EventType::DpiChange;
-                event.window = impl->owner;
-                event.timestamp = get_event_timestamp();
-                event.dpi = dpi;
-                event.scale = static_cast<float>(dpi) / 96.0f;
-                impl->callbacks.dpi_change_callback(event);
+                impl->dpi = dpi;
+                impl->dpi_scale = static_cast<float>(dpi) / 96.0f;
+                if (impl->callbacks.dpi_change_callback) {
+                    DpiChangeEvent event;
+                    event.type = EventType::DpiChange;
+                    event.window = impl->owner;
+                    event.timestamp = get_event_timestamp();
+                    event.dpi = dpi;
+                    event.scale = impl->dpi_scale;
+                    impl->callbacks.dpi_change_callback(event);
+                }
 
-                // Optionally resize window to suggested rect
+                // Resize window to OS-suggested rect (preserves on-screen size).
                 RECT* suggested = reinterpret_cast<RECT*>(lparam);
                 SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
                              suggested->right - suggested->left, suggested->bottom - suggested->top,
@@ -615,6 +654,16 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     int win_width, win_height;
     int pos_x, pos_y;
 
+    // Determine target monitor DPI before sizing, so logical config dims
+    // (CSS-style px) translate to physical px on Hi-DPI screens.
+    POINT probe = { win_cfg.x >= 0 ? win_cfg.x : 0, win_cfg.y >= 0 ? win_cfg.y : 0 };
+    HMONITOR mon = MonitorFromPoint(probe, MONITOR_DEFAULTTOPRIMARY);
+    int initial_dpi = query_dpi_for_monitor(mon);
+    float dpi_scale = static_cast<float>(initial_dpi) / 96.0f;
+
+    int phys_w = static_cast<int>(win_cfg.width  * dpi_scale + 0.5f);
+    int phys_h = static_cast<int>(win_cfg.height * dpi_scale + 0.5f);
+
     if (has_style(effective_style, WindowStyle::Fullscreen)) {
         // Fullscreen: use entire screen
         pos_x = 0;
@@ -622,12 +671,23 @@ Window* create_window_impl(const Config& config, Result* out_result) {
         win_width = GetSystemMetrics(SM_CXSCREEN);
         win_height = GetSystemMetrics(SM_CYSCREEN);
     } else {
-        RECT rect = { 0, 0, win_cfg.width, win_cfg.height };
-        AdjustWindowRectEx(&rect, style, FALSE, ex_style);
+        RECT rect = { 0, 0, phys_w, phys_h };
+        // Use AdjustWindowRectExForDpi if available — non-client area scales
+        // with DPI under per-monitor v2.
+        typedef BOOL (WINAPI *PFN_AdjustForDpi)(LPRECT, DWORD, BOOL, DWORD, UINT);
+        static PFN_AdjustForDpi pAdjustForDpi = []() -> PFN_AdjustForDpi {
+            HMODULE user32 = GetModuleHandleW(L"user32.dll");
+            return user32 ? reinterpret_cast<PFN_AdjustForDpi>(GetProcAddress(user32, "AdjustWindowRectExForDpi")) : nullptr;
+        }();
+        if (pAdjustForDpi) {
+            pAdjustForDpi(&rect, style, FALSE, ex_style, static_cast<UINT>(initial_dpi));
+        } else {
+            AdjustWindowRectEx(&rect, style, FALSE, ex_style);
+        }
         win_width = rect.right - rect.left;
         win_height = rect.bottom - rect.top;
-        pos_x = win_cfg.x >= 0 ? win_cfg.x : CW_USEDEFAULT;
-        pos_y = win_cfg.y >= 0 ? win_cfg.y : CW_USEDEFAULT;
+        pos_x = win_cfg.x >= 0 ? static_cast<int>(win_cfg.x * dpi_scale + 0.5f) : CW_USEDEFAULT;
+        pos_y = win_cfg.y >= 0 ? static_cast<int>(win_cfg.y * dpi_scale + 0.5f) : CW_USEDEFAULT;
     }
 
     std::wstring title_wide = internal::utf8_to_wide(win_cfg.title);
@@ -644,8 +704,16 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     window->impl = new Window::Impl();
     window->impl->hwnd = hwnd;
     window->impl->owner = window;  // Set back-pointer for event dispatch
-    window->impl->width = win_cfg.width;
-    window->impl->height = win_cfg.height;
+    {
+        // Use the actual client size after creation (per-monitor DPI may have
+        // re-sized us) rather than the requested values.
+        RECT cr;
+        GetClientRect(hwnd, &cr);
+        window->impl->width = cr.right - cr.left;
+        window->impl->height = cr.bottom - cr.top;
+    }
+    window->impl->dpi = query_dpi_for_window(hwnd);
+    window->impl->dpi_scale = static_cast<float>(window->impl->dpi) / 96.0f;
     window->impl->title = win_cfg.title;
     window->impl->style = effective_style;
     window->impl->is_fullscreen = has_style(effective_style, WindowStyle::Fullscreen);
@@ -928,6 +996,9 @@ void Window::poll_events() {
 Graphics* Window::graphics() const { return impl ? impl->gfx : nullptr; }
 void* Window::native_handle() const { return impl ? impl->hwnd : nullptr; }
 void* Window::native_display() const { return nullptr; }
+
+float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
+int   Window::get_dpi() const       { return impl ? impl->dpi       : 96;  }
 
 //=============================================================================
 // Event Callback Setters

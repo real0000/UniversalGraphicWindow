@@ -96,6 +96,7 @@ class GuiContext : public IGuiContext {
     std::vector<IGuiWidget*> overlays_;
     mutable WidgetRenderInfo frame_ri_;
     Window* attached_window_=nullptr;
+    float window_dpi_scale_=1.0f;  // Mirror of attached window's DPI scale
 
     static void collect_recursive(IGuiWidget* w, WidgetRenderInfo& out, int32_t& depth) {
         if (!w || !w->is_visible()) return;
@@ -125,15 +126,23 @@ class GuiContext : public IGuiContext {
         return w->is_focusable() ? w : nullptr;
     }
 
-    // Mouse handler: feeds all mouse events into the widget tree
+    // Mouse handler: feeds all mouse events into the widget tree.
+    // Window events arrive in physical px; widget bounds are in logical
+    // (UI) px. Divide by the attached window's DPI scale before dispatching
+    // so hit-tests align.
     class MouseInputHandler : public input::IMouseHandler {
         GuiContext* ctx_;
+        math::Vec2 to_ui(int x, int y) const {
+            float s = ctx_->window_dpi_scale_;
+            if (s <= 0.0f) s = 1.0f;
+            return math::Vec2((float)x / s, (float)y / s);
+        }
     public:
         explicit MouseInputHandler(GuiContext* ctx) : ctx_(ctx) {}
         const char* get_handler_id() const override { return "gui_context_mouse"; }
         int get_priority() const override { return 100; }
         bool on_mouse_move(const MouseMoveEvent& event) override {
-            ctx_->input_state_.mouse_position = math::Vec2((float)event.x, (float)event.y);
+            ctx_->input_state_.mouse_position = to_ui(event.x, event.y);
             ctx_->dispatch_mouse_move(ctx_->input_state_.mouse_position);
             return false;
         }
@@ -141,7 +150,7 @@ class GuiContext : public IGuiContext {
             if (event.button == window::MouseButton::Unknown) return false;
             bool pressed = (event.type == EventType::MouseDown);
             gui::MouseButton btn = static_cast<gui::MouseButton>(static_cast<uint8_t>(event.button));
-            math::Vec2 pos((float)event.x, (float)event.y);
+            math::Vec2 pos = to_ui(event.x, event.y);
             ctx_->dispatch_mouse_button(btn, pressed, pos);
             return false; // don't consume: let other handlers see it
         }
@@ -267,12 +276,26 @@ public:
         win->add_mouse_handler(&mouse_handler_);
         win->add_keyboard_handler(&keyboard_handler_);
         attached_window_ = win;
+        // Apply the window's current DPI scale to all viewports so widget
+        // hit-testing/rendering operate in physical px.
+        apply_dpi_scale_to_viewports(win->get_dpi_scale());
+        // Track future DPI changes (e.g. window dragged to a HiDPI monitor).
+        win->set_dpi_change_callback([this](const DpiChangeEvent& ev) {
+            apply_dpi_scale_to_viewports(ev.scale);
+        });
     }
     void detach_window(Window* win) override {
         if (!win || attached_window_ != win) return;
         win->remove_mouse_handler(&mouse_handler_);
         win->remove_keyboard_handler(&keyboard_handler_);
+        win->set_dpi_change_callback({});
         attached_window_ = nullptr;
+    }
+
+    void apply_dpi_scale_to_viewports(float scale) {
+        if (scale <= 0.0f) scale = 1.0f;
+        window_dpi_scale_ = scale;
+        for (auto& v : viewports_) v.scale = scale;
     }
 
     void add_overlay(IGuiWidget* w) override { if (w) overlays_.push_back(w); }
@@ -292,7 +315,11 @@ public:
 
     GuiResult add_viewport(const Viewport& vp) override {
         for(auto& v:viewports_) if(v.id==vp.id) return GuiResult::ErrorInvalidParameter;
-        viewports_.push_back(vp); return GuiResult::Success;
+        viewports_.push_back(vp);
+        // If a window is attached, override the viewport's scale with the
+        // current DPI scale so callers don't have to pass it explicitly.
+        if (attached_window_) viewports_.back().scale = window_dpi_scale_;
+        return GuiResult::Success;
     }
     GuiResult remove_viewport(int id) override {
         auto it=std::find_if(viewports_.begin(),viewports_.end(),[id](const Viewport& v){return v.id==id;});
@@ -300,7 +327,12 @@ public:
         viewports_.erase(it); return GuiResult::Success;
     }
     GuiResult update_viewport(const Viewport& vp) override {
-        for(auto& v:viewports_) if(v.id==vp.id){v=vp;return GuiResult::Success;}
+        for(auto& v:viewports_) if(v.id==vp.id){
+            v=vp;
+            // Don't let callers reset the DPI-driven scale; the context owns it.
+            if (attached_window_) v.scale = window_dpi_scale_;
+            return GuiResult::Success;
+        }
         return GuiResult::ErrorViewportNotFound;
     }
     const Viewport* get_viewport(int id) const override {

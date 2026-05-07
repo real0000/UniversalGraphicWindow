@@ -152,6 +152,8 @@ struct Window::Impl {
     std::string title = "Window";
     int width = 800;
     int height = 600;
+    int dpi = 96;
+    float dpi_scale = 1.0f;
     bool visible = true;
     bool should_close = false;
     bool focused = true;
@@ -335,8 +337,18 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     Window* window = new Window();
     window->impl = new Window::Impl();
     window->impl->owner = window;
-    window->impl->width = win_cfg.width;
-    window->impl->height = win_cfg.height;
+
+    // Browser DPI scale = window.devicePixelRatio. Multiply config (CSS px)
+    // dimensions to get the canvas backing-store size.
+    double dpr = emscripten_get_device_pixel_ratio();
+    if (dpr <= 0.0) dpr = 1.0;
+    window->impl->dpi_scale = static_cast<float>(dpr);
+    window->impl->dpi = static_cast<int>(96.0 * dpr + 0.5);
+
+    int phys_w = static_cast<int>(win_cfg.width  * dpr + 0.5);
+    int phys_h = static_cast<int>(win_cfg.height * dpr + 0.5);
+    window->impl->width = phys_w;
+    window->impl->height = phys_h;
     window->impl->title = win_cfg.title;
     window->impl->style = win_cfg.style;
     window->impl->visible = win_cfg.visible;
@@ -344,9 +356,10 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     // Use canvas ID from window name or default
     window->impl->canvas_id = std::string("#") + win_cfg.name;
 
-    // Try to set canvas size
+    // Backing store at physical pixels; CSS layout still uses logical px so
+    // the canvas element size on screen matches the requested dims.
     emscripten_set_canvas_element_size(window->impl->canvas_id.c_str(),
-                                       win_cfg.width, win_cfg.height);
+                                       phys_w, phys_h);
 
     // Set up event listeners
     const char* canvas = window->impl->canvas_id.c_str();
@@ -370,7 +383,7 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     Graphics* gfx = nullptr;
     if (config.backend == Backend::Auto || config.backend == Backend::OpenGL) {
 #ifdef WINDOW_SUPPORT_OPENGL
-        gfx = create_webgl_graphics(canvas, win_cfg.width, win_cfg.height, config);
+        gfx = create_webgl_graphics(canvas, phys_w, phys_h, config);
 #endif
     }
 
@@ -566,6 +579,9 @@ void* Window::native_handle() const {
     // Return canvas ID as native handle
     return impl ? (void*)impl->canvas_id.c_str() : nullptr;
 }
+
+float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
+int   Window::get_dpi() const       { return impl ? impl->dpi       : 96;  }
 
 // Callbacks
 void Window::set_close_callback(WindowCloseCallback callback) {

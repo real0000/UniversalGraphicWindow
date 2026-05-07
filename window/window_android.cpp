@@ -16,6 +16,7 @@
 #include <android/looper.h>
 #include <android/input.h>
 #include <android/keycodes.h>
+#include <android/configuration.h>
 #include <string>
 #include <cstring>
 #include <cstdint>
@@ -151,6 +152,8 @@ struct Window::Impl {
     bool has_focus = false;
     int width = 0;
     int height = 0;
+    int dpi = 160;          // Android baseline density is 160 DPI
+    float dpi_scale = 1.0f; // density / 160
     std::string title;
     Graphics* gfx = nullptr;
     bool owns_graphics = true;  // Whether this window owns its graphics context
@@ -246,6 +249,28 @@ static Graphics* create_graphics(ANativeWindow* native_window, int width, int he
 // Native Activity Callbacks
 //=============================================================================
 
+static void update_android_dpi(ANativeActivity* activity) {
+    if (!activity || !g_android_window || !g_android_window->impl) return;
+    AConfiguration* cfg = AConfiguration_new();
+    if (!cfg) return;
+    AConfiguration_fromAssetManager(cfg, activity->assetManager);
+    int32_t density = AConfiguration_getDensity(cfg);
+    AConfiguration_delete(cfg);
+    if (density <= 0 || density == ACONFIGURATION_DENSITY_DEFAULT) density = 160;
+    int prev_dpi = g_android_window->impl->dpi;
+    g_android_window->impl->dpi = density;
+    g_android_window->impl->dpi_scale = density / 160.0f;
+    if (prev_dpi != density && g_android_window->impl->callbacks.dpi_change_callback) {
+        DpiChangeEvent ev;
+        ev.type = EventType::DpiChange;
+        ev.window = g_android_window->impl->owner;
+        ev.timestamp = get_event_timestamp();
+        ev.dpi = density;
+        ev.scale = g_android_window->impl->dpi_scale;
+        g_android_window->impl->callbacks.dpi_change_callback(ev);
+    }
+}
+
 static void on_native_window_created(ANativeActivity* activity, ANativeWindow* window) {
     LOGI("onNativeWindowCreated");
     if (g_android_window && g_android_window->impl) {
@@ -253,6 +278,7 @@ static void on_native_window_created(ANativeActivity* activity, ANativeWindow* w
         g_android_window->impl->width = ANativeWindow_getWidth(window);
         g_android_window->impl->height = ANativeWindow_getHeight(window);
         g_android_window->impl->visible = true;
+        update_android_dpi(activity);
 
         // Create graphics backend if not already created
         if (!g_android_window->impl->gfx) {
@@ -337,6 +363,7 @@ static void on_stop(ANativeActivity* activity) {
 
 static void on_configuration_changed(ANativeActivity* activity) {
     LOGI("onConfigurationChanged");
+    update_android_dpi(activity);
 }
 
 static void on_low_memory(ANativeActivity* activity) {
@@ -691,6 +718,9 @@ void* Window::native_handle() const {
 void* Window::native_display() const {
     return nullptr;
 }
+
+float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
+int   Window::get_dpi() const       { return impl ? impl->dpi       : 160; }
 
 //=============================================================================
 // Event Callback Setters

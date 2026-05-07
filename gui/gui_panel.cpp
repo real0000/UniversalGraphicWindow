@@ -59,7 +59,13 @@ public:
 
     math::Box get_bounds() const override { return bounds_; }
     void set_bounds(const math::Box& bounds) override {
+        bool changed =
+            std::abs(math::x(math::box_min(bounds)) - math::x(math::box_min(bounds_))) > 0.001f ||
+            std::abs(math::y(math::box_min(bounds)) - math::y(math::box_min(bounds_))) > 0.001f ||
+            std::abs(math::box_width(bounds)  - math::box_width(bounds_))  > 0.001f ||
+            std::abs(math::box_height(bounds) - math::box_height(bounds_)) > 0.001f;
         bounds_ = bounds;
+        if (changed) mark_dirty();
         recalculate_layout();
     }
 
@@ -640,7 +646,13 @@ public:
 
     math::Box get_bounds() const override { return bounds_; }
     void set_bounds(const math::Box& bounds) override {
+        bool changed =
+            std::abs(math::x(math::box_min(bounds)) - math::x(math::box_min(bounds_))) > 0.001f ||
+            std::abs(math::y(math::box_min(bounds)) - math::y(math::box_min(bounds_))) > 0.001f ||
+            std::abs(math::box_width(bounds)  - math::box_width(bounds_))  > 0.001f ||
+            std::abs(math::box_height(bounds) - math::box_height(bounds_)) > 0.001f;
         bounds_ = bounds;
+        if (changed) mark_dirty();
         recalculate_layout();
     }
 

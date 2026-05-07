@@ -463,14 +463,17 @@ namespace input {
 
 static const int MAX_CONFIG_WINDOWS = 16;
 
-// Individual window configuration within Config
+// Individual window configuration within Config.
+// x/y/width/height are *logical* pixels (CSS-style). The platform layer
+// multiplies them by the target monitor's DPI scale at creation time so the
+// window has the same physical size across screens with different scaling.
 struct WindowConfigEntry {
     std::string name = "main";      // Unique identifier
     std::string title = "Window";
-    int x = -1;                     // -1 = centered
-    int y = -1;                     // -1 = centered
-    int width = 800;
-    int height = 600;
+    int x = -1;                     // -1 = centered (logical px)
+    int y = -1;                     // -1 = centered (logical px)
+    int width = 800;                // logical px
+    int height = 600;               // logical px
     int monitor_index = 0;          // Which monitor to use
     bool fullscreen = false;
     WindowStyle style = WindowStyle::Default;
@@ -563,7 +566,9 @@ public:
     void set_title(const char* title);
     const char* get_title() const;
 
-    // Size
+    // Size — physical (framebuffer) pixels.
+    // On Hi-DPI displays this is the scaled-up size; for the logical (CSS-style)
+    // size used in layout code, divide by get_dpi_scale().
     void set_size(int width, int height);
     void get_size(int* width, int* height) const;
     int get_width() const;
@@ -573,6 +578,13 @@ public:
     bool set_position(int x, int y);
     bool get_position(int* x, int* y) const;
     bool supports_position() const;
+
+    // DPI / scale factor.
+    // get_dpi_scale() returns physical_pixels / logical_pixels (1.0 at 96 DPI,
+    // 1.5 at 144, 2.0 at 192). Driven by the current OS/screen scaling setting
+    // and updated on DpiChange events.
+    float get_dpi_scale() const;
+    int   get_dpi() const;
 
     // Style
     void set_style(WindowStyle style);

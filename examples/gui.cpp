@@ -341,7 +341,8 @@ private:
 static QuadRenderer*    g_renderer   = nullptr;
 static font::IFontAtlas* g_font_atlas = nullptr;
 static float g_time = 0; // for cursor blink
-static int g_window_h = 720; // for glScissor Y-flip
+static int g_window_h = 720;        // logical px, for glScissor Y-flip
+static float g_dpi_scale = 1.0f;     // physical / logical
 
 
 // ============================================================================
@@ -527,9 +528,11 @@ static void draw_render_info(const gui::WidgetRenderInfo& ri) {
     for (const auto& ref : ri.get_draw_order()) {
         if (ref.clip_changed) {
             if (!box_is_empty(ref.clip)) {
+                // Logical → physical for glScissor.
+                float s = g_dpi_scale;
                 float bx = x(box_min(ref.clip)), by = y(box_min(ref.clip));
                 float bw = box_width(ref.clip),  bh = box_height(ref.clip);
-                g_renderer->set_scissor_state(true, (int)bx, g_window_h - (int)(by + bh), (int)bw, (int)bh);
+                g_renderer->set_scissor_state(true, (int)(bx*s), (int)((g_window_h - (by + bh))*s), (int)(bw*s), (int)(bh*s));
                 scissor_on = true;
             } else {
                 g_renderer->set_scissor_state(false);
@@ -1379,14 +1382,21 @@ int main() {
     // Wire all platform input (mouse move/button/wheel, key/char) into the widget tree
     ctx->attach_window(win);
 
+    // Logical-extent layout: vp.bounds and root bounds use logical px so
+    // hardcoded sizes keep their physical size on Hi-DPI. The renderer
+    // projects logical-px space onto a physical-px glViewport.
+    float dpi_scale = win->get_dpi_scale();
+    g_dpi_scale = dpi_scale;
+    int sw_phys, sh_phys; win->get_size(&sw_phys, &sh_phys);
+    float lw = sw_phys / dpi_scale, lh = sh_phys / dpi_scale;
     gui::Viewport vp;
     vp.id = 0;
-    vp.bounds = make_box(0, 0, 1280, 720);
-    vp.scale = 1.0f;
+    vp.bounds = make_box(0, 0, lw, lh);
+    vp.scale = 1.0f;  // overridden by ctx (now == dpi_scale)
     ctx->add_viewport(vp);
 
     IGuiWidget* root = ctx->get_root();
-    root->set_bounds(make_box(0, 0, 1280, 720));
+    root->set_bounds(make_box(0, 0, lw, lh));
 
     // Setup all widgets
     GuiWidgets widgets = setup_widgets(ctx);
@@ -1464,9 +1474,13 @@ int main() {
         prev_time = current_time;
         g_time = current_time;
 
-        // Get window size
-        int sw, sh;
-        win->get_size(&sw, &sh);
+        // Get window size (physical px) and convert to logical for layout.
+        int sw_p, sh_p;
+        win->get_size(&sw_p, &sh_p);
+        dpi_scale = win->get_dpi_scale();
+        g_dpi_scale = dpi_scale;
+        int sw = (int)(sw_p / dpi_scale);
+        int sh = (int)(sh_p / dpi_scale);
         g_window_h = sh;
 
         // Update viewport on resize
@@ -1501,7 +1515,8 @@ int main() {
         widgets.prog_det->set_value(fmodf(current_time * 0.05f, 1.0f));
 
         // ---- Render ----
-        glViewport(0, 0, sw, sh);
+        // glViewport in physical px, projection in logical px.
+        glViewport(0, 0, sw_p, sh_p);
         glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
