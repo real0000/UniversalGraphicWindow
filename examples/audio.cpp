@@ -174,14 +174,28 @@ int main(int argc, char* argv[]) {
            preferred.sample_rate, preferred.channels,
            window::audio::sample_format_to_string(preferred.sample_format));
 
-    // Create a window for input handling
+    // Create a window for input handling.
+    // On Windows, prefer D3D12 with D3D11 fallback.
     Config config;
     config.windows[0].title = "Audio Example - Press 1-4 for notes, ESC to quit";
     config.windows[0].width = 640;
     config.windows[0].height = 200;
 
+#ifdef WINDOW_PLATFORM_WIN32
+    config.backend = Backend::D3D12;
+#endif
+
     Result win_result;
     auto windows = Window::create(config, &win_result);
+
+#ifdef WINDOW_PLATFORM_WIN32
+    if (win_result != Result::Success || windows.empty()) {
+        printf("D3D12 unavailable (%s), falling back to D3D11...\n", result_to_string(win_result));
+        config.backend = Backend::D3D11;
+        windows = Window::create(config, &win_result);
+    }
+#endif
+
     if (windows.empty()) {
         printf("Failed to create window\n");
         window::audio::AudioManager::shutdown();

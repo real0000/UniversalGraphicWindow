@@ -74,16 +74,23 @@ int main() {
     int width = client_rect.right - client_rect.left;
     int height = client_rect.bottom - client_rect.top;
 
-    // Step 2: Create graphics context for the external window
+    // Step 2: Create graphics context for the external window.
+    // On Windows, prefer D3D12 with D3D11 fallback.
     window::ExternalWindowConfig config;
     config.native_handle = hwnd;
     config.width = width;
     config.height = height;
     config.vsync = true;
-    config.backend = window::Backend::Auto;  // Or specify D3D11, OpenGL, etc.
+    config.backend = window::Backend::D3D12;
 
     window::Result result;
     window::Graphics* gfx = window::Graphics::create(config, &result);
+
+    if (result != window::Result::Success) {
+        printf("D3D12 unavailable (%s), falling back to D3D11...\n", window::result_to_string(result));
+        config.backend = window::Backend::D3D11;
+        gfx = window::Graphics::create(config, &result);
+    }
 
     if (result != window::Result::Success) {
         printf("Failed to create graphics context: %s\n", window::result_to_string(result));

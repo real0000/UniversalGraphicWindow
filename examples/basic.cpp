@@ -14,16 +14,21 @@ int main() {
     config.windows[0].height = 600;
     config.vsync = true;
 
-    // Graphics backend selection - choose one:
-    // config.backend = window::Backend::Auto;    // Default: platform's preferred backend
-    // config.backend = window::Backend::OpenGL;  // Force OpenGL/OpenGL ES
-    // config.backend = window::Backend::Vulkan;  // Force Vulkan
-    // config.backend = window::Backend::D3D11;   // Force Direct3D 11 (Windows only)
-    // config.backend = window::Backend::D3D12;   // Force Direct3D 12 (Windows only)
-    // config.backend = window::Backend::Metal;   // Force Metal (Apple only)
+    // On Windows, prefer D3D12 with D3D11 fallback. Other platforms use Auto.
+#ifdef WINDOW_PLATFORM_WIN32
+    config.backend = window::Backend::D3D12;
+#endif
 
     window::Result result;
     auto windows = window::Window::create(config, &result);
+
+#ifdef WINDOW_PLATFORM_WIN32
+    if (result != window::Result::Success || windows.empty()) {
+        printf("D3D12 unavailable (%s), falling back to D3D11...\n", window::result_to_string(result));
+        config.backend = window::Backend::D3D11;
+        windows = window::Window::create(config, &result);
+    }
+#endif
 
     if (result != window::Result::Success || windows.empty()) {
         printf("Failed to create window: %s\n", window::result_to_string(result));

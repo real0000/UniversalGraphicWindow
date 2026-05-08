@@ -109,8 +109,21 @@ int main() {
     config.windows[0].width = 800;
     config.windows[0].height = 600;
 
+    // On Windows, prefer D3D12 with D3D11 fallback.
+#ifdef WINDOW_PLATFORM_WIN32
+    config.backend = Backend::D3D12;
+#endif
+
     Result result;
     auto windows = Window::create(config, &result);
+
+#ifdef WINDOW_PLATFORM_WIN32
+    if (result != Result::Success || windows.empty()) {
+        printf("D3D12 unavailable (%s), falling back to D3D11...\n", result_to_string(result));
+        config.backend = Backend::D3D11;
+        windows = Window::create(config, &result);
+    }
+#endif
 
     if (windows.empty()) {
         printf("Failed to create window: %s\n", result_to_string(result));

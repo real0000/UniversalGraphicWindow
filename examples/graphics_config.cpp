@@ -79,7 +79,11 @@ void demo_config_save_load() {
     config.windows[0].fullscreen = false;
     config.vsync = true;
     config.samples = 4;
+#ifdef WINDOW_PLATFORM_WIN32
+    config.backend = window::Backend::D3D12;
+#else
     config.backend = window::Backend::Auto;
+#endif
 
     // Save it
     const char* config_file = "game_config.ini";
@@ -117,6 +121,17 @@ void demo_window_from_config() {
     window::Result result;
     auto windows = window::Window::create_from_config(config_file, &result);
 
+#ifdef WINDOW_PLATFORM_WIN32
+    if (result != window::Result::Success || windows.empty()) {
+        printf("D3D12 unavailable (%s), falling back to D3D11...\n", window::result_to_string(result));
+        window::GraphicsConfig fallback;
+        if (window::GraphicsConfig::load(config_file, &fallback)) {
+            fallback.backend = window::Backend::D3D11;
+            windows = window::Window::create(fallback, &result);
+        }
+    }
+#endif
+
     if (windows.empty()) {
         printf("Failed to create window: %s\n", window::result_to_string(result));
         return;
@@ -146,7 +161,11 @@ void demo_multi_window() {
 
     // Create a config with multiple windows
     window::GraphicsConfig config;
+#ifdef WINDOW_PLATFORM_WIN32
+    config.backend = window::Backend::D3D12;
+#else
     config.backend = window::Backend::Auto;
+#endif
     config.vsync = true;
     config.samples = 1;
 
@@ -175,6 +194,14 @@ void demo_multi_window() {
     // Create windows
     window::Result result;
     std::vector<window::Window*> windows = window::Window::create(config, &result);
+
+#ifdef WINDOW_PLATFORM_WIN32
+    if (result != window::Result::Success || windows.empty()) {
+        printf("D3D12 unavailable (%s), falling back to D3D11...\n", window::result_to_string(result));
+        config.backend = window::Backend::D3D11;
+        windows = window::Window::create(config, &result);
+    }
+#endif
 
     if (windows.empty()) {
         printf("Failed to create windows: %s\n", window::result_to_string(result));
