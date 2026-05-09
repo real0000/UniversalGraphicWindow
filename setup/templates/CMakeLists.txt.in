@@ -1,0 +1,48 @@
+cmake_minimum_required(VERSION 3.16)
+project(@PROJECT_NAME@ LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+#=============================================================================
+# UniversalGraphicWindow integration
+#=============================================================================
+# Integration mode: @UGW_MODE@   (reference | submodule)
+# UGW source path:
+set(UGW_PATH "@UGW_PATH@" CACHE PATH "Path to UniversalGraphicWindow source")
+
+if(NOT EXISTS "${UGW_PATH}/CMakeLists.txt")
+    message(FATAL_ERROR "UGW_PATH does not point to a UniversalGraphicWindow checkout: ${UGW_PATH}")
+endif()
+
+# Disable UGW examples/tests when consumed as a dependency
+set(WINDOW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+#=============================================================================
+# Graphics backend selection
+#=============================================================================
+# Backends are enabled per-platform; ones the host can't build are skipped by UGW.
+if(WIN32)
+    set(WINDOW_ENABLE_D3D12 ON  CACHE BOOL "" FORCE)
+    set(WINDOW_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+    set(WINDOW_ENABLE_D3D11 ON  CACHE BOOL "" FORCE)
+    set(WINDOW_ENABLE_OPENGL ON CACHE BOOL "" FORCE)
+elseif(APPLE)
+    set(WINDOW_ENABLE_METAL  ON CACHE BOOL "" FORCE)
+    set(WINDOW_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+    set(WINDOW_ENABLE_OPENGL ON CACHE BOOL "" FORCE)
+elseif(ANDROID)
+    set(WINDOW_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+    set(WINDOW_ENABLE_OPENGL ON CACHE BOOL "" FORCE)
+else() # Linux / *BSD
+    set(WINDOW_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+    set(WINDOW_ENABLE_OPENGL ON CACHE BOOL "" FORCE)
+endif()
+
+add_subdirectory("${UGW_PATH}" ugw_build EXCLUDE_FROM_ALL)
+
+#=============================================================================
+# Application
+#=============================================================================
+add_executable(@PROJECT_NAME@ src/main.cpp)
+target_link_libraries(@PROJECT_NAME@ PRIVATE window)
