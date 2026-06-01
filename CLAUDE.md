@@ -30,7 +30,7 @@ cd build && ctest -C Release
 - `-DWINDOW_ENABLE_DINPUT=ON` - Use DirectInput for gamepad (Windows, default: XInput)
 - `-DWINDOW_ENABLE_AUDIO=ON|OFF` - Audio support (default: ON)
 - `-DWINDOW_ENABLE_HARFBUZZ=ON|OFF` - HarfBuzz text shaping (default: ON)
-- `-DWINDOW_ENABLE_FRIBIDI=ON|OFF` - FriBidi bidirectional text (default: ON)
+- `-DWINDOW_ENABLE_LIBUNIBREAK=ON|OFF` - libunibreak Unicode line breaking (default: ON)
 
 Example executables are built as `example_basic`, `example_opengl`, `example_vulkan`, `example_d3d11`, `example_d3d12`, `example_metal`, `example_gamepad`, `example_wheel`, `example_audio` in the build directory.
 
@@ -39,7 +39,7 @@ Example executables are built as `example_basic`, `example_opengl`, `example_vul
 - **C++17** - Required (set in CMakeLists.txt)
 - **Boost** - Required for INI config parsing (PropertyTree) and GUI geometry (Boost.Geometry)
 - **HarfBuzz** - Optional, text shaping (ligatures, complex scripts). Auto-fetched via CMake FetchContent. Enable with `-DWINDOW_ENABLE_HARFBUZZ=ON`
-- **FriBidi** - Optional, Unicode BiDi text reordering. Auto-fetched via CMake FetchContent. Enable with `-DWINDOW_ENABLE_FRIBIDI=ON`
+- **libunibreak** - Optional, Unicode line-break opportunities (UAX #14) for correct word/CJK wrapping. Auto-fetched via CMake FetchContent. Enable with `-DWINDOW_ENABLE_LIBUNIBREAK=ON`
 
 ## Architecture
 

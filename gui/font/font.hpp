@@ -666,6 +666,115 @@ IFontFallbackChain* create_fallback_chain_with_defaults(IFontLibrary* library,
 void destroy_fallback_chain(IFontFallbackChain* chain);
 
 // ============================================================================
+// Glyph Atlas Manager (RAM-only, 8-bit packed glyph texture)
+// ============================================================================
+//
+// Internal, RAM-only glyph texture that the font system manages itself:
+//   - 8-bit single-channel coverage, default 4096x4096 per layer, N layers grow
+//     on demand (width/height/limits configurable).
+//   - Cache key = (font index, HarfBuzz glyph id, size, synthetic style).
+//     Each registered face is an independent "font" addressed by font index.
+//   - Owns loaded TTF/OTF faces (a font registry) and an internal fallback chain.
+//   - Auto fallback to platform system fonts when a glyph is missing; the
+//     fallback list is user-extensible via add_system_font().
+//   - Bold/italic: real variant preferred, faux synthesis (dilate/shear) fallback.
+//   - GC: frame-clock LRU; idle glyphs (and over-budget memory) are reclaimed.
+//
+// GPU upload is the consumer's job: read layer_data()/take_dirty_regions() and
+// mirror to an R8 texture array.
+
+struct GlyphAtlasConfig {
+    int    layer_width     = 4096;   // per-layer width  (user-settable)
+    int    layer_height    = 4096;   // per-layer height (user-settable)
+    int    initial_layers  = 1;      // layers allocated up front
+    int    max_layers      = 256;    // N grows up to here
+    int    padding         = 1;      // cleared border (px) on every side of each glyph
+                                     // (prevents bilinear sampling from bleeding in a neighbour)
+    int    gc_idle_frames  = 600;    // glyph untouched this many frames => GC-eligible
+    size_t gc_budget_bytes = 0;      // 0 = grow to max_layers; else GC LRU over budget
+};
+
+// One packed glyph within the RAM atlas (single-channel coverage).
+struct GlyphSlot {
+    int   layer = -1;                       // atlas layer (-1 = invalid)
+    int   px = 0, py = 0, pw = 0, ph = 0;   // pixel rect within the layer
+    int   bearing_x = 0, bearing_y = 0;     // FreeType bitmap_left / bitmap_top
+    float advance_x = 0.0f;                 // horizontal advance at this size
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;   // normalised UVs within the layer
+    bool  valid() const { return layer >= 0; }
+};
+
+// A changed rectangle the consumer should re-upload to its GPU mirror.
+struct GlyphDirtyRegion { int layer = 0, x = 0, y = 0, w = 0, h = 0; };
+
+class IGlyphAtlasManager {
+public:
+    virtual ~IGlyphAtlasManager() = default;
+
+    // ---- Font registry (font index is part of the cache key) ----
+
+    // Register an already-loaded face. If take_ownership, the manager destroys
+    // it (via the library) on shutdown. Returns the font index (>=0), or the
+    // existing index if the same face pointer was already registered.
+    virtual int  add_font(IFontFace* face, bool take_ownership = false) = 0;
+
+    // Load + register a TTF/OTF. Manager owns it. Returns font index (<0 on failure).
+    virtual int  load_font_file(const char* path, int face_index = 0) = 0;
+    virtual int  load_font_memory(const void* data, size_t size, int face_index = 0) = 0;
+
+    // Add a system font family to the (user-priority) fallback list. Loaded lazily
+    // the first time a glyph miss needs it.
+    virtual void add_system_font(const char* family,
+                                 FontWeight weight = FontWeight::Regular,
+                                 FontStyle  style  = FontStyle::Normal) = 0;
+
+    virtual IFontFace* get_font(int font_idx) const = 0;
+    virtual int        font_count() const = 0;
+
+    // Fallback chain over the registry (primary = font index 0). Hand it to the
+    // text shaper so each PositionedGlyph.font_index equals a manager font index.
+    virtual IFontFallbackChain* fallback_chain() = 0;
+
+    // ---- Glyph acquisition (rasterise-on-miss, pack, return slot) ----
+
+    // Acquire by glyph id (shaper output). Returns nullptr only on hard failure.
+    virtual const GlyphSlot* acquire(int font_idx, uint32_t glyph_id, float size,
+                                     FontWeight weight = FontWeight::Regular,
+                                     FontStyle  style  = FontStyle::Normal) = 0;
+
+    // Acquire by Unicode codepoint: resolves the glyph in font_idx, then walks the
+    // fallback chain / system fonts on a miss. Writes the font that supplied it.
+    virtual const GlyphSlot* acquire_codepoint(int font_idx, uint32_t codepoint, float size,
+                                               int* out_resolved_font_idx = nullptr,
+                                               FontWeight weight = FontWeight::Regular,
+                                               FontStyle  style  = FontStyle::Normal) = 0;
+
+    // ---- RAM texture access (8-bit) + dirty tracking ----
+
+    virtual const uint8_t* layer_data(int layer) const = 0;  // width*height bytes, row-major
+    virtual int  width()  const = 0;
+    virtual int  height() const = 0;
+    virtual int  layer_count() const = 0;
+
+    // Append all dirty rectangles accumulated since the last call, then clear them.
+    virtual void take_dirty_regions(std::vector<GlyphDirtyRegion>& out) = 0;
+
+    // ---- GC / lifecycle ----
+
+    virtual void   begin_frame() = 0;        // advance the LRU frame clock
+    virtual int    collect_garbage() = 0;    // evict idle / over-budget glyphs; returns count freed
+    virtual void   clear() = 0;              // drop all glyphs (RAM allocation retained)
+    virtual size_t memory_usage() const = 0; // bytes of packed glyph coverage in use
+    virtual int    glyph_count() const = 0;
+};
+
+// Create a RAM glyph atlas manager. The library is used to load fallback/variant
+// fonts; it must outlive the manager. Returns nullptr if library is null.
+IGlyphAtlasManager* create_glyph_atlas_manager(IFontLibrary* library,
+                                               const GlyphAtlasConfig& cfg = GlyphAtlasConfig());
+void destroy_glyph_atlas_manager(IGlyphAtlasManager* mgr);
+
+// ============================================================================
 // Font System (Combines all interfaces)
 // ============================================================================
 

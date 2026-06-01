@@ -303,32 +303,39 @@ void WidgetRenderInfo::flatten(IGuiTextRasterizer* rasterizer) {
             float px = x(box_min(t.dest)), py = y(box_min(t.dest));
             float pw = box_width(t.dest),  ph = box_height(t.dest);
 
-            // Rasterize text body
+            // Rasterize text body into per-glyph quads (falls back to a single
+            // whole-string quad for rasterizers that don't override rasterize_glyphs).
             if (!t.text.empty()) {
-                auto q = rasterizer->rasterize(t.text.c_str(), t.font_size, nullptr);
-                if (q.valid()) {
+                static thread_local std::vector<IGuiTextRasterizer::GlyphQuad> quads;
+                quads.clear();
+                float tw = 0, th = 0;
+                if (rasterizer->rasterize_glyphs(t.text.c_str(), t.font_size, nullptr,
+                                                 quads, &tw, &th) && !quads.empty()) {
                     float tx = px, ty = py;
-                    // Alignment
+                    // Alignment of the whole text block within dest.
                     switch (t.alignment) {
                         case Alignment::Center:
-                            tx = px + (pw - q.width) * 0.5f;
-                            ty = py + (ph - q.height) * 0.5f;
+                            tx = px + (pw - tw) * 0.5f;
+                            ty = py + (ph - th) * 0.5f;
                             break;
                         case Alignment::CenterRight:
-                            tx = px + pw - q.width;
-                            ty = py + (ph - q.height) * 0.5f;
+                            tx = px + pw - tw;
+                            ty = py + (ph - th) * 0.5f;
                             break;
                         default: // CenterLeft and others
                             tx = px + 2;
-                            ty = py + (ph - q.height) * 0.5f;
+                            ty = py + (ph - th) * 0.5f;
                             break;
                     }
-                    textures.push_back({TextureSourceType::Memory, nullptr, nullptr, 0,
-                                        q.atlas_layer,
-                                        make_box(tx, ty, (float)q.width, (float)q.height),
-                                        make_box(q.u0, q.v0, q.u1 - q.u0, q.v1 - q.v0),
-                                        Vec4(t.color.x, t.color.y, t.color.z, t.color.w),
-                                        t.depth, t.clip});
+                    for (const auto& gq : quads) {
+                        if (gq.atlas_layer < 0 || gq.w <= 0 || gq.h <= 0) continue;
+                        textures.push_back({TextureSourceType::Memory, nullptr, nullptr, 0,
+                                            gq.atlas_layer,
+                                            make_box(tx + gq.x, ty + gq.y, gq.w, gq.h),
+                                            make_box(gq.u0, gq.v0, gq.u1 - gq.u0, gq.v1 - gq.v0),
+                                            Vec4(t.color.x, t.color.y, t.color.z, t.color.w),
+                                            t.depth, t.clip});
+                    }
                 }
             }
 

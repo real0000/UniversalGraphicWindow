@@ -65,10 +65,12 @@ in vec4 vColor;
 out vec4 FragColor;
 uniform sampler2DArray uTexture;
 void main() {
-    if (TexCoord.z >= 0.0)
-        FragColor = texture(uTexture, TexCoord) * vColor;
-    else
+    if (TexCoord.z >= 0.0) {
+        float a = texture(uTexture, TexCoord).r;   // R8 glyph atlas
+        FragColor = vec4(vColor.rgb, vColor.a * a);
+    } else {
         FragColor = vColor;
+    }
 }
 )";
 
@@ -267,59 +269,101 @@ private:
 };
 
 static QuadRenderer*     g_renderer    = nullptr;
-static font::IFontAtlas* g_font_atlas  = nullptr;
+// RAM glyph atlas manager + R8 GPU mirror (same pattern as gui.cpp).
+static font::IGlyphAtlasManager* g_glyph_mgr = nullptr;
+static font::ITextShaper*        g_shaper    = nullptr;
+static GLuint g_atlas_tex       = 0;
+static int    g_atlas_gl_layers = 0;
+static font::IFontFace* g_font_ui = nullptr;   // primary UI face (font index 0)
 static float g_time = 0;
 static int   g_window_h = 720;        // logical px
 static float g_dpi_scale = 1.0f;       // physical / logical
 
 // ============================================================================
-// Text rendering (same pattern as gui.cpp)
+// Glyph-atlas text helpers (per-glyph, R8 atlas) — same pattern as gui.cpp
 // ============================================================================
 
-struct TextEntry {
-    int layer=-1, width=0, height=0;
-    float u0=0, v0=0, u1=0, v1=0;
-};
-
-static font::IFontRenderer* g_font_renderer = nullptr;
-static font::IFontFace* g_font_ui = nullptr;
-static font::IFontFace* g_font_small = nullptr;
-static std::unordered_map<std::string, TextEntry> g_text_cache;
-
-static TextEntry get_text_entry(const char* text, font::IFontFace* face) {
-    if (!text || !text[0] || !face || !g_font_renderer) return {};
-    std::string key = std::string(text) + "|" + std::to_string((int)face->get_size());
-    auto it = g_text_cache.find(key);
-    if (it != g_text_cache.end()) return it->second;
-
-    font::RenderOptions ropts;
-    ropts.antialias = font::AntiAliasMode::Grayscale;
-    ropts.output_format = font::PixelFormat::RGBA8;
-    font::TextLayoutOptions lopts;
-
-    void* pixels = nullptr; int w=0, h=0; font::PixelFormat fmt;
-    Vec4 white(1,1,1,1);
-    font::Result r = g_font_renderer->render_text(face, text, -1, white, ropts, lopts, &pixels, &w, &h, &fmt);
-    if (r != font::Result::Success || !pixels || w<=0 || h<=0) {
-        if (pixels) g_font_renderer->free_bitmap(pixels);
-        return {};
+static void shape_to_quads(const char* text, float size,
+                           std::vector<IGuiTextRasterizer::GlyphQuad>& out,
+                           float& out_w, float& out_h) {
+    out.clear(); out_w = 0; out_h = 0;
+    if (!text || !text[0] || !g_shaper || !g_glyph_mgr) return;
+    font::IFontFace* primary = g_glyph_mgr->get_font(0);
+    if (!primary) return;
+    primary->set_size(size);
+    std::vector<font::PositionedGlyph> glyphs;
+    g_shaper->shape_text(primary, text, -1, glyphs, font::TextLayoutOptions());
+    const font::FontMetrics& fm = primary->get_metrics();
+    float ascent = fm.ascender, max_x = 0;
+    for (const auto& pg : glyphs) {
+        float end_x = pg.x + pg.advance;
+        if (end_x > max_x) max_x = end_x;
+        const font::GlyphSlot* s = g_glyph_mgr->acquire(pg.font_index, pg.glyph_index, size);
+        if (!s || s->pw <= 0 || s->ph <= 0) continue;
+        IGuiTextRasterizer::GlyphQuad q;
+        q.atlas_layer = s->layer;
+        q.x = pg.x + s->bearing_x;
+        q.y = ascent - s->bearing_y;
+        q.w = (float)s->pw; q.h = (float)s->ph;
+        q.u0 = s->u0; q.v0 = s->v0; q.u1 = s->u1; q.v1 = s->v1;
+        out.push_back(q);
     }
-    font::AtlasEntry ar = g_font_atlas->add(pixels, w, h);
-    g_font_renderer->free_bitmap(pixels);
-    if (!ar.valid()) return {};
-
-    TextEntry entry; entry.layer=ar.layer; entry.width=w; entry.height=h;
-    entry.u0=ar.u0; entry.v0=ar.v0; entry.u1=ar.u1; entry.v1=ar.v1;
-    g_text_cache[key] = entry;
-    return entry;
+    out_w = max_x;
+    out_h = fm.ascender - fm.descender;
 }
 
-static float measure_text_width_n(const char* text, int n, font::IFontFace* face = nullptr) {
-    if (!text || n<=0) return 0;
-    if (!face) face = g_font_ui;
-    std::string sub(text, std::min(n, (int)strlen(text)));
-    TextEntry e = get_text_entry(sub.c_str(), face);
-    return (float)e.width;
+static float measure_first_n_advance(const char* text, int n, float size) {
+    if (!text || n <= 0) return 0.0f;
+    int len = (int)strlen(text);
+    if (n > len) n = len;
+    std::string sub(text, n);
+    std::vector<IGuiTextRasterizer::GlyphQuad> q; float w = 0, h = 0;
+    shape_to_quads(sub.c_str(), size, q, w, h);
+    return w;
+}
+
+static void sync_atlas_to_gpu() {
+    if (!g_glyph_mgr) return;
+    const int W = g_glyph_mgr->width(), H = g_glyph_mgr->height();
+    const int layers = g_glyph_mgr->layer_count();
+    if (layers < 1) return;
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (g_atlas_tex == 0 || layers > g_atlas_gl_layers) {
+        if (g_atlas_tex) glDeleteTextures(1, &g_atlas_tex);
+        glGenTextures(1, &g_atlas_tex);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, g_atlas_tex);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_R8, W, H, layers, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        for (int l = 0; l < layers; ++l) {
+            const uint8_t* d = g_glyph_mgr->layer_data(l);
+            if (d) glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, l, W, H, 1, GL_RED, GL_UNSIGNED_BYTE, d);
+        }
+        g_atlas_gl_layers = layers;
+        std::vector<font::GlyphDirtyRegion> drop; g_glyph_mgr->take_dirty_regions(drop);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+        return;
+    }
+    std::vector<font::GlyphDirtyRegion> dirty;
+    g_glyph_mgr->take_dirty_regions(dirty);
+    if (dirty.empty()) return;
+    glBindTexture(GL_TEXTURE_2D_ARRAY, g_atlas_tex);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, W);
+    for (const auto& r : dirty) {
+        const uint8_t* base = g_glyph_mgr->layer_data(r.layer);
+        if (!base) continue;
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, r.x, r.y, r.layer, r.w, r.h, 1,
+                        GL_RED, GL_UNSIGNED_BYTE, base + (size_t)r.y * W + r.x);
+    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+}
+
+static void cleanup_glyph_atlas() {
+    if (g_atlas_tex) { glDeleteTextures(1, &g_atlas_tex); g_atlas_tex = 0; }
+    g_atlas_gl_layers = 0;
 }
 
 // ============================================================================
@@ -376,28 +420,28 @@ static void draw_render_info(const gui::WidgetRenderInfo& ri) {
 // ============================================================================
 
 struct FontTextMeasurer : ITextMeasurer {
-    font::IFontFace* face = nullptr;
-    Vec2 measure_text(const char* text, float, const char*) override {
-        if (!text || !text[0] || !face) return {0,0};
-        TextEntry e = get_text_entry(text, face);
-        return {(float)e.width, (float)e.height};
+    Vec2 measure_text(const char* text, float font_size, const char*) override {
+        if (!text || !text[0]) return {0,0};
+        std::vector<IGuiTextRasterizer::GlyphQuad> q; float w = 0, h = 0;
+        shape_to_quads(text, font_size, q, w, h);
+        return {w, h};
     }
     float get_line_height(float font_size, const char*) override { return font_size * 1.2f; }
 };
 
 struct GuiTextRasterizer : IGuiTextRasterizer {
-    font::IFontFace* face_ui = nullptr;
-    font::IFontFace* face_small = nullptr;
+    TextQuad rasterize(const char*, float, const char*) override { return TextQuad{}; }
 
-    TextQuad rasterize(const char* text, float font_size, const char*) override {
-        font::IFontFace* face = (font_size <= 10.f) ? face_small : face_ui;
-        TextEntry e = get_text_entry(text, face);
-        TextQuad q; q.atlas_layer=e.layer; q.u0=e.u0; q.v0=e.v0; q.u1=e.u1; q.v1=e.v1;
-        q.width=e.width; q.height=e.height; return q;
+    bool rasterize_glyphs(const char* text, float font_size, const char*,
+                          std::vector<GlyphQuad>& out_quads, float* out_w, float* out_h) override {
+        float w = 0, h = 0;
+        shape_to_quads(text, font_size, out_quads, w, h);
+        if (out_w) *out_w = w;
+        if (out_h) *out_h = h;
+        return !out_quads.empty();
     }
     float measure_advance(const char* text, int n, float font_size, const char*) override {
-        font::IFontFace* face = (font_size <= 10.f) ? face_small : face_ui;
-        return measure_text_width_n(text, n, face);
+        return measure_first_n_advance(text, n, font_size);
     }
     float get_time() const override { return g_time; }
 };
@@ -593,54 +637,6 @@ int main() {
     QuadRenderer renderer;
     if (!renderer.init()) { printf("Failed to init renderer\n"); win->destroy(); return 1; }
 
-    // Font atlas with GL callbacks
-    {
-        GLint max_size, max_layers;
-        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_size);
-        glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &max_layers);
-        int tile_w = std::min(max_size, 4096);
-        int tile_h = std::min(max_size, 4096);
-
-        g_font_atlas = font::create_font_atlas();
-        g_font_atlas->set_tile_size(tile_w, tile_h);
-        g_font_atlas->set_max_layers(std::min(max_layers, 2048));
-        g_font_atlas->set_callbacks(
-            [](int tw, int th, int depth) -> uintptr_t {
-                GLuint tex; glGenTextures(1, &tex);
-                glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
-                glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, tw, th, depth, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-                return (uintptr_t)tex;
-            },
-            [](uintptr_t old_handle, int tw, int th, int old_depth, int new_depth) -> uintptr_t {
-                GLuint old_tex = (GLuint)old_handle, new_tex;
-                glGenTextures(1, &new_tex);
-                glBindTexture(GL_TEXTURE_2D_ARRAY, new_tex);
-                glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, tw, th, new_depth, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-                if (old_tex && old_depth > 0)
-                    glCopyImageSubData(old_tex, GL_TEXTURE_2D_ARRAY, 0,0,0,0, new_tex, GL_TEXTURE_2D_ARRAY, 0,0,0,0, tw, th, old_depth);
-                glDeleteTextures(1, &old_tex);
-                return (uintptr_t)new_tex;
-            },
-            [](uintptr_t handle, const void* rgba8, int x, int y, int layer, int w, int h) {
-                GLuint tex = (GLuint)handle;
-                glBindTexture(GL_TEXTURE_2D_ARRAY, tex);
-                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, x, y, layer, w, h, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba8);
-                glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-            },
-            [](uintptr_t handle) { GLuint tex = (GLuint)handle; if (tex) glDeleteTextures(1, &tex); }
-        );
-    }
     g_renderer = &renderer;
 
     // Font system
@@ -648,21 +644,27 @@ int main() {
     font::IFontLibrary* font_lib = font::create_font_library(font::FontBackend::Auto, &font_result);
     if (!font_lib) { printf("Failed to create font library\n"); renderer.destroy(); win->destroy(); return 1; }
 
-    g_font_renderer = font::create_font_renderer(font_lib, &font_result);
-    if (!g_font_renderer) { printf("Failed to create font renderer\n"); font::destroy_font_library(font_lib); renderer.destroy(); win->destroy(); return 1; }
+    // RAM glyph atlas manager (8-bit); GPU mirror is an R8 texture array.
+    {
+        GLint max_size = 2048, max_layers = 256;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_size);
+        glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &max_layers);
+        font::GlyphAtlasConfig acfg;
+        acfg.layer_width  = std::min(max_size, 2048);
+        acfg.layer_height = std::min(max_size, 2048);
+        acfg.max_layers   = std::min(max_layers, 256);
+        g_glyph_mgr = font::create_glyph_atlas_manager(font_lib, acfg);
+    }
 
     g_font_ui = font_lib->load_system_font(font::FontDescriptor::create("Segoe UI", 14.f), nullptr);
     if (!g_font_ui) g_font_ui = font_lib->load_system_font(font::FontDescriptor::create("Arial", 14.f), nullptr);
     if (!g_font_ui) g_font_ui = font_lib->get_default_font(14.f, nullptr);
 
-    g_font_small = font_lib->load_system_font(font::FontDescriptor::create("Segoe UI", 12.f), nullptr);
-    if (!g_font_small) g_font_small = font_lib->load_system_font(font::FontDescriptor::create("Arial", 12.f), nullptr);
-    if (!g_font_small) g_font_small = font_lib->get_default_font(12.f, nullptr);
+    if (!g_font_ui || !g_glyph_mgr) { printf("Failed to load fonts\n"); font::destroy_glyph_atlas_manager(g_glyph_mgr); font::destroy_font_library(font_lib); renderer.destroy(); win->destroy(); return 1; }
+    g_glyph_mgr->add_font(g_font_ui, /*take_ownership=*/true);
 
-    if (!g_font_ui || !g_font_small) { printf("Failed to load fonts\n"); font::destroy_font_renderer(g_font_renderer); font::destroy_font_library(font_lib); renderer.destroy(); win->destroy(); return 1; }
-
-    font::IFontFallbackChain* fallback = font::create_fallback_chain_with_defaults(font_lib, g_font_ui, 14.f);
-    if (fallback) g_font_renderer->set_fallback_chain(fallback);
+    g_shaper = font::create_text_shaper(font_lib, &font_result);
+    if (g_shaper) g_shaper->set_fallback_chain(g_glyph_mgr->fallback_chain());
 
     // GUI context
     GuiResult gresult;
@@ -680,8 +682,8 @@ int main() {
     ctx->get_root()->set_bounds(make_box(0,0,vw,vh));
 
     // Text measurer & rasterizer
-    FontTextMeasurer text_measurer; text_measurer.face = g_font_ui;
-    GuiTextRasterizer text_rasterizer; text_rasterizer.face_ui = g_font_ui; text_rasterizer.face_small = g_font_small;
+    FontTextMeasurer text_measurer;
+    GuiTextRasterizer text_rasterizer;
     ctx->set_text_rasterizer(&text_rasterizer);
 
     // Build layout
@@ -814,6 +816,8 @@ int main() {
         ctx->begin_frame(dt);
         ctx->end_frame();
 
+        g_glyph_mgr->begin_frame();   // advance glyph-atlas GC clock
+
         // Render: glViewport in physical px, projection in logical px.
         glViewport(0, 0, sw_p, sh_p);
         glClearColor(0.12f, 0.12f, 0.13f, 1.f);
@@ -823,19 +827,22 @@ int main() {
         renderer.set_projection(sw, sh);
 
         draw_render_info(ctx->get_render_info());
-        g_renderer->flush_all((GLuint)g_font_atlas->get_gpu_handle());
+        sync_atlas_to_gpu();
+        g_renderer->flush_all(g_atlas_tex);
+
+        static unsigned frame_counter = 0;
+        if ((++frame_counter % 240) == 0) g_glyph_mgr->collect_garbage();
 
         gfx->present();
     }
 
     // Cleanup
-    g_text_cache.clear();
-    font::destroy_font_atlas(g_font_atlas); g_font_atlas = nullptr;
+    cleanup_glyph_atlas();
     renderer.destroy(); g_renderer = nullptr;
     ctx->detach_window(win);
     destroy_gui_context(ctx);
-    font::destroy_font_renderer(g_font_renderer); g_font_renderer = nullptr;
-    if (fallback) font::destroy_fallback_chain(fallback);
+    font::destroy_text_shaper(g_shaper); g_shaper = nullptr;
+    font::destroy_glyph_atlas_manager(g_glyph_mgr); g_glyph_mgr = nullptr;
     font::destroy_font_library(font_lib);
     win->destroy();
 

@@ -1,8 +1,9 @@
 /*
- * font_harfbuzz.cpp - HarfBuzz text shaper with optional FriBidi BiDi support
+ * font_harfbuzz.cpp - HarfBuzz text shaper with optional libunibreak line breaking
  *
  * Provides proper text shaping (ligatures, complex scripts, combining characters)
- * via HarfBuzz and optional bidirectional text reordering via FriBidi.
+ * via HarfBuzz and Unicode line-break opportunities (UAX #14) via libunibreak,
+ * which enables correct wrapping of CJK and other scripts without spaces.
  */
 
 #include "font.hpp"
@@ -27,8 +28,8 @@
 #include <algorithm>
 #include <vector>
 
-#ifdef FONT_SUPPORT_FRIBIDI
-#include <fribidi.h>
+#ifdef FONT_SUPPORT_LIBUNIBREAK
+#include <linebreak.h>
 #endif
 
 namespace font {
@@ -121,6 +122,17 @@ public:
         if (text_length < 0) text_length = static_cast<int>(strlen(text));
         if (text_length == 0) return;
 
+        // Shaping reads advances/positions at each face's current size, so every
+        // font that may participate (primary + fallbacks) must match the size of
+        // the text being shaped before we build/refresh its hb_font.
+        float shape_size = font->get_size();
+        if (fallback_chain_) {
+            for (int i = 0; i < fallback_chain_->get_font_count(); ++i) {
+                IFontFace* f = fallback_chain_->get_font(i);
+                if (f && f->get_size() != shape_size) f->set_size(shape_size);
+            }
+        }
+
         // Decode UTF-8 to codepoints for fallback analysis and BiDi
         std::vector<uint32_t> codepoints;
         std::vector<int> byte_offsets; // byte offset of each codepoint in text
@@ -139,27 +151,10 @@ public:
         int ulen = static_cast<int>(codepoints.size());
         if (ulen == 0) return;
 
-#ifdef FONT_SUPPORT_FRIBIDI
-        // BiDi reordering
-        FriBidiParType base_dir = (options.direction == TextDirection::RightToLeft)
-                                  ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_LTR;
-        std::vector<FriBidiChar> fribidi_input(ulen);
-        for (int i = 0; i < ulen; i++)
-            fribidi_input[i] = static_cast<FriBidiChar>(codepoints[i]);
-
-        std::vector<FriBidiChar> visual(ulen);
-        std::vector<FriBidiStrIndex> visual_to_logical(ulen);
-        std::vector<FriBidiLevel> levels(ulen);
-        fribidi_log2vis(fribidi_input.data(), ulen, &base_dir,
-                        visual.data(), nullptr, visual_to_logical.data(), levels.data());
-
-        // Use visual-order codepoints for shaping
-        std::vector<uint32_t> ordered_cps(ulen);
-        for (int i = 0; i < ulen; i++)
-            ordered_cps[i] = static_cast<uint32_t>(visual[i]);
-#else
+        // Text is shaped in logical order. HarfBuzz still applies per-run RTL
+        // ordering via the buffer direction; line-break opportunities are
+        // computed separately by libunibreak in layout_text().
         const std::vector<uint32_t>& ordered_cps = codepoints;
-#endif
 
         // If we have a fallback chain, split into runs by font
         if (fallback_chain_ && fallback_chain_->get_font_count() > 1) {
@@ -203,38 +198,44 @@ public:
             std::vector<PositionedGlyph> line_glyphs;
             shape_text(font, ptr, line_len, line_glyphs, options);
 
-            // Word wrapping
-            if (options.max_width > 0 && options.wrap_words) {
+            // Word wrapping at Unicode line-break opportunities (libunibreak).
+            // Falls back to ASCII-space breaks when libunibreak is unavailable.
+            if (options.max_width > 0 && options.wrap_words && !line_glyphs.empty()) {
+                // can_break[i] == 1 means a new line may begin at glyph i.
+                std::vector<char> can_break;
+                compute_break_opportunities(ptr, line_len, line_glyphs, can_break);
+
                 float x = 0;
-                int last_space = -1;
-                float last_space_x = 0;
+                int last_break = -1;      // glyph index where the next line may start
+                float last_break_x = 0;   // line width up to (excluding) that glyph
 
                 for (int i = 0; i < static_cast<int>(line_glyphs.size()); i++) {
-                    if (line_glyphs[i].codepoint == ' ') {
-                        last_space = i;
-                        last_space_x = x;
+                    if (i > 0 && can_break[i]) {
+                        last_break = i;
+                        last_break_x = x;
                     }
                     x += line_glyphs[i].advance;
-                    if (x > options.max_width && last_space >= 0) {
-                        // Emit glyphs up to last_space
-                        for (int j = 0; j <= last_space; j++) {
+                    if (x > options.max_width && last_break > 0) {
+                        // Emit glyphs before the break point
+                        for (int j = 0; j < last_break; j++) {
                             PositionedGlyph pg = line_glyphs[j];
                             pg.y = y;
                             out_glyphs.push_back(pg);
                         }
-                        if (last_space_x > max_x) max_x = last_space_x;
+                        if (last_break_x > max_x) max_x = last_break_x;
                         y += line_h;
                         line_count++;
 
-                        // Re-layout remaining glyphs
-                        float offset = line_glyphs[last_space + 1].x;
-                        for (int j = last_space + 1; j < static_cast<int>(line_glyphs.size()); j++) {
+                        // Re-layout remaining glyphs to start at x = 0
+                        float offset = line_glyphs[last_break].x;
+                        for (int j = last_break; j < static_cast<int>(line_glyphs.size()); j++) {
                             line_glyphs[j].x -= offset;
                         }
-                        line_glyphs.erase(line_glyphs.begin(), line_glyphs.begin() + last_space + 1);
+                        line_glyphs.erase(line_glyphs.begin(), line_glyphs.begin() + last_break);
+                        can_break.erase(can_break.begin(), can_break.begin() + last_break);
                         i = -1;
                         x = 0;
-                        last_space = -1;
+                        last_break = -1;
                     }
                 }
             }
@@ -327,12 +328,34 @@ private:
     hb_font_t* get_or_create_hb_font(IFontFace* font) {
         // Check cache
         for (auto& e : hb_font_cache_) {
-            if (e.face == font) return e.hb_font;
+            if (e.face == font) {
+                // The cache is keyed by face only, but the face's size may have
+                // changed since the hb_font was created — resync the scale.
+                sync_hb_font_size(e.hb_font, font);
+                return e.hb_font;
+            }
         }
         // Create new
         hb_font_t* hf = create_hb_font_for(font);
         hb_font_cache_.push_back({font, hf});
         return hf;
+    }
+
+    // Resync a cached hb_font to its face's current size. Without this, shaping a
+    // face at a second size (e.g. a GUI mixing 12pt and 14pt) reuses the stale
+    // scale baked in at creation, giving wrong advances/positions.
+    static void sync_hb_font_size(hb_font_t* hf, IFontFace* font) {
+        if (!hf || !font) return;
+#ifdef FONT_SUPPORT_FREETYPE
+        if (font->get_native_handle()) {
+            // FreeType-backed: the FT_Face size is set by the caller before
+            // shaping; this refreshes hb's cached scale/metrics from it.
+            hb_ft_font_changed(hf);
+            return;
+        }
+#endif
+        float size = font->get_size();
+        hb_font_set_scale(hf, static_cast<int>(size * 64), static_cast<int>(size * 64));
     }
 
     static hb_font_t* create_hb_font_for(IFontFace* font) {
@@ -374,7 +397,7 @@ private:
 
     // Legacy single-font ensure (for backward compat)
     void ensure_hb_font(IFontFace* font) {
-        if (current_font_ == font && hb_font_) return;
+        if (current_font_ == font && hb_font_) { sync_hb_font_size(hb_font_, font); return; }
         if (hb_font_) { hb_font_destroy(hb_font_); hb_font_ = nullptr; }
         hb_font_ = create_hb_font_for(font);
         current_font_ = font;
@@ -390,6 +413,45 @@ private:
             int bytes = codepoint_to_utf8(cp, buf);
             for (int j = 0; j < bytes; j++) out.push_back(buf[j]);
         }
+    }
+
+    // --- Line-break opportunities (libunibreak / UAX #14) ---
+
+    // Fill `out` (one flag per glyph) where 1 means a line may break *before*
+    // that glyph. `text`/`text_len` is the original UTF-8 for the line; each
+    // glyph's `cluster` is a byte offset into it.
+    static void compute_break_opportunities(const char* text, int text_len,
+                                            const std::vector<PositionedGlyph>& glyphs,
+                                            std::vector<char>& out) {
+        out.assign(glyphs.size(), 0);
+#ifdef FONT_SUPPORT_LIBUNIBREAK
+        if (text_len <= 0 || glyphs.empty()) return;
+
+        // brks[i] describes the break status *after* the unit at byte i.
+        std::vector<char> brks(static_cast<size_t>(text_len));
+        set_linebreaks_utf8(reinterpret_cast<const utf8_t*>(text),
+                            static_cast<size_t>(text_len), nullptr, brks.data());
+
+        for (size_t g = 0; g < glyphs.size(); ++g) {
+            // Never break in the middle of a shaping cluster (ligatures, marks).
+            if (g > 0 && glyphs[g].cluster == glyphs[g - 1].cluster) continue;
+
+            int c = glyphs[g].cluster;  // byte offset of this glyph's first char
+            // A break before byte offset c is permitted when the preceding
+            // character (its final byte at c-1) carries a break opportunity.
+            if (c > 0 && c <= text_len) {
+                char b = brks[c - 1];
+                if (b == LINEBREAK_ALLOWBREAK || b == LINEBREAK_MUSTBREAK)
+                    out[g] = 1;
+            }
+        }
+#else
+        // Fallback without libunibreak: allow breaks after ASCII spaces only.
+        for (size_t g = 1; g < glyphs.size(); ++g) {
+            if (glyphs[g - 1].codepoint == ' ')
+                out[g] = 1;
+        }
+#endif
     }
 
     // --- Fallback run splitting and shaping ---
@@ -444,6 +506,19 @@ private:
         std::vector<FontRun> runs;
         compute_font_runs(cps, runs);
 
+        // Byte offset of each codepoint within the UTF-8 text, so glyph clusters
+        // can be reported as absolute byte offsets into the line (needed by the
+        // libunibreak line-break mapping in layout_text).
+        std::vector<int> cp_byte_offsets(cps.size());
+        {
+            int off = 0;
+            char tmp[4];
+            for (size_t i = 0; i < cps.size(); ++i) {
+                cp_byte_offsets[i] = off;
+                off += codepoint_to_utf8(cps[i], tmp);
+            }
+        }
+
         float x_offset = 0;
         for (auto& run : runs) {
             IFontFace* run_font = fallback_chain_->get_font(run.font_index);
@@ -468,7 +543,7 @@ private:
             for (auto& pg : run_glyphs) {
                 pg.x += x_offset;
                 pg.font_index = static_cast<uint16_t>(run.font_index);
-                pg.cluster += run.start;
+                pg.cluster += cp_byte_offsets[run.start];
                 float end_x = pg.x + pg.advance;
                 if (end_x - x_offset > run_width)
                     run_width = end_x - x_offset;

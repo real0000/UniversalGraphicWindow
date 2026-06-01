@@ -11,10 +11,7 @@ CTestTestfile.cmake
 _deps
 CMakeUserPresets.json
 build/
-build_dbg/
-build_rel/
-build_linux/
-build_wayland/
+build_*/
 third/
 
 # CLion

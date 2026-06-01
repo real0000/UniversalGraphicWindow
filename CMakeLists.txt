@@ -40,7 +40,7 @@ option(WINDOW_ENABLE_VIRTUAL_KEYBOARD "Enable virtual keyboard support" ON)
 option(WINDOW_ENABLE_FONT "Enable font rendering support" ON)
 option(WINDOW_ENABLE_FREETYPE "Enable FreeType2 font backend" OFF)
 option(WINDOW_ENABLE_HARFBUZZ "Enable HarfBuzz text shaping" ON)
-option(WINDOW_ENABLE_FRIBIDI "Enable FriBidi bidirectional text" ON)
+option(WINDOW_ENABLE_LIBUNIBREAK "Enable libunibreak Unicode line breaking" ON)
 
 # SIMD math acceleration options
 option(WINDOW_MATH_SSE "Enable SSE SIMD acceleration for math (x86/x64)" ON)
@@ -299,129 +299,32 @@ if(WINDOW_ENABLE_HARFBUZZ AND WINDOW_ENABLE_FONT)
     set(HARFBUZZ_AVAILABLE TRUE)
 endif()
 
-# FriBidi (bidirectional text)
-if(WINDOW_ENABLE_FRIBIDI AND WINDOW_ENABLE_FONT)
-    message(STATUS "FriBidi - fetching from GitHub...")
-    window_fetch_content(fribidi
-        GIT_REPOSITORY https://github.com/fribidi/fribidi.git
-        GIT_TAG v1.0.15
-        GIT_SHALLOW TRUE
+# libunibreak (Unicode line breaking, UAX #14)
+if(WINDOW_ENABLE_LIBUNIBREAK AND WINDOW_ENABLE_FONT)
+    message(STATUS "libunibreak - fetching from GitHub...")
+    window_fetch_content(unibreak
+        GIT_REPOSITORY https://github.com/adah1972/libunibreak.git
+        GIT_TAG libunibreak_7_0
     )
-        FetchContent_GetProperties(fribidi)
-        if(NOT fribidi_POPULATED)
-            FetchContent_Populate(fribidi)
-        endif()
-        # FriBidi uses Meson natively; build a minimal CMake target from sources
-        set(FRIBIDI_SRC_DIR "${fribidi_SOURCE_DIR}")
-        set(FRIBIDI_BUILD_DIR "${fribidi_BINARY_DIR}")
-
-        # Generate fribidi-unicode-version.h (needed by generators and library)
-        if(NOT EXISTS "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h")
-            file(WRITE "${FRIBIDI_SRC_DIR}/lib/fribidi-unicode-version.h"
-                "#ifndef FRIBIDI_UNICODE_VERSION_H\n"
-                "#define FRIBIDI_UNICODE_VERSION_H\n"
-                "#define FRIBIDI_UNICODE_VERSION \"15.1.0\"\n"
-                "#define FRIBIDI_UNICODE_MAJOR_VERSION 15\n"
-                "#define FRIBIDI_UNICODE_MINOR_VERSION 1\n"
-                "#define FRIBIDI_UNICODE_MICRO_VERSION 0\n"
-                "#endif\n"
-            )
-        endif()
-
-        # Generate .tab.i files from Unicode data (git clone does not include them)
-        set(FRIBIDI_GEN_DIR "${FRIBIDI_SRC_DIR}/gen.tab")
-        set(FRIBIDI_UNIDATA_DIR "${FRIBIDI_GEN_DIR}/unidata")
-        set(FRIBIDI_COMPRESSION "2")
-        set(FRIBIDI_GEN_NATIVE_ARGS -DHAVE_STRINGIZE -DHAVE_STDLIB_H -DHAVE_STRING_H -DDONT_HAVE_FRIBIDI_CONFIG_H)
-
-        # Helper macro: compile a gen-*-tab.c tool via try_compile, then run it
-        file(MAKE_DIRECTORY "${FRIBIDI_BUILD_DIR}/gen")
-        macro(fribidi_gen_tab tab_name)
-            set(_gen_name "gen-${tab_name}-tab")
-            set(_tab_output "${FRIBIDI_SRC_DIR}/lib/${tab_name}.tab.i")
-            set(_gen_exe "${FRIBIDI_BUILD_DIR}/gen/bin/${_gen_name}${CMAKE_EXECUTABLE_SUFFIX}")
-            # Treat zero-byte tab.i as missing (a previous failed run can leave
-            # behind a truncated stub that would otherwise be reused).
-            set(_tab_needs_regen TRUE)
-            if(EXISTS "${_tab_output}")
-                file(SIZE "${_tab_output}" _tab_size)
-                if(_tab_size GREATER 0)
-                    set(_tab_needs_regen FALSE)
-                endif()
-            endif()
-            if(_tab_needs_regen)
-                file(MAKE_DIRECTORY "${FRIBIDI_BUILD_DIR}/gen/bin")
-                try_compile(_compiled_${tab_name}
-                    "${FRIBIDI_BUILD_DIR}/gen/${_gen_name}"
-                    SOURCES
-                        "${FRIBIDI_GEN_DIR}/${_gen_name}.c"
-                        "${FRIBIDI_GEN_DIR}/packtab.c"
-                    CMAKE_FLAGS
-                        "-DINCLUDE_DIRECTORIES:STRING=${FRIBIDI_SRC_DIR}/lib"
-                    COMPILE_DEFINITIONS
-                        ${FRIBIDI_GEN_NATIVE_ARGS}
-                    COPY_FILE "${_gen_exe}"
-                    OUTPUT_VARIABLE _compile_output
-                )
-                if(NOT _compiled_${tab_name})
-                    message(STATUS "try_compile output: ${_compile_output}")
-                    message(FATAL_ERROR "Failed to compile ${_gen_name}")
-                endif()
-                execute_process(
-                    COMMAND "${_gen_exe}"
-                        ${FRIBIDI_COMPRESSION} ${ARGN} ${_gen_name}
-                    OUTPUT_FILE "${_tab_output}"
-                    RESULT_VARIABLE _gen_result
-                )
-                if(NOT _gen_result EQUAL 0)
-                    message(FATAL_ERROR "Failed to generate ${tab_name}.tab.i")
-                endif()
-                message(STATUS "FriBidi: generated ${tab_name}.tab.i")
-            endif()
-        endmacro()
-
-        # Generate .tab.i files from Unicode data (git clone does not include them)
-        fribidi_gen_tab(bidi-type       "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt")
-        fribidi_gen_tab(joining-type    "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt" "${FRIBIDI_UNIDATA_DIR}/ArabicShaping.txt")
-        fribidi_gen_tab(arabic-shaping  "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt")
-        fribidi_gen_tab(mirroring       "${FRIBIDI_UNIDATA_DIR}/BidiMirroring.txt")
-        fribidi_gen_tab(brackets        "${FRIBIDI_UNIDATA_DIR}/BidiBrackets.txt" "${FRIBIDI_UNIDATA_DIR}/UnicodeData.txt")
-        fribidi_gen_tab(brackets-type   "${FRIBIDI_UNIDATA_DIR}/BidiBrackets.txt")
-        # Generate fribidi-config.h and fribidi-unicode-version.h
-        file(MAKE_DIRECTORY "${FRIBIDI_BUILD_DIR}/lib")
-        file(WRITE "${FRIBIDI_BUILD_DIR}/lib/fribidi-config.h"
-            "#ifndef FRIBIDI_CONFIG_H\n"
-            "#define FRIBIDI_CONFIG_H\n"
-            "#define FRIBIDI_MAJOR_VERSION 1\n"
-            "#define FRIBIDI_MINOR_VERSION 0\n"
-            "#define FRIBIDI_MICRO_VERSION 15\n"
-            "#define FRIBIDI_VERSION \"1.0.15\"\n"
-            "#define FRIBIDI_INTERFACE_VERSION 4\n"
-            "#define FRIBIDI_SIZEOF_INT ${CMAKE_SIZEOF_VOID_P}\n"
-            "#define FRIBIDI_NAME \"GNU FriBidi\"\n"
-            "#define FRIBIDI_BUGREPORT \"https://github.com/fribidi/fribidi/issues\"\n"
-            "#define FRIBIDI_INTERFACE_VERSION_STRING \"4\"\n"
-            "#ifndef FRIBIDI_ENTRY\n"
-            "#define FRIBIDI_ENTRY\n"
-            "#endif\n"
-            "#endif\n"
-        )
-        # fribidi-unicode-version.h already generated above (before .tab.i generation)
-        file(GLOB FRIBIDI_SOURCES "${FRIBIDI_SRC_DIR}/lib/*.c")
-        # Remove charset-related sources (we only need the core BiDi algorithm)
-        list(FILTER FRIBIDI_SOURCES EXCLUDE REGEX "fribidi-char-sets.*\\.c$")
-        add_library(fribidi STATIC ${FRIBIDI_SOURCES})
-        target_include_directories(fribidi PUBLIC
-            $<BUILD_INTERFACE:${FRIBIDI_SRC_DIR}/lib>
-            $<BUILD_INTERFACE:${FRIBIDI_BUILD_DIR}/lib>
-            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        )
-        target_compile_definitions(fribidi PRIVATE HAVE_STRING_H HAVE_STDLIB_H HAVE_STRINGIZE)
-        if(MSVC)
-            target_compile_options(fribidi PRIVATE /wd4244 /wd4267 /wd4018)
-        endif()
-    message(STATUS "FriBidi fetched: 1.0.15")
-    set(FRIBIDI_AVAILABLE TRUE)
+    FetchContent_GetProperties(unibreak)
+    if(NOT unibreak_POPULATED)
+        FetchContent_Populate(unibreak)
+    endif()
+    # libunibreak ships autotools/Meson; build a minimal CMake static target.
+    # Data tables are committed in the repo, so no code generation is needed.
+    file(GLOB UNIBREAK_SOURCES "${unibreak_SOURCE_DIR}/src/*.c")
+    # Exclude the bundled test harness (defines its own main()).
+    list(FILTER UNIBREAK_SOURCES EXCLUDE REGEX "tests\\.c$")
+    add_library(unibreak STATIC ${UNIBREAK_SOURCES})
+    target_include_directories(unibreak PUBLIC
+        $<BUILD_INTERFACE:${unibreak_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    )
+    if(MSVC)
+        target_compile_options(unibreak PRIVATE /wd4244 /wd4267)
+    endif()
+    message(STATUS "libunibreak fetched: 7.0")
+    set(LIBUNIBREAK_AVAILABLE TRUE)
 endif()
 
 # OpenGL
@@ -830,11 +733,11 @@ if(WINDOW_ENABLE_FONT)
         message(STATUS "Text shaping: HarfBuzz")
     endif()
 
-    # FriBidi bidirectional text
-    if(FRIBIDI_AVAILABLE)
-        list(APPEND WINDOW_LIBS fribidi)
-        list(APPEND WINDOW_DEFINES FONT_SUPPORT_FRIBIDI)
-        message(STATUS "BiDi text: FriBidi")
+    # libunibreak line breaking
+    if(LIBUNIBREAK_AVAILABLE)
+        list(APPEND WINDOW_LIBS unibreak)
+        list(APPEND WINDOW_DEFINES FONT_SUPPORT_LIBUNIBREAK)
+        message(STATUS "Line breaking: libunibreak")
     endif()
 
     message(STATUS "Font support enabled")
@@ -1198,6 +1101,13 @@ if(WINDOW_BUILD_TESTS)
     target_link_libraries(test_font PRIVATE window)
     add_test(NAME test_font COMMAND test_font)
 
+    # RAM glyph-atlas manager unit tests (headless, no display required)
+    if(WINDOW_ENABLE_FONT)
+        add_executable(test_glyph_atlas tests/test_glyph_atlas.cpp)
+        target_link_libraries(test_glyph_atlas PRIVATE window)
+        add_test(NAME test_glyph_atlas COMMAND test_glyph_atlas)
+    endif()
+
     # GUI unit tests (headless, no display required)
     if(WINDOW_ENABLE_GUI)
         add_executable(test_gui tests/test_gui.cpp)
@@ -1316,8 +1226,8 @@ endif()
 include(GNUInstallDirs)
 
 set(_WINDOW_INSTALL_TARGETS window)
-if(FRIBIDI_AVAILABLE AND TARGET fribidi)
-    list(APPEND _WINDOW_INSTALL_TARGETS fribidi)
+if(LIBUNIBREAK_AVAILABLE AND TARGET unibreak)
+    list(APPEND _WINDOW_INSTALL_TARGETS unibreak)
 endif()
 install(TARGETS ${_WINDOW_INSTALL_TARGETS}
     EXPORT windowTargets

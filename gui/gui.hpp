@@ -284,6 +284,40 @@ public:
     virtual TextQuad rasterize(const char* text, float font_size,
                                const char* font_name = nullptr) = 0;
 
+    // One textured quad per glyph, positioned in text-local pixel space
+    // (origin = text box top-left, before alignment is applied).
+    struct GlyphQuad {
+        int32_t atlas_layer = -1;
+        float   x = 0, y = 0, w = 0, h = 0;   // dest rect, text-local px
+        float   u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+    };
+
+    // Shape `text` and emit per-glyph quads plus the total text extent
+    // (out_w/out_h). flatten() prefers this over rasterize() so each glyph can be
+    // deduplicated/GC'd in a per-glyph atlas. The default implementation falls
+    // back to a single rasterize() quad, so existing rasterizers keep working.
+    virtual bool rasterize_glyphs(const char* text, float font_size, const char* font_name,
+                                  std::vector<GlyphQuad>& out_quads,
+                                  float* out_w, float* out_h) {
+        out_quads.clear();
+        TextQuad q = rasterize(text, font_size, font_name);
+        if (!q.valid()) {
+            if (out_w) *out_w = 0;
+            if (out_h) *out_h = 0;
+            return false;
+        }
+        GlyphQuad g;
+        g.atlas_layer = q.atlas_layer;
+        g.x = 0; g.y = 0;
+        g.w = static_cast<float>(q.width);
+        g.h = static_cast<float>(q.height);
+        g.u0 = q.u0; g.v0 = q.v0; g.u1 = q.u1; g.v1 = q.v1;
+        out_quads.push_back(g);
+        if (out_w) *out_w = static_cast<float>(q.width);
+        if (out_h) *out_h = static_cast<float>(q.height);
+        return true;
+    }
+
     // Return pixel advance of the first n characters (for cursor placement).
     virtual float measure_advance(const char* text, int n, float font_size,
                                   const char* font_name = nullptr) = 0;

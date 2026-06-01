@@ -8,6 +8,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <climits>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -1316,95 +1318,116 @@ void destroy_fallback_chain(IFontFallbackChain* chain) {
 // Platform-specific fallback font family lists.
 // Each list is ordered by priority — common UI fonts first, then script-specific.
 
+// The list aims to cover every major Unicode script on each platform. Families
+// that are not installed resolve (via the system font matcher) to an already
+// loaded font and are de-duplicated, so listing many is cheap.
 #ifdef _WIN32
 static const char* const g_fallback_families[] = {
     // Latin / Cyrillic / Greek
-    "Arial",
-    "Segoe UI",
-    "Tahoma",
-    // CJK (Chinese, Japanese, Korean)
-    "Microsoft YaHei",      // Simplified Chinese
-    "Microsoft JhengHei",   // Traditional Chinese
-    "Yu Gothic",            // Japanese
-    "Meiryo",               // Japanese fallback
-    "Malgun Gothic",        // Korean
+    "Segoe UI", "Arial", "Tahoma", "Times New Roman",
+    // CJK (Simplified, Traditional, Japanese, Korean)
+    "Microsoft YaHei", "Microsoft JhengHei", "Yu Gothic", "Meiryo",
+    "Malgun Gothic", "MingLiU", "SimSun",
     // Arabic / Hebrew
-    "Segoe UI",             // already covers Arabic
-    "Arial",                // already covers Hebrew
-    // Devanagari / Indic
-    "Nirmala UI",           // all Indic scripts
-    "Mangal",               // Devanagari fallback
-    // Thai
-    "Leelawadee UI",
-    // Emoji
-    "Segoe UI Emoji",
-    "Segoe UI Symbol",
+    "Arabic Typesetting", "Traditional Arabic", "David",
+    // Indic (Nirmala UI covers all Indic scripts)
+    "Nirmala UI", "Mangal", "Latha", "Vrinda",
+    // South-East Asian
+    "Leelawadee UI",    // Thai
+    "Khmer UI",         // Khmer
+    "Lao UI",           // Lao
+    "Myanmar Text",     // Myanmar
+    // Other scripts
+    "Sylfaen",          // Armenian, Georgian
+    "Nyala",            // Ethiopic
+    "Gadugi",           // Cherokee, Canadian Aboriginal
+    "Microsoft Himalaya", // Tibetan
+    "Mongolian Baiti",  // Mongolian
+    "MV Boli",          // Thaana
+    "Ebrima",           // N'Ko, Tifinagh, Vai, Osmanya
+    "Microsoft Yi Baiti", // Yi
+    "Microsoft Tai Le", "Microsoft New Tai Lue",
+    "Microsoft PhagsPa", "Javanese Text",
+    // Emoji / symbols
+    "Segoe UI Emoji", "Segoe UI Symbol", "Segoe UI Historic",
     nullptr
 };
 #elif defined(__APPLE__)
 static const char* const g_fallback_families[] = {
-    "Helvetica Neue",
-    ".AppleSystemUIFont",
+    "Helvetica Neue", ".AppleSystemUIFont", "Arial",
     // CJK
-    "PingFang SC",          // Simplified Chinese
-    "PingFang TC",          // Traditional Chinese
-    "Hiragino Sans",        // Japanese
-    "Apple SD Gothic Neo",  // Korean
+    "PingFang SC", "PingFang TC", "Hiragino Sans",
+    "Hiragino Kaku Gothic ProN", "Apple SD Gothic Neo",
     // Arabic / Hebrew
-    "Geeza Pro",            // Arabic
-    "Arial Hebrew",         // Hebrew
-    // Devanagari / Indic
-    "Devanagari Sangam MN",
-    "Kohinoor Devanagari",
-    // Thai
-    "Thonburi",
-    // Emoji
-    "Apple Color Emoji",
+    "Geeza Pro", "Arial Hebrew",
+    // Indic
+    "Devanagari Sangam MN", "Kohinoor Devanagari", "Bangla Sangam MN",
+    "Tamil Sangam MN", "Telugu Sangam MN", "Kannada Sangam MN",
+    "Malayalam Sangam MN", "Gujarati Sangam MN", "Gurmukhi MN",
+    "Oriya Sangam MN", "Sinhala Sangam MN",
+    // South-East Asian
+    "Thonburi",             // Thai
+    "Khmer Sangam MN", "Lao Sangam MN", "Myanmar Sangam MN",
+    // Other scripts
+    "Mshtakan",             // Armenian
+    "Kefa",                 // Ethiopic
+    "Plantagenet Cherokee", // Cherokee
+    "Euphemia UCAS",        // Canadian Aboriginal
+    "Kailasa",              // Tibetan
+    // Emoji / symbols
+    "Apple Color Emoji", "Apple Symbols",
     nullptr
 };
 #elif defined(__linux__)
+// The Noto family covers essentially every script; unavailable members are
+// de-duplicated away after the matcher substitutes them.
 static const char* const g_fallback_families[] = {
-    "DejaVu Sans",
-    "Liberation Sans",
-    "FreeSans",
+    "DejaVu Sans", "Noto Sans", "Liberation Sans", "FreeSans",
     // CJK
-    "Noto Sans CJK SC",    // Simplified Chinese
-    "Noto Sans CJK TC",    // Traditional Chinese
-    "Noto Sans CJK JP",    // Japanese
-    "Noto Sans CJK KR",    // Korean
-    "WenQuanYi Micro Hei", // CJK fallback
-    // Arabic / Hebrew
-    "Noto Sans Arabic",
-    "Noto Sans Hebrew",
-    // Devanagari / Indic
-    "Noto Sans Devanagari",
-    "Noto Sans Tamil",
-    "Noto Sans Bengali",
-    // Thai
-    "Noto Sans Thai",
-    // Emoji
-    "Noto Color Emoji",
-    "Noto Emoji",
+    "Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Sans CJK JP",
+    "Noto Sans CJK KR", "Noto Sans CJK HK", "WenQuanYi Micro Hei",
+    // Middle Eastern
+    "Noto Sans Arabic", "Noto Naskh Arabic", "Noto Sans Hebrew",
+    "Noto Sans Syriac",
+    // Indic
+    "Noto Sans Devanagari", "Noto Sans Bengali", "Noto Sans Tamil",
+    "Noto Sans Telugu", "Noto Sans Kannada", "Noto Sans Malayalam",
+    "Noto Sans Gujarati", "Noto Sans Gurmukhi", "Noto Sans Oriya",
+    "Noto Sans Sinhala",
+    // South-East Asian
+    "Noto Sans Thai", "Noto Sans Lao", "Noto Sans Khmer",
+    "Noto Sans Myanmar", "Noto Sans Javanese",
+    // Other scripts
+    "Noto Sans Armenian", "Noto Sans Georgian", "Noto Sans Ethiopic",
+    "Noto Sans Cherokee", "Noto Sans Canadian Aboriginal",
+    "Noto Sans Tibetan", "Noto Sans Mongolian", "Noto Sans Thaana",
+    "Noto Sans Tifinagh", "Noto Sans Vai", "Noto Sans Adlam", "Noto Sans Yi",
+    // Emoji / symbols
+    "Noto Color Emoji", "Noto Emoji", "Noto Sans Symbols", "Noto Sans Symbols2",
     nullptr
 };
 #elif defined(__ANDROID__)
 static const char* const g_fallback_families[] = {
-    "Roboto",
-    "Noto Sans",
+    "Roboto", "Noto Sans",
     // CJK
-    "Noto Sans CJK",
-    // Arabic
-    "Noto Sans Arabic",
-    // Devanagari
-    "Noto Sans Devanagari",
+    "Noto Sans CJK", "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR",
+    // Middle Eastern
+    "Noto Sans Arabic", "Noto Sans Hebrew",
+    // Indic
+    "Noto Sans Devanagari", "Noto Sans Bengali", "Noto Sans Tamil",
+    "Noto Sans Telugu", "Noto Sans Kannada", "Noto Sans Malayalam",
+    "Noto Sans Gujarati", "Noto Sans Gurmukhi", "Noto Sans Sinhala",
+    // South-East Asian
+    "Noto Sans Thai", "Noto Sans Lao", "Noto Sans Khmer", "Noto Sans Myanmar",
+    // Other scripts
+    "Noto Sans Armenian", "Noto Sans Georgian", "Noto Sans Ethiopic",
     // Emoji
     "Noto Color Emoji",
     nullptr
 };
 #else
 static const char* const g_fallback_families[] = {
-    "Arial",
-    "DejaVu Sans",
+    "Arial", "DejaVu Sans", "Noto Sans",
     nullptr
 };
 #endif
@@ -1599,6 +1622,514 @@ void destroy_font_atlas(IFontAtlas* atlas) {
         atlas->destroy();
         delete atlas;
     }
+}
+
+// ============================================================================
+// GlyphAtlasImpl — RAM-only, 8-bit, shelf-packed glyph atlas with GC + fallback
+// ============================================================================
+
+namespace {
+
+// Quantise a point size for the cache key (1/4 px resolution).
+inline uint32_t quantize_size(float size) {
+    if (size < 0.0f) size = 0.0f;
+    return static_cast<uint32_t>(std::lround(size * 4.0f));
+}
+
+// Faux-bold: horizontal max-dilation by `strength` px. Grows width by `strength`.
+// `buf` holds an (w*h) A8 image with pitch == w; it is replaced in-place.
+void synth_embolden(std::vector<uint8_t>& buf, int& w, int h, int strength) {
+    if (strength <= 0 || w <= 0 || h <= 0) return;
+    int nw = w + strength;
+    std::vector<uint8_t> out(static_cast<size_t>(nw) * h, 0);
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* srow = buf.data() + static_cast<size_t>(y) * w;
+        uint8_t* drow = out.data() + static_cast<size_t>(y) * nw;
+        for (int x = 0; x < nw; ++x) {
+            int v = 0;
+            for (int k = 0; k <= strength; ++k) {
+                int sx = x - k;
+                if (sx >= 0 && sx < w) v = std::max(v, static_cast<int>(srow[sx]));
+            }
+            drow[x] = static_cast<uint8_t>(v);
+        }
+    }
+    buf.swap(out);
+    w = nw;
+}
+
+// Faux-italic: shear top rows to the right (lean). Grows width by ceil(shear*(h-1)).
+void synth_oblique(std::vector<uint8_t>& buf, int& w, int h, float shear) {
+    if (shear <= 0.0f || w <= 0 || h <= 0) return;
+    int extra = static_cast<int>(std::ceil(shear * (h - 1)));
+    if (extra <= 0) return;
+    int nw = w + extra;
+    std::vector<uint8_t> out(static_cast<size_t>(nw) * h, 0);
+    for (int y = 0; y < h; ++y) {
+        // Top row (y=0) shifts most; bottom row (y=h-1) not at all.
+        int shift = static_cast<int>(std::lround(shear * (h - 1 - y)));
+        const uint8_t* srow = buf.data() + static_cast<size_t>(y) * w;
+        uint8_t* drow = out.data() + static_cast<size_t>(y) * nw;
+        for (int x = 0; x < w; ++x) {
+            int dx = x + shift;
+            if (dx >= 0 && dx < nw) drow[dx] = srow[x];
+        }
+    }
+    buf.swap(out);
+    w = nw;
+}
+
+} // anonymous namespace
+
+class GlyphAtlasImpl : public IGlyphAtlasManager {
+public:
+    GlyphAtlasImpl(IFontLibrary* library, const GlyphAtlasConfig& cfg)
+        : library_(library), cfg_(cfg) {
+        if (cfg_.layer_width  < 1) cfg_.layer_width  = 4096;
+        if (cfg_.layer_height < 1) cfg_.layer_height = 4096;
+        if (cfg_.max_layers   < 1) cfg_.max_layers   = 1;
+        if (cfg_.initial_layers < 0) cfg_.initial_layers = 0;
+        if (cfg_.padding < 0) cfg_.padding = 0;
+        for (int i = 0; i < cfg_.initial_layers && i < cfg_.max_layers; ++i) add_layer();
+    }
+
+    ~GlyphAtlasImpl() override {
+        delete chain_;
+        for (auto& f : fonts_)
+            if (f.owned && library_ && f.face) library_->destroy_font(f.face);
+    }
+
+    // ---- registry ----
+    int add_font(IFontFace* face, bool take_ownership) override {
+        if (!face) return -1;
+        for (size_t i = 0; i < fonts_.size(); ++i)
+            if (fonts_[i].face == face) return static_cast<int>(i);
+        int idx = static_cast<int>(fonts_.size());
+        FontEntry e;
+        e.face = face;
+        e.owned = take_ownership;
+        const FontDescriptor& d = face->get_descriptor();
+        e.intrinsic_bold   = static_cast<int>(d.weight) >= static_cast<int>(FontWeight::SemiBold);
+        e.intrinsic_italic = d.style != FontStyle::Normal;
+        fonts_.push_back(e);
+        if (!chain_) chain_ = new FallbackFontChain(face);
+        else         chain_->add_fallback(face);
+        const char* fam = face->get_family_name();
+        loaded_families_.push_back(fam ? fam : "");
+        return idx;
+    }
+
+    int load_font_file(const char* path, int face_index) override {
+        if (!library_ || !path) return -1;
+        Result r;
+        IFontFace* f = library_->load_font_file(path, face_index, &r);
+        return f ? add_font(f, true) : -1;
+    }
+
+    int load_font_memory(const void* data, size_t size, int face_index) override {
+        if (!library_ || !data) return -1;
+        Result r;
+        IFontFace* f = library_->load_font_memory(data, size, face_index, &r);
+        return f ? add_font(f, true) : -1;
+    }
+
+    void add_system_font(const char* family, FontWeight weight, FontStyle style) override {
+        if (!family || !family[0]) return;
+        user_candidates_.push_back(Candidate{family, weight, style});
+    }
+
+    IFontFace* get_font(int font_idx) const override {
+        if (font_idx < 0 || font_idx >= static_cast<int>(fonts_.size())) return nullptr;
+        return fonts_[font_idx].face;
+    }
+
+    int font_count() const override { return static_cast<int>(fonts_.size()); }
+
+    IFontFallbackChain* fallback_chain() override {
+        populate_all_candidates();   // shaper needs a complete chain up front
+        return chain_;
+    }
+
+    // ---- acquisition ----
+    const GlyphSlot* acquire(int font_idx, uint32_t glyph_id, float size,
+                             FontWeight weight, FontStyle style) override {
+        if (font_idx < 0 || font_idx >= static_cast<int>(fonts_.size())) return nullptr;
+        FontEntry& fe = fonts_[font_idx];
+
+        uint8_t synth = 0;
+        if (static_cast<int>(weight) >= static_cast<int>(FontWeight::Bold) && !fe.intrinsic_bold)
+            synth |= kSynthBold;
+        if (style != FontStyle::Normal && !fe.intrinsic_italic)
+            synth |= kSynthItalic;
+
+        Key key{static_cast<uint16_t>(font_idx), glyph_id, quantize_size(size), synth};
+        auto it = glyphs_.find(key);
+        if (it != glyphs_.end()) {
+            it->second.last_frame = frame_;
+            return &it->second.slot;
+        }
+
+        // Rasterise the glyph as 8-bit coverage.
+        fe.face->set_size(size);
+        RenderOptions ropts;
+        ropts.antialias     = AntiAliasMode::Grayscale;
+        ropts.hinting       = HintingMode::Normal;
+        ropts.output_format = PixelFormat::A8;
+        GlyphBitmap bmp;
+        if (fe.face->render_glyph(glyph_id, ropts, &bmp) != Result::Success) return nullptr;
+
+        Record rec;
+        rec.last_frame      = frame_;
+        rec.slot.bearing_x  = static_cast<int>(std::lround(bmp.metrics.bearing_x));
+        rec.slot.bearing_y  = static_cast<int>(std::lround(bmp.metrics.bearing_y));
+        rec.slot.advance_x  = bmp.metrics.advance_x;
+
+        // Empty glyph (space, etc.): no pixels, advance only.
+        if (!bmp.pixels || bmp.width <= 0 || bmp.height <= 0) {
+            rec.slot.layer = 0;
+            rec.cell_w = 0;
+            auto ins = glyphs_.emplace(key, rec);
+            return &ins.first->second.slot;
+        }
+
+        // Tight-copy the coverage immediately (the FreeType backend reuses its buffer).
+        int cw = bmp.width, ch = bmp.height;
+        std::vector<uint8_t> cov(static_cast<size_t>(cw) * ch);
+        for (int y = 0; y < ch; ++y)
+            memcpy(cov.data() + static_cast<size_t>(y) * cw,
+                   static_cast<const uint8_t*>(bmp.pixels) + static_cast<size_t>(y) * bmp.pitch,
+                   cw);
+
+        // Synthetic bold / italic on the coverage bitmap.
+        if (synth & kSynthBold) {
+            int strength = std::max(1, static_cast<int>(std::lround(size / 24.0f)));
+            synth_embolden(cov, cw, ch, strength);
+            rec.slot.advance_x += strength;
+        }
+        if (synth & kSynthItalic) synth_oblique(cov, cw, ch, 0.2f);
+
+        // Pack into a layer; one GC retry if the atlas is full.
+        Placement pl;
+        if (!pack(cw, ch, pl)) {
+            collect_garbage();
+            if (!pack(cw, ch, pl)) return nullptr;
+        }
+        blit(pl, cov, cw, ch);
+
+        // Glyph content sits inset by `padding` inside the packed cell.
+        const int cx = pl.x + cfg_.padding, cy = pl.y + cfg_.padding;
+        rec.slot.layer = pl.layer;
+        rec.slot.px = cx; rec.slot.py = cy;
+        rec.slot.pw = cw; rec.slot.ph = ch;
+        rec.slot.u0 = static_cast<float>(cx)      / cfg_.layer_width;
+        rec.slot.v0 = static_cast<float>(cy)      / cfg_.layer_height;
+        rec.slot.u1 = static_cast<float>(cx + cw) / cfg_.layer_width;
+        rec.slot.v1 = static_cast<float>(cy + ch) / cfg_.layer_height;
+        rec.layer = pl.layer; rec.shelf_idx = pl.shelf_idx;
+        rec.cell_x = pl.x;    rec.cell_w = pl.cell_w;   // cell origin/width for freeing
+        rec.bytes = static_cast<size_t>(cw) * ch;
+        memory_usage_ += rec.bytes;
+
+        auto ins = glyphs_.emplace(key, rec);
+        return &ins.first->second.slot;
+    }
+
+    const GlyphSlot* acquire_codepoint(int font_idx, uint32_t codepoint, float size,
+                                       int* out_resolved_font_idx,
+                                       FontWeight weight, FontStyle style) override {
+        int resolved = -1;
+        uint32_t gi = 0;
+        if (font_idx >= 0 && font_idx < static_cast<int>(fonts_.size())) {
+            gi = fonts_[font_idx].face->get_glyph_index(codepoint);
+            if (gi) resolved = font_idx;
+        }
+        if (resolved < 0) {
+            for (int j = 0; j < static_cast<int>(fonts_.size()); ++j) {
+                if (j == font_idx) continue;
+                uint32_t g = fonts_[j].face->get_glyph_index(codepoint);
+                if (g) { resolved = j; gi = g; break; }
+            }
+        }
+        while (resolved < 0 && load_next_candidate()) {
+            int j = static_cast<int>(fonts_.size()) - 1;
+            uint32_t g = fonts_[j].face->get_glyph_index(codepoint);
+            if (g) { resolved = j; gi = g; }
+        }
+        if (resolved < 0) { resolved = (font_idx >= 0 ? font_idx : 0); gi = 0; }
+        if (out_resolved_font_idx) *out_resolved_font_idx = resolved;
+        if (resolved < 0 || resolved >= static_cast<int>(fonts_.size())) return nullptr;
+        return acquire(resolved, gi, size, weight, style);
+    }
+
+    // ---- texture access ----
+    const uint8_t* layer_data(int layer) const override {
+        if (layer < 0 || layer >= static_cast<int>(layers_.size())) return nullptr;
+        return layers_[layer].data();
+    }
+    int width()  const override { return cfg_.layer_width; }
+    int height() const override { return cfg_.layer_height; }
+    int layer_count() const override { return static_cast<int>(layers_.size()); }
+
+    void take_dirty_regions(std::vector<GlyphDirtyRegion>& out) override {
+        out.insert(out.end(), dirty_.begin(), dirty_.end());
+        dirty_.clear();
+    }
+
+    // ---- GC ----
+    void begin_frame() override { ++frame_; }
+
+    int collect_garbage() override {
+        int freed = 0;
+        // 1) idle eviction
+        for (auto it = glyphs_.begin(); it != glyphs_.end(); ) {
+            if (frame_ - it->second.last_frame > static_cast<uint64_t>(cfg_.gc_idle_frames)) {
+                free_record(it->second);
+                it = glyphs_.erase(it);
+                ++freed;
+            } else {
+                ++it;
+            }
+        }
+        // 2) budget eviction (global LRU)
+        if (cfg_.gc_budget_bytes > 0 && memory_usage_ > cfg_.gc_budget_bytes) {
+            std::vector<MapIt> its;
+            its.reserve(glyphs_.size());
+            for (auto it = glyphs_.begin(); it != glyphs_.end(); ++it) its.push_back(it);
+            std::sort(its.begin(), its.end(),
+                      [](const MapIt& a, const MapIt& b) {
+                          return a->second.last_frame < b->second.last_frame;
+                      });
+            for (MapIt it : its) {
+                if (memory_usage_ <= cfg_.gc_budget_bytes) break;
+                free_record(it->second);
+                glyphs_.erase(it);
+                ++freed;
+            }
+        }
+        return freed;
+    }
+
+    void clear() override {
+        glyphs_.clear();
+        for (auto& p : packs_) { p.shelves.clear(); p.frontier_y = 0; }
+        memory_usage_ = 0;
+        dirty_.clear();
+    }
+
+    size_t memory_usage() const override { return memory_usage_; }
+    int    glyph_count()  const override { return static_cast<int>(glyphs_.size()); }
+
+private:
+    enum : uint8_t { kSynthBold = 1, kSynthItalic = 2 };
+
+    struct FontEntry {
+        IFontFace* face = nullptr;
+        bool owned = false;
+        bool intrinsic_bold = false;
+        bool intrinsic_italic = false;
+    };
+    struct Candidate { std::string family; FontWeight weight; FontStyle style; };
+
+    struct Key {
+        uint16_t font_idx;
+        uint32_t glyph_id;
+        uint32_t size_q;
+        uint8_t  synth;
+        bool operator==(const Key& o) const {
+            return font_idx == o.font_idx && glyph_id == o.glyph_id &&
+                   size_q == o.size_q && synth == o.synth;
+        }
+    };
+    struct KeyHash {
+        size_t operator()(const Key& k) const {
+            size_t h = k.font_idx;
+            h ^= std::hash<uint32_t>{}(k.glyph_id) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint32_t>{}(k.size_q)   + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint32_t>{}(static_cast<uint32_t>(k.synth)) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    struct Record {
+        GlyphSlot slot;
+        int layer = 0, shelf_idx = -1, cell_x = 0, cell_w = 0;
+        size_t bytes = 0;
+        uint64_t last_frame = 0;
+    };
+    using MapIt = std::unordered_map<Key, Record, KeyHash>::iterator;
+
+    struct Seg   { int x, w; };
+    struct Shelf { int y = 0, h = 0, cur_x = 0, live = 0; std::vector<Seg> free_list; };
+    struct LayerPack { std::vector<Shelf> shelves; int frontier_y = 0; };
+    struct Placement { int layer, x, y, shelf_idx, cell_w; };
+
+    void add_layer() {
+        layers_.emplace_back(static_cast<size_t>(cfg_.layer_width) * cfg_.layer_height, 0);
+        packs_.emplace_back();
+    }
+
+    // Find room for a content cell of (cw x ch). Returns the content placement.
+    bool pack(int cw, int ch, Placement& out) {
+        // Reserve a `padding`-px cleared border on every side of the glyph so
+        // bilinear sampling at a glyph edge can never reach a neighbour.
+        int cell_w = cw + 2 * cfg_.padding;
+        int cell_h = ch + 2 * cfg_.padding;
+        if (cell_w > cfg_.layer_width || cell_h > cfg_.layer_height) return false;
+
+        // 1) reuse space in an existing shelf (free segs first, then its frontier)
+        for (int li = 0; li < static_cast<int>(packs_.size()); ++li) {
+            LayerPack& lp = packs_[li];
+            for (int si = 0; si < static_cast<int>(lp.shelves.size()); ++si) {
+                Shelf& s = lp.shelves[si];
+                if (s.h < cell_h) continue;
+                int best = -1, bestw = INT_MAX;
+                for (int k = 0; k < static_cast<int>(s.free_list.size()); ++k)
+                    if (s.free_list[k].w >= cell_w && s.free_list[k].w < bestw) {
+                        best = k; bestw = s.free_list[k].w;
+                    }
+                if (best >= 0) {
+                    Seg seg = s.free_list[best];
+                    if (seg.w > cell_w) s.free_list[best] = Seg{seg.x + cell_w, seg.w - cell_w};
+                    else                s.free_list.erase(s.free_list.begin() + best);
+                    ++s.live;
+                    out = Placement{li, seg.x, s.y, si, cell_w};
+                    return true;
+                }
+                if (s.cur_x + cell_w <= cfg_.layer_width) {
+                    int x = s.cur_x; s.cur_x += cell_w; ++s.live;
+                    out = Placement{li, x, s.y, si, cell_w};
+                    return true;
+                }
+            }
+        }
+        // 2) open a new shelf at the frontier of an existing layer
+        for (int li = 0; li < static_cast<int>(packs_.size()); ++li) {
+            LayerPack& lp = packs_[li];
+            if (lp.frontier_y + cell_h <= cfg_.layer_height) {
+                Shelf s; s.y = lp.frontier_y; s.h = cell_h; s.cur_x = cell_w; s.live = 1;
+                lp.frontier_y += cell_h;
+                int si = static_cast<int>(lp.shelves.size());
+                lp.shelves.push_back(std::move(s));
+                out = Placement{li, 0, lp.shelves[si].y, si, cell_w};
+                return true;
+            }
+        }
+        // 3) grow a new layer
+        if (static_cast<int>(layers_.size()) < cfg_.max_layers) {
+            add_layer();
+            int li = static_cast<int>(packs_.size()) - 1;
+            LayerPack& lp = packs_[li];
+            Shelf s; s.y = 0; s.h = cell_h; s.cur_x = cell_w; s.live = 1;
+            lp.frontier_y = cell_h;
+            lp.shelves.push_back(std::move(s));
+            out = Placement{li, 0, 0, 0, cell_w};
+            return true;
+        }
+        return false;
+    }
+
+    void blit(const Placement& pl, const std::vector<uint8_t>& cov, int cw, int ch) {
+        std::vector<uint8_t>& layer = layers_[pl.layer];
+        const int W   = cfg_.layer_width;
+        const int pad = cfg_.padding;
+        // Clear the whole cell (content + its border) so the gutter is zeroed.
+        int clear_w = std::min(pl.cell_w, W - pl.x);
+        int clear_h = std::min(ch + 2 * pad, cfg_.layer_height - pl.y);
+        for (int y = 0; y < clear_h; ++y)
+            memset(layer.data() + static_cast<size_t>(pl.y + y) * W + pl.x, 0, clear_w);
+        // Copy the glyph inset by `pad` so it is surrounded by cleared pixels.
+        const int cx = pl.x + pad, cy = pl.y + pad;
+        for (int y = 0; y < ch; ++y)
+            memcpy(layer.data() + static_cast<size_t>(cy + y) * W + cx,
+                   cov.data() + static_cast<size_t>(y) * cw, cw);
+        dirty_.push_back(GlyphDirtyRegion{pl.layer, pl.x, pl.y, clear_w, clear_h});
+    }
+
+    void free_record(Record& rec) {
+        memory_usage_ -= rec.bytes;
+        if (rec.cell_w <= 0) return;                         // empty glyph: nothing packed
+        if (rec.layer < 0 || rec.layer >= static_cast<int>(packs_.size())) return;
+        LayerPack& lp = packs_[rec.layer];
+        if (rec.shelf_idx < 0 || rec.shelf_idx >= static_cast<int>(lp.shelves.size())) return;
+        Shelf& s = lp.shelves[rec.shelf_idx];
+        s.free_list.push_back(Seg{rec.cell_x, rec.cell_w});
+        if (--s.live <= 0) {
+            if (s.y + s.h == lp.frontier_y) {
+                // Reclaim empty shelves from the top of the layer.
+                while (!lp.shelves.empty()) {
+                    Shelf& top = lp.shelves.back();
+                    if (top.live <= 0 && top.y + top.h == lp.frontier_y) {
+                        lp.frontier_y = top.y;
+                        lp.shelves.pop_back();
+                    } else break;
+                }
+            } else {
+                // Interior empty shelf: make its whole row reusable.
+                s.free_list.assign(1, Seg{0, cfg_.layer_width});
+                s.cur_x = cfg_.layer_width;
+            }
+        }
+    }
+
+    // Lazily load the next fallback candidate (user families first, then platform
+    // defaults). Returns true if one was newly registered.
+    bool load_next_candidate() {
+        while (user_tried_ < user_candidates_.size())
+            if (try_load_candidate(user_candidates_[user_tried_++])) return true;
+        while (g_fallback_families[plat_tried_] != nullptr) {
+            Candidate c{g_fallback_families[plat_tried_++], FontWeight::Regular, FontStyle::Normal};
+            if (try_load_candidate(c)) return true;
+        }
+        return false;
+    }
+
+    bool try_load_candidate(const Candidate& c) {
+        if (!library_) return false;
+        FontDescriptor d = FontDescriptor::create(c.family.c_str(), 12.0f);
+        d.weight = c.weight;
+        d.style  = c.style;
+        Result r;
+        IFontFace* face = library_->load_system_font(d, &r);
+        if (!face) return false;
+        const char* fam = face->get_family_name();
+        for (auto& l : loaded_families_) {
+            if ((fam && l == fam) || l == c.family) {   // already have this physical font
+                library_->destroy_font(face);
+                return false;
+            }
+        }
+        add_font(face, true);
+        return true;
+    }
+
+    void populate_all_candidates() { while (load_next_candidate()) {} }
+
+    IFontLibrary*    library_;
+    GlyphAtlasConfig cfg_;
+
+    std::vector<FontEntry>   fonts_;
+    std::vector<std::string> loaded_families_;
+    FallbackFontChain*       chain_ = nullptr;
+
+    std::vector<Candidate>   user_candidates_;
+    size_t user_tried_ = 0;
+    int    plat_tried_ = 0;
+
+    std::vector<std::vector<uint8_t>> layers_;   // each cfg_.layer_width*height bytes
+    std::vector<LayerPack>            packs_;
+    std::vector<GlyphDirtyRegion>     dirty_;
+
+    std::unordered_map<Key, Record, KeyHash> glyphs_;
+    size_t   memory_usage_ = 0;
+    uint64_t frame_ = 0;
+};
+
+IGlyphAtlasManager* create_glyph_atlas_manager(IFontLibrary* library, const GlyphAtlasConfig& cfg) {
+    if (!library) return nullptr;
+    return new GlyphAtlasImpl(library, cfg);
+}
+
+void destroy_glyph_atlas_manager(IGlyphAtlasManager* mgr) {
+    delete mgr;
 }
 
 } // namespace font
