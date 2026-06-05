@@ -950,6 +950,220 @@ int         vertex_format_size(VertexFormat format);
 const char* vertex_format_to_string(VertexFormat format);
 bool        parse_vertex_format(const char* s, VertexFormat* out);
 
+//=============================================================================
+// Render Device & Command Abstraction
+//
+// Handle-based resource device + command recorder, modeled on REngine's
+// RGDeviceWrapper (GraphicDevice + GraphicCommander) and adapted to this
+// library's per-window `Graphics` context (which plays RGDeviceWrapper's
+// GraphicCanvas role: swapchain + present).
+//
+// Design notes:
+//   - These are SEPARATE interfaces from `Graphics` (added, not mixed in), so
+//     existing backend Graphics implementations keep compiling unchanged. A
+//     GraphicDevice is obtained for a live `Graphics` context via create_device().
+//   - Resources are referenced by small typed, int-backed handles (-1 = invalid),
+//     matching the reference's id scheme while staying type-safe.
+//   - The interface is backend-NEUTRAL: no GL/D3D/Vulkan/Metal types leak here.
+//     Each backend implements it in its own api_*.cpp/.mm (platform-isolated),
+//     exactly like the existing context backends.
+//=============================================================================
+
+// ---- Typed resource handles (int-backed; id < 0 = invalid) ------------------
+#define WINDOW_GFX_HANDLE(Name)                                               \
+    struct Name { int32_t id = -1; bool valid() const noexcept { return id >= 0; } \
+                  bool operator==(const Name& o) const noexcept { return id == o.id; } }
+WINDOW_GFX_HANDLE(BufferHandle);
+WINDOW_GFX_HANDLE(TextureHandle);
+WINDOW_GFX_HANDLE(SamplerHandle);
+WINDOW_GFX_HANDLE(ShaderHandle);
+WINDOW_GFX_HANDLE(PipelineHandle);
+WINDOW_GFX_HANDLE(RenderTargetHandle);
+#undef WINDOW_GFX_HANDLE
+
+// ---- Resource enums ---------------------------------------------------------
+enum class BufferType : uint8_t { Vertex, Index, Uniform, Storage, Indirect };
+enum class ResourceUsage : uint8_t { Immutable, Default, Dynamic, Staging };
+enum class IndexFormat : uint8_t { UInt16, UInt32 };
+enum class ShaderStage : uint8_t { Vertex, Fragment, Geometry, TessControl, TessEval, Compute };
+enum class ShaderLanguage : uint8_t { Auto, GLSL, ESSL, SPIRV, HLSL, DXBC, DXIL, MSL, WGSL };
+
+// Texture usage flags (bitwise OR).
+enum TextureUsage : uint32_t {
+    TEXTURE_USAGE_SAMPLED       = 1u << 0,
+    TEXTURE_USAGE_RENDER_TARGET = 1u << 1,
+    TEXTURE_USAGE_DEPTH_STENCIL = 1u << 2,
+    TEXTURE_USAGE_STORAGE       = 1u << 3,
+    TEXTURE_USAGE_COPY_SRC      = 1u << 4,
+    TEXTURE_USAGE_COPY_DST      = 1u << 5
+};
+
+// ---- Resource descriptors ---------------------------------------------------
+struct BufferDesc {
+    uint32_t      size = 0;                       // bytes
+    BufferType    type = BufferType::Vertex;
+    ResourceUsage usage = ResourceUsage::Default;
+    uint32_t      stride = 0;                      // structured/vertex element stride
+    const void*   initial_data = nullptr;          // optional upload at creation
+    const char*   debug_name = nullptr;
+};
+
+struct TextureDesc {
+    int           width = 0;
+    int           height = 0;
+    int           depth = 1;                       // 3D textures
+    int           array_layers = 1;
+    int           mip_levels = 1;
+    int           samples = 1;                     // MSAA
+    TextureFormat format = TextureFormat::RGBA8_UNORM;
+    uint32_t      usage = TEXTURE_USAGE_SAMPLED;   // TextureUsage bits OR'd
+    bool          cube = false;
+    const void*   initial_data = nullptr;          // mip 0 / layer 0, tightly packed
+    const char*   debug_name = nullptr;
+};
+
+// Sub-region for texture updates (RGDeviceWrapper updateTexture equivalent).
+struct TextureRegion {
+    int x = 0, y = 0, z = 0;
+    int width = 0, height = 0, depth = 1;
+    int mip = 0;
+    int layer = 0;
+};
+
+struct ShaderDesc {
+    ShaderStage    stage = ShaderStage::Vertex;
+    ShaderLanguage language = ShaderLanguage::Auto; // Auto = pick the backend's native
+    const void*    code = nullptr;                  // source text or compiled bytecode
+    size_t         code_size = 0;                   // 0 → treat `code` as a NUL-terminated string
+    const char*    entry_point = "main";
+    const char*    debug_name = nullptr;
+};
+
+// One vertex attribute fed to a pipeline's input layout.
+struct VertexAttribute {
+    uint32_t     location = 0;                      // shader input slot / semantic index
+    VertexFormat format = VertexFormat::Float3;
+    uint32_t     offset = 0;                        // byte offset within its buffer slot
+    uint32_t     buffer_slot = 0;                   // which bound vertex buffer it reads from
+};
+
+struct VertexLayout {
+    static const int MAX_ATTRIBUTES = 16;
+    static const int MAX_BUFFER_SLOTS = 8;
+    VertexAttribute attributes[MAX_ATTRIBUTES] = {};
+    int             attribute_count = 0;
+    uint32_t        strides[MAX_BUFFER_SLOTS] = {}; // byte stride per vertex buffer slot
+    int             buffer_count = 0;
+};
+
+// Pipeline state object (immutable once created), mirroring modern explicit APIs.
+struct PipelineDesc {
+    ShaderHandle      vertex_shader;
+    ShaderHandle      fragment_shader;
+    ShaderHandle      compute_shader;               // valid → a compute pipeline (graphics fields ignored)
+    VertexLayout      vertex_layout;
+    PrimitiveTopology topology = PrimitiveTopology::TriangleList;
+    BlendState        blend;
+    DepthStencilState depth_stencil;
+    RasterizerState   rasterizer;
+    TextureFormat     color_formats[8] = { TextureFormat::RGBA8_UNORM };
+    int               color_format_count = 1;
+    TextureFormat     depth_format = TextureFormat::D24_UNORM_S8_UINT;
+    int               samples = 1;
+    const char*       debug_name = nullptr;
+};
+
+//-----------------------------------------------------------------------------
+// GraphicDevice — resource creation/update/destruction (handle-based).
+// Obtained for a live Graphics context via create_device(). Owns no commands;
+// pair it with a GraphicCommander to render. (≈ RGDeviceWrapper GraphicDevice.)
+//-----------------------------------------------------------------------------
+class GraphicDevice {
+public:
+    virtual ~GraphicDevice() = default;
+
+    virtual Backend     get_backend() const = 0;
+    virtual void        get_capabilities(GraphicsCapabilities* out_caps) const = 0;
+
+    // Buffers (vertex / index / uniform / storage / indirect).
+    virtual BufferHandle create_buffer(const BufferDesc& desc) = 0;
+    virtual void         update_buffer(BufferHandle h, const void* data, uint32_t size, uint32_t offset = 0) = 0;
+    virtual void         destroy_buffer(BufferHandle h) = 0;
+
+    // Textures + samplers.
+    virtual TextureHandle create_texture(const TextureDesc& desc) = 0;
+    virtual void          update_texture(TextureHandle h, const TextureRegion& region, const void* data) = 0;
+    virtual void          generate_mipmaps(TextureHandle h) = 0;
+    virtual void          destroy_texture(TextureHandle h) = 0;
+    virtual SamplerHandle create_sampler(const SamplerState& desc) = 0;
+    virtual void          destroy_sampler(SamplerHandle h) = 0;
+
+    // Shaders + pipeline state objects.
+    virtual ShaderHandle   create_shader(const ShaderDesc& desc) = 0;
+    virtual void           destroy_shader(ShaderHandle h) = 0;
+    virtual PipelineHandle create_pipeline(const PipelineDesc& desc) = 0;
+    virtual void           destroy_pipeline(PipelineHandle h) = 0;
+
+    // Offscreen render targets (color or depth-stencil per RenderTargetDesc/DepthStencilDesc).
+    virtual RenderTargetHandle create_render_target(const RenderTargetDesc& desc) = 0;
+    virtual RenderTargetHandle create_depth_target(const DepthStencilDesc& desc) = 0;
+    virtual TextureHandle      render_target_texture(RenderTargetHandle h) = 0;  // sample the result
+    virtual void               destroy_render_target(RenderTargetHandle h) = 0;
+
+protected:
+    GraphicDevice() = default;
+};
+
+//-----------------------------------------------------------------------------
+// GraphicCommander — records a frame's draw/compute work, then submit()ted to
+// the owning Graphics context. (≈ RGDeviceWrapper GraphicCommander.)
+//-----------------------------------------------------------------------------
+class GraphicCommander {
+public:
+    virtual ~GraphicCommander() = default;
+
+    virtual void begin() = 0;
+    virtual void end() = 0;
+
+    // Render targets. The "backbuffer" variant targets the owning context's swapchain.
+    virtual void set_render_target_backbuffer() = 0;
+    virtual void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) = 0;
+    virtual void set_viewport(const Viewport& vp) = 0;
+    virtual void set_scissor(const ScissorRect& rect) = 0;
+    virtual void clear_color(const ClearColor& color) = 0;                              // clears the bound color target(s)
+    virtual void clear_depth_stencil(const ClearDepthStencil& ds) = 0;
+
+    // State + resource binding.
+    virtual void set_pipeline(PipelineHandle h) = 0;
+    virtual void bind_vertex_buffer(uint32_t slot, BufferHandle h, uint32_t offset = 0) = 0;
+    virtual void bind_index_buffer(BufferHandle h, IndexFormat fmt, uint32_t offset = 0) = 0;
+    virtual void bind_texture(uint32_t slot, TextureHandle h) = 0;
+    virtual void bind_sampler(uint32_t slot, SamplerHandle h) = 0;
+    virtual void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t offset = 0, uint32_t size = 0) = 0;
+    virtual void push_constants(uint32_t offset, const void* data, uint32_t size) = 0;  // small per-draw constants
+
+    // Draw / dispatch.
+    virtual void draw(uint32_t vertex_count, uint32_t first_vertex = 0,
+                      uint32_t instance_count = 1, uint32_t first_instance = 0) = 0;
+    virtual void draw_indexed(uint32_t index_count, uint32_t first_index = 0, int32_t base_vertex = 0,
+                              uint32_t instance_count = 1, uint32_t first_instance = 0) = 0;
+    virtual void dispatch(uint32_t group_x, uint32_t group_y = 1, uint32_t group_z = 1) = 0;
+
+protected:
+    GraphicCommander() = default;
+};
+
+// Create a render device for a live Graphics context (resources are owned by the
+// context's backend device). Returns nullptr + sets *out_result when the context's
+// backend has no GraphicDevice implementation yet. The caller owns the device and
+// frees it with destroy_device(). A matching commander comes from create_commander().
+GraphicDevice*    create_device(Graphics* context, Result* out_result = nullptr);
+void              destroy_device(GraphicDevice* device);
+GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, Result* out_result = nullptr);
+void              destroy_commander(GraphicCommander* commander);
+// Submit a finished commander's recorded work to its context. Present via Graphics::present().
+void              submit_commander(Graphics* context, GraphicCommander* commander);
+
 } // namespace window
 
 #endif // GRAPHICS_API_HPP
