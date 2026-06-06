@@ -32,6 +32,7 @@ option(WINDOW_ENABLE_FLAC_DECODER "Enable FLAC decoder (dr_flac)" OFF)
 
 # GUI options
 option(WINDOW_ENABLE_GUI "Enable GUI interface support" ON)
+option(WINDOW_ENABLE_RENDERER "Build the optional GPU GUI renderer (renderer/, uses the graphics abstraction)" ON)
 
 # Virtual keyboard options
 option(WINDOW_ENABLE_VIRTUAL_KEYBOARD "Enable virtual keyboard support" ON)
@@ -640,13 +641,31 @@ if(WINDOW_ENABLE_GUI)
         gui/gui_sizer.cpp
         gui/gui_animation.cpp
         gui/gui_serialization.cpp
-        gui/gui_renderer.cpp
-        gui/gui_text_rasterizer.cpp
     )
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_GUI)
     message(STATUS "GUI support enabled")
 else()
     message(STATUS "GUI support disabled")
+endif()
+
+#=============================================================================
+# GPU GUI Renderer (optional, opt-in)
+#
+# An optional, self-contained renderer that draws the GUI's WidgetRenderInfo
+# through the backend-neutral graphics abstraction (GraphicDevice/Commander).
+# Consumers who supply their own renderer can switch this off; it requires the
+# GUI (for WidgetRenderInfo) and a graphics backend (for the abstraction).
+#=============================================================================
+
+if(WINDOW_ENABLE_RENDERER AND WINDOW_ENABLE_GUI)
+    list(APPEND WINDOW_SOURCES
+        renderer/gui_renderer.cpp
+        renderer/gui_text_rasterizer.cpp
+    )
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_RENDERER)
+    message(STATUS "GPU GUI renderer enabled")
+else()
+    message(STATUS "GPU GUI renderer disabled")
 endif()
 
 #=============================================================================

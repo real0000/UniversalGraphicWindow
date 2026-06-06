@@ -7,8 +7,8 @@
 // to upload newly-rasterised glyphs.
 
 #include "../graphics_api.hpp"
-#include "gui.hpp"            // IGuiTextRasterizer, ITextMeasurer
-#include "font/font.hpp"
+#include "../gui/gui.hpp"            // IGuiTextRasterizer, ITextMeasurer
+#include "../gui/font/font.hpp"
 
 #include <vector>
 

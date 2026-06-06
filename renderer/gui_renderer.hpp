@@ -10,7 +10,7 @@
 // for the OpenGL backend today (other backends add their own shader source).
 
 #include "../graphics_api.hpp"
-#include "gui.hpp"
+#include "../gui/gui.hpp"
 
 #include <vector>
 
