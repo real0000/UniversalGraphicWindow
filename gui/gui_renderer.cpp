@@ -10,7 +10,7 @@ const int FLOATS_PER_VERT = 9;  // pos2 + uvw3 + rgba4
 
 // GLSL (OpenGL backend). Projection comes through a std140 UBO at binding 0
 // (the abstraction's push_constants); the glyph atlas is a sampler2DArray.
-const char* VS_GLSL = R"(#version 330 core
+const char* VS_GLSL = R"(#version 460 core
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec3 aUVW;
 layout(location=2) in vec4 aColor;
@@ -20,7 +20,7 @@ layout(std140, binding=0) uniform Proj { mat4 uProjection; };
 void main() { gl_Position = uProjection * vec4(aPos, 0.0, 1.0); vUVW = aUVW; vColor = aColor; }
 )";
 
-const char* FS_GLSL = R"(#version 330 core
+const char* FS_GLSL = R"(#version 460 core
 in vec3 vUVW;
 in vec4 vColor;
 out vec4 FragColor;

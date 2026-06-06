@@ -1036,6 +1036,8 @@ struct TextureDesc {
     TextureFormat format = TextureFormat::RGBA8_UNORM;
     uint32_t      usage = TEXTURE_USAGE_SAMPLED;   // TextureUsage bits OR'd
     bool          cube = false;
+    bool          array_texture = false;           // force an array view even at array_layers==1
+                                                   // (e.g. a sampler2DArray glyph atlas)
     const void*   initial_data = nullptr;          // mip 0 / layer 0, tightly packed
     const char*   debug_name = nullptr;
 };

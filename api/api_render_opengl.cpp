@@ -215,14 +215,15 @@ public:
     TextureHandle create_texture(const TextureDesc& d) override {
         cur();
         GLTexture t; t.fmt = gl_format(d.format); t.w = d.width; t.h = d.height;
-        t.target = (d.cube ? GL_TEXTURE_CUBE_MAP : (d.array_layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D));
+        t.target = (d.cube ? GL_TEXTURE_CUBE_MAP : ((d.array_layers > 1 || d.array_texture) ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D));
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // R8 / odd-width rows
         glGenTextures(1, &t.id);
         glBindTexture(t.target, t.id);
         if (t.target == GL_TEXTURE_2D) {
             glTexImage2D(GL_TEXTURE_2D, 0, t.fmt.internal_fmt, d.width, d.height, 0, t.fmt.format, t.fmt.type, d.initial_data);
         } else if (t.target == GL_TEXTURE_2D_ARRAY) {
-            glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, t.fmt.internal_fmt, d.width, d.height, d.array_layers, 0, t.fmt.format, t.fmt.type, d.initial_data);
+            const int layers = d.array_layers > 1 ? d.array_layers : 1;
+            glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, t.fmt.internal_fmt, d.width, d.height, layers, 0, t.fmt.format, t.fmt.type, d.initial_data);
         }
         glTexParameteri(t.target, GL_TEXTURE_MIN_FILTER, d.mip_levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         glTexParameteri(t.target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -275,7 +276,11 @@ public:
         else         glShaderSource(sh.id, 1, &src, &len);
         glCompileShader(sh.id);
         GLint ok = 0; glGetShaderiv(sh.id, GL_COMPILE_STATUS, &ok);
-        if (!ok) { glDeleteShader(sh.id); sh.id = 0; return { -1 }; }
+        if (!ok) {
+            char log[1024] = {0}; GLsizei n = 0; glGetShaderInfoLog(sh.id, sizeof(log) - 1, &n, log);
+            std::fprintf(stderr, "[UGW/OpenGL] shader compile failed:\n%s\n", log);
+            glDeleteShader(sh.id); sh.id = 0; return { -1 };
+        }
         return { shaders_.alloc(sh) };
     }
     void destroy_shader(ShaderHandle h) override { cur(); if (auto* s = shaders_.get(h.id)) { if (s->id) glDeleteShader(s->id); shaders_.release(h.id); } }
@@ -297,7 +302,11 @@ public:
         }
         glLinkProgram(p.program);
         GLint ok = 0; glGetProgramiv(p.program, GL_LINK_STATUS, &ok);
-        if (!ok) { glDeleteProgram(p.program); return { -1 }; }
+        if (!ok) {
+            char log[1024] = {0}; GLsizei n = 0; glGetProgramInfoLog(p.program, sizeof(log) - 1, &n, log);
+            std::fprintf(stderr, "[UGW/OpenGL] program link failed:\n%s\n", log);
+            glDeleteProgram(p.program); return { -1 };
+        }
         return { pipelines_.alloc(p) };
     }
     void destroy_pipeline(PipelineHandle h) override { cur(); if (auto* p = pipelines_.get(h.id)) { if (p->program) glDeleteProgram(p->program); pipelines_.release(h.id); } }

@@ -118,6 +118,7 @@ TextureHandle GpuTextRasterizer::sync_atlas() {
         if (atlas_.valid()) device_->destroy_texture(atlas_);
         TextureDesc td;
         td.width = W; td.height = H; td.array_layers = layers;
+        td.array_texture = true;   // always a sampler2DArray, even at 1 layer
         td.format = TextureFormat::R8_UNORM; td.usage = TEXTURE_USAGE_SAMPLED;
         atlas_ = device_->create_texture(td);
         atlas_layers_ = layers;
