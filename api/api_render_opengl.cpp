@@ -202,6 +202,9 @@ struct GLPipeline {
     int  patch_points = 0;
 };
 struct GLRenderTarget { GLuint fbo = 0; int color_tex = -1; int depth_tex = -1; };
+struct GLFence     { GLsync sync = nullptr; bool signaled = false; };
+struct GLSemaphore { };  // OpenGL has one implicit queue; semaphores are no-ops
+struct GLQuery     { GLuint id = 0; GLenum target = GL_TIMESTAMP; };
 
 //-----------------------------------------------------------------------------
 // GLDevice
@@ -285,11 +288,19 @@ public:
             default: break; // Vertex
         }
         GLShader sh; sh.stage = d.stage; sh.id = glCreateShader(type);
-        const char* src = static_cast<const char*>(d.code);
-        const GLint len = d.code_size ? GLint(d.code_size) : -1;
-        if (len < 0) glShaderSource(sh.id, 1, &src, nullptr);
-        else         glShaderSource(sh.id, 1, &src, &len);
-        glCompileShader(sh.id);
+        if (d.language == ShaderLanguage::SPIRV) {
+            // Cross-API path: ingest SPIR-V directly (GL 4.6 / ARB_gl_spirv), the same
+            // bytecode a Vulkan backend consumes. One shader blob, many backends.
+            if (!glSpecializeShader) { gl_unsupported("SPIR-V shaders (needs GL 4.6)"); glDeleteShader(sh.id); return { -1 }; }
+            glShaderBinary(1, &sh.id, GL_SHADER_BINARY_FORMAT_SPIR_V, d.code, GLsizei(d.code_size));
+            glSpecializeShader(sh.id, d.entry_point ? d.entry_point : "main", 0, nullptr, nullptr);
+        } else {
+            const char* src = static_cast<const char*>(d.code);
+            const GLint len = d.code_size ? GLint(d.code_size) : -1;
+            if (len < 0) glShaderSource(sh.id, 1, &src, nullptr);
+            else         glShaderSource(sh.id, 1, &src, &len);
+            glCompileShader(sh.id);
+        }
         GLint ok = 0; glGetShaderiv(sh.id, GL_COMPILE_STATUS, &ok);
         if (!ok) {
             char log[1024] = {0}; GLsizei n = 0; glGetShaderInfoLog(sh.id, sizeof(log) - 1, &n, log);
@@ -353,12 +364,84 @@ public:
     TextureHandle render_target_texture(RenderTargetHandle h) override { if (auto* rt = rts_.get(h.id)) return { rt->color_tex >= 0 ? rt->color_tex : rt->depth_tex }; return { -1 }; }
     void destroy_render_target(RenderTargetHandle h) override { cur(); if (auto* rt = rts_.get(h.id)) { if (rt->fbo) glDeleteFramebuffers(1, &rt->fbo); rts_.release(h.id); } }
 
+    // ---- Synchronization ----------------------------------------------------
+    FenceHandle create_fence(bool signaled) override { return { fences_.alloc(GLFence{ nullptr, signaled }) }; }
+    void destroy_fence(FenceHandle h) override { cur(); if (auto* f = fences_.get(h.id)) { if (f->sync) glDeleteSync(f->sync); fences_.release(h.id); } }
+    bool wait_fence(FenceHandle h, uint64_t timeout_ns) override {
+        cur(); auto* f = fences_.get(h.id); if (!f) return false;
+        if (f->signaled) return true;
+        if (!f->sync) return false;
+        const GLenum r = glClientWaitSync(f->sync, GL_SYNC_FLUSH_COMMANDS_BIT, GLuint64(timeout_ns));
+        if (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED) { f->signaled = true; return true; }
+        return false;
+    }
+    bool get_fence_status(FenceHandle h) override { return wait_fence(h, 0); }
+    void reset_fence(FenceHandle h) override { cur(); if (auto* f = fences_.get(h.id)) { if (f->sync) { glDeleteSync(f->sync); f->sync = nullptr; } f->signaled = false; } }
+    SemaphoreHandle create_semaphore() override { return { semaphores_.alloc(GLSemaphore{}) }; }
+    void destroy_semaphore(SemaphoreHandle h) override { semaphores_.release(h.id); }
+    void wait_idle() override { cur(); glFinish(); }
+
+    // Set on a fence by submit_commander() once its work is flushed to the GPU.
+    void signal_fence_on_submit(FenceHandle h) {
+        if (auto* f = fences_.get(h.id)) { if (f->sync) glDeleteSync(f->sync); f->sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0); f->signaled = false; }
+    }
+
+    // ---- Queries ------------------------------------------------------------
+    QueryHandle create_query(QueryType type) override {
+        cur(); GLQuery q;
+        switch (type) {
+            case QueryType::Occlusion:          q.target = GL_SAMPLES_PASSED; break;
+            case QueryType::PipelineStatistics: q.target = GL_PRIMITIVES_GENERATED; break;
+            default:                            q.target = GL_TIMESTAMP; break;
+        }
+        glGenQueries(1, &q.id);
+        return { queries_.alloc(q) };
+    }
+    void destroy_query(QueryHandle h) override { cur(); if (auto* q = queries_.get(h.id)) { if (q->id) glDeleteQueries(1, &q->id); queries_.release(h.id); } }
+    bool get_query_result(QueryHandle h, uint64_t* out_value, bool wait) override {
+        cur(); auto* q = queries_.get(h.id); if (!q || !q->id) return false;
+        if (!wait) { GLint avail = 0; glGetQueryObjectiv(q->id, GL_QUERY_RESULT_AVAILABLE, &avail); if (!avail) return false; }
+        GLuint64 v = 0; glGetQueryObjectui64v(q->id, GL_QUERY_RESULT, &v);
+        if (out_value) *out_value = v;
+        return true;
+    }
+
+    // ---- CPU<->GPU data access ----------------------------------------------
+    void* map_buffer(BufferHandle h, uint32_t offset, uint32_t size) override {
+        cur(); auto* b = buffer(h.id); if (!b) return nullptr;
+        const uint32_t len = size ? size : (b->size - offset);
+        glBindBuffer(b->target, b->id);
+        return glMapBufferRange(b->target, offset, len, GL_MAP_READ_BIT | GL_MAP_WRITE_BIT);
+    }
+    void unmap_buffer(BufferHandle h) override { cur(); if (auto* b = buffer(h.id)) { glBindBuffer(b->target, b->id); glUnmapBuffer(b->target); } }
+    void read_buffer(BufferHandle h, void* dst, uint32_t size, uint32_t offset) override {
+        cur(); auto* b = buffer(h.id); if (!b || !dst) return;
+        glBindBuffer(b->target, b->id);
+        glGetBufferSubData(b->target, offset, size, dst);
+    }
+    void read_texture(TextureHandle h, const TextureRegion& r, void* dst) override {
+        cur(); auto* t = texture(h.id); if (!t || !dst) return;
+        // Read a region back via a transient FBO (works for the colour/array case the
+        // GUI needs; depth uses GL_DEPTH_COMPONENT).
+        GLuint fbo = 0; glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        if (t->target == GL_TEXTURE_2D_ARRAY)
+            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, t->id, r.mip, r.layer);
+        else
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->id, r.mip);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(r.x, r.y, r.width, r.height, t->fmt.format, t->fmt.type, dst);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &fbo);
+    }
+
     // Internal accessors for the commander.
     GLBuffer*   buffer(int id)   { return buffers_.get(id); }
     GLTexture*  texture(int id)  { return textures_.get(id); }
     GLSampler*  sampler(int id)  { return samplers_.get(id); }
     GLPipeline* pipeline(int id) { return pipelines_.get(id); }
     GLRenderTarget* rt(int id)   { return rts_.get(id); }
+    GLQuery*    query(int id)    { return queries_.get(id); }
     void cur() { if (ctx_) ctx_->make_current(); }
 
 private:
@@ -382,6 +465,7 @@ private:
     Graphics* ctx_;
     Pool<GLBuffer> buffers_; Pool<GLTexture> textures_; Pool<GLSampler> samplers_;
     Pool<GLShader> shaders_; Pool<GLPipeline> pipelines_; Pool<GLRenderTarget> rts_;
+    Pool<GLFence> fences_; Pool<GLSemaphore> semaphores_; Pool<GLQuery> queries_;
 };
 
 //-----------------------------------------------------------------------------
@@ -390,6 +474,7 @@ private:
 class GLCommander : public GraphicCommander {
 public:
     GLCommander(Graphics* ctx, GLDevice* dev) : ctx_(ctx), dev_(dev) {}
+    GLDevice* device() const { return dev_; }
     ~GLCommander() override {
         if (ctx_) ctx_->make_current();
         if (vao_) glDeleteVertexArrays(1, &vao_);
@@ -560,7 +645,51 @@ public:
 
     void memory_barrier(uint32_t bits) override { glMemoryBarrier(gl_barrier_bits(bits)); }
 
+    // ---- Copies / blit / resolve --------------------------------------------
+    void copy_buffer(BufferHandle dst, uint32_t dst_off, BufferHandle src, uint32_t src_off, uint32_t size) override {
+        auto* s = dev_->buffer(src.id); auto* d = dev_->buffer(dst.id); if (!s || !d) return;
+        glBindBuffer(GL_COPY_READ_BUFFER, s->id);
+        glBindBuffer(GL_COPY_WRITE_BUFFER, d->id);
+        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, src_off, dst_off, size);
+    }
+    void copy_texture(TextureHandle dst, const TextureRegion& dr, TextureHandle src, const TextureRegion& sr) override {
+        auto* s = dev_->texture(src.id); auto* d = dev_->texture(dst.id); if (!s || !d) return;
+        const int w = sr.width ? sr.width : s->w, h = sr.height ? sr.height : s->h, depth = sr.depth ? sr.depth : 1;
+        glCopyImageSubData(s->id, s->target, sr.mip, sr.x, sr.y, sr.layer,
+                           d->id, d->target, dr.mip, dr.x, dr.y, dr.layer, w, h, depth);
+    }
+    void blit_render_target(RenderTargetHandle dst, RenderTargetHandle src,
+                            int sx0, int sy0, int sx1, int sy1,
+                            int dx0, int dy0, int dx1, int dy1, bool linear) override {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_of(src));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_of(dst));
+        glBlitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1,
+                          GL_COLOR_BUFFER_BIT, linear ? GL_LINEAR : GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+    void resolve_render_target(RenderTargetHandle dst, RenderTargetHandle src) override {
+        int w = 0, h = 0;   // resolve covers the dst colour target's extent
+        if (auto* rt = dev_->rt(dst.id)) if (auto* t = dev_->texture(rt->color_tex)) { w = t->w; h = t->h; }
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_of(src));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo_of(dst));
+        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+
+    // ---- Queries / debug markers --------------------------------------------
+    void write_timestamp(QueryHandle h) override { if (auto* q = dev_->query(h.id)) glQueryCounter(q->id, GL_TIMESTAMP); }
+    void begin_query(QueryHandle h) override { if (auto* q = dev_->query(h.id)) glBeginQuery(q->target, q->id); }
+    void end_query(QueryHandle h) override   { if (auto* q = dev_->query(h.id)) glEndQuery(q->target); }
+    void push_debug_group(const char* name) override { if (glPushDebugGroup) glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, name ? name : ""); }
+    void pop_debug_group() override { if (glPopDebugGroup) glPopDebugGroup(); }
+    void insert_debug_marker(const char* name) override {
+        if (glDebugMessageInsert)
+            glDebugMessageInsert(GL_DEBUG_SOURCE_APPLICATION, GL_DEBUG_TYPE_MARKER, 0,
+                                 GL_DEBUG_SEVERITY_NOTIFICATION, -1, name ? name : "");
+    }
+
 private:
+    GLuint fbo_of(RenderTargetHandle h) { if (auto* rt = dev_->rt(h.id)) return rt->fbo; return 0; }  // invalid → backbuffer
     GLenum topology() const { auto* p = dev_->pipeline(pipeline_); if (p && p->is_patch) return GL_PATCHES; return p ? gl_topology(p->topology) : GL_TRIANGLES; }
     void configure_attribs() {
         auto* p = dev_->pipeline(pipeline_); if (!p) return;
@@ -617,12 +746,28 @@ GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, Res
     if (out_result) *out_result = Result::ErrorNotSupported;
     return nullptr;
 }
+// OpenGL has a single implicit queue, so the queue type is advisory only.
+GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, QueueType queue, Result* out_result) {
+    (void)queue;
+    return create_commander(context, device, out_result);
+}
 void destroy_commander(GraphicCommander* commander) { delete commander; }
 
 void submit_commander(Graphics* context, GraphicCommander* commander) {
     (void)context; (void)commander;
 #if defined(WINDOW_SUPPORT_OPENGL)
     glFlush(); // GL records immediately; nothing to replay, just flush the stream
+#endif
+}
+
+void submit_commander(Graphics* context, GraphicCommander* commander, FenceHandle signal_fence) {
+    submit_commander(context, commander);
+#if defined(WINDOW_SUPPORT_OPENGL)
+    // Place the fence after the submitted work so the CPU can wait on completion.
+    if (commander && signal_fence.valid())
+        static_cast<GLCommander*>(commander)->device()->signal_fence_on_submit(signal_fence);
+#else
+    (void)signal_fence;
 #endif
 }
 

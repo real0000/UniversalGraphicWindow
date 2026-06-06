@@ -979,10 +979,17 @@ WINDOW_GFX_HANDLE(SamplerHandle);
 WINDOW_GFX_HANDLE(ShaderHandle);
 WINDOW_GFX_HANDLE(PipelineHandle);
 WINDOW_GFX_HANDLE(RenderTargetHandle);
+WINDOW_GFX_HANDLE(FenceHandle);      // CPU waits for GPU completion
+WINDOW_GFX_HANDLE(SemaphoreHandle);  // GPU↔GPU / queue↔queue ordering (no-op on single-queue backends)
+WINDOW_GFX_HANDLE(QueryHandle);      // timestamp / occlusion / pipeline-statistics
 #undef WINDOW_GFX_HANDLE
 
 // ---- Resource enums ---------------------------------------------------------
 enum class BufferType : uint8_t { Vertex, Index, Uniform, Storage, Indirect };
+// Submission queue. Backends with a single queue (e.g. OpenGL) treat all the same.
+enum class QueueType : uint8_t { Graphics, Compute, Transfer };
+// GPU query kinds. Caps advertise support via occlusion_query / timestamp_query.
+enum class QueryType : uint8_t { Timestamp, Occlusion, PipelineStatistics };
 enum class ResourceUsage : uint8_t { Immutable, Default, Dynamic, Staging };
 enum class IndexFormat : uint8_t { UInt16, UInt32 };
 // Programmable stages: classic graphics + tessellation + compute + the mesh-shader
@@ -1141,6 +1148,36 @@ public:
     virtual TextureHandle      render_target_texture(RenderTargetHandle h) = 0;  // sample the result
     virtual void               destroy_render_target(RenderTargetHandle h) = 0;
 
+    // ---- Synchronization ----------------------------------------------------
+    // Fence: CPU waits for submitted GPU work to finish. submit_commander() with a
+    // fence signals it on completion; create_fence(true) starts already-signaled.
+    virtual FenceHandle create_fence(bool signaled = false) = 0;
+    virtual void        destroy_fence(FenceHandle h) = 0;
+    virtual bool        wait_fence(FenceHandle h, uint64_t timeout_ns = ~0ull) = 0;  // true if signaled in time
+    virtual bool        get_fence_status(FenceHandle h) = 0;                          // signaled now?
+    virtual void        reset_fence(FenceHandle h) = 0;
+    // Semaphore: GPU-side ordering between queue submissions / swapchain. No-op on
+    // single-queue backends (OpenGL), present for API parity with Vulkan/D3D12.
+    virtual SemaphoreHandle create_semaphore() = 0;
+    virtual void            destroy_semaphore(SemaphoreHandle h) = 0;
+    // Block until all submitted GPU work on the device has completed.
+    virtual void        wait_idle() = 0;
+
+    // ---- Queries (timestamp / occlusion) ------------------------------------
+    virtual QueryHandle create_query(QueryType type) = 0;
+    virtual void        destroy_query(QueryHandle h) = 0;
+    // Read a query's result. If wait, blocks until available; else returns false if
+    // not yet ready. Timestamps are in nanoseconds; occlusion is a sample count.
+    virtual bool        get_query_result(QueryHandle h, uint64_t* out_value, bool wait = true) = 0;
+
+    // ---- CPU<->GPU data access ----------------------------------------------
+    // Map a buffer's storage for CPU access (size 0 = to end). unmap when done.
+    virtual void* map_buffer(BufferHandle h, uint32_t offset = 0, uint32_t size = 0) = 0;
+    virtual void  unmap_buffer(BufferHandle h) = 0;
+    // Read back GPU data to CPU memory (blocking).
+    virtual void  read_buffer(BufferHandle h, void* dst, uint32_t size, uint32_t offset = 0) = 0;
+    virtual void  read_texture(TextureHandle h, const TextureRegion& region, void* dst) = 0;
+
 protected:
     GraphicDevice() = default;
 };
@@ -1202,6 +1239,27 @@ public:
     // Memory/execution barrier between passes (GpuBarrier bits OR'd).
     virtual void memory_barrier(uint32_t barrier_bits) = 0;
 
+    // ---- Copies / blit / resolve (GPU→GPU) ----------------------------------
+    virtual void copy_buffer(BufferHandle dst, uint32_t dst_offset,
+                             BufferHandle src, uint32_t src_offset, uint32_t size) = 0;
+    virtual void copy_texture(TextureHandle dst, const TextureRegion& dst_region,
+                              TextureHandle src, const TextureRegion& src_region) = 0;
+    // Scaled blit between render targets; an invalid handle means the backbuffer.
+    virtual void blit_render_target(RenderTargetHandle dst, RenderTargetHandle src,
+                                    int src_x0, int src_y0, int src_x1, int src_y1,
+                                    int dst_x0, int dst_y0, int dst_x1, int dst_y1,
+                                    bool linear = true) = 0;
+    // Resolve a multisampled color target into a single-sample one.
+    virtual void resolve_render_target(RenderTargetHandle dst, RenderTargetHandle src) = 0;
+
+    // ---- Queries / debug markers (recorded into the command stream) ----------
+    virtual void write_timestamp(QueryHandle h) = 0;   // for QueryType::Timestamp
+    virtual void begin_query(QueryHandle h) = 0;        // for Occlusion / PipelineStatistics
+    virtual void end_query(QueryHandle h) = 0;
+    virtual void push_debug_group(const char* name) = 0;   // RenderDoc/PIX capture grouping
+    virtual void pop_debug_group() = 0;
+    virtual void insert_debug_marker(const char* name) = 0;
+
 protected:
     GraphicCommander() = default;
 };
@@ -1213,9 +1271,15 @@ protected:
 GraphicDevice*    create_device(Graphics* context, Result* out_result = nullptr);
 void              destroy_device(GraphicDevice* device);
 GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, Result* out_result = nullptr);
+// Commander bound to a specific submission queue (single-queue backends ignore it).
+GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, QueueType queue,
+                                   Result* out_result = nullptr);
 void              destroy_commander(GraphicCommander* commander);
 // Submit a finished commander's recorded work to its context. Present via Graphics::present().
 void              submit_commander(Graphics* context, GraphicCommander* commander);
+// Submit and signal `fence` (from create_fence) once the work completes; pass an
+// invalid handle to skip signaling. Wait on it via GraphicDevice::wait_fence().
+void              submit_commander(Graphics* context, GraphicCommander* commander, FenceHandle signal_fence);
 
 } // namespace window
 
