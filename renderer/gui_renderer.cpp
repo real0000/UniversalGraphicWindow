@@ -1,6 +1,7 @@
 #include "gui_renderer.hpp"
 
 #include <cmath>
+#include <cstdint>
 
 namespace window {
 namespace gui {
@@ -31,21 +32,33 @@ void main() {
 }
 )";
 
+// Image fragment shader: samples a full RGBA sampler2D and modulates by the vertex
+// colour (tint). Shares VS_GLSL; uvw.z (the atlas layer) is unused here.
+const char* FS_IMAGE_GLSL = R"(#version 460 core
+in vec3 vUVW;
+in vec4 vColor;
+out vec4 FragColor;
+uniform sampler2D uImage;
+void main() { FragColor = texture(uImage, vUVW.xy) * vColor; }
+)";
+
 } // namespace
 
 bool GpuGuiRenderer::init(GraphicDevice* device) {
     device_ = device;
     if (!device_) return false;
 
-    ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.language = ShaderLanguage::GLSL; vd.code = VS_GLSL;
-    ShaderDesc fd; fd.stage = ShaderStage::Fragment; fd.language = ShaderLanguage::GLSL; fd.code = FS_GLSL;
-    vs_ = device_->create_shader(vd);
-    fs_ = device_->create_shader(fd);
-    if (!vs_.valid() || !fs_.valid()) return false;
+    ShaderDesc vd;  vd.stage  = ShaderStage::Vertex;   vd.language  = ShaderLanguage::GLSL; vd.code  = VS_GLSL;
+    ShaderDesc fd;  fd.stage  = ShaderStage::Fragment; fd.language  = ShaderLanguage::GLSL; fd.code  = FS_GLSL;
+    ShaderDesc fid; fid.stage = ShaderStage::Fragment; fid.language = ShaderLanguage::GLSL; fid.code = FS_IMAGE_GLSL;
+    vs_       = device_->create_shader(vd);
+    fs_       = device_->create_shader(fd);
+    fs_image_ = device_->create_shader(fid);
+    if (!vs_.valid() || !fs_.valid() || !fs_image_.valid()) return false;
 
+    // Both pipelines share everything but the fragment shader (atlas vs image).
     PipelineDesc pd;
     pd.vertex_shader   = vs_;
-    pd.fragment_shader = fs_;
     pd.topology        = PrimitiveTopology::TriangleList;
     pd.blend           = BlendState::alpha_blend();
     pd.depth_stencil   = DepthStencilState::disabled();
@@ -58,16 +71,21 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     l.attribute_count = 3;
     l.strides[0]      = FLOATS_PER_VERT * sizeof(float);
     l.buffer_count    = 1;
-    pipeline_ = device_->create_pipeline(pd);
-    return pipeline_.valid();
+
+    pd.fragment_shader = fs_;        pipeline_       = device_->create_pipeline(pd);
+    pd.fragment_shader = fs_image_;  image_pipeline_ = device_->create_pipeline(pd);
+    return pipeline_.valid() && image_pipeline_.valid();
 }
 
 void GpuGuiRenderer::shutdown() {
     if (!device_) return;
-    if (vbo_.valid())      device_->destroy_buffer(vbo_);
-    if (pipeline_.valid()) device_->destroy_pipeline(pipeline_);
-    if (vs_.valid())       device_->destroy_shader(vs_);
-    if (fs_.valid())       device_->destroy_shader(fs_);
+    if (vbo_.valid())            device_->destroy_buffer(vbo_);
+    if (pipeline_.valid())       device_->destroy_pipeline(pipeline_);
+    if (image_pipeline_.valid()) device_->destroy_pipeline(image_pipeline_);
+    if (vs_.valid())             device_->destroy_shader(vs_);
+    if (fs_.valid())             device_->destroy_shader(fs_);
+    if (fs_image_.valid())       device_->destroy_shader(fs_image_);
+    tex_cache_.clear();   // handles only; the provider owns the textures
     device_ = nullptr;
 }
 
@@ -99,6 +117,21 @@ void GpuGuiRenderer::emit_circle(float cx, float cy, float radius, const math::V
     }
 }
 
+TextureHandle GpuGuiRenderer::resolve_texture(const WidgetRenderInfo::TextureCmd& t) {
+    if (!tex_provider_) return {};
+    // Key by source, matching flatten()'s own dedup (File→path, Memory→pointer).
+    std::string key;
+    if (t.source_type == TextureSourceType::File && t.file_path)
+        key.assign("f:").append(t.file_path);
+    else
+        key = "m:" + std::to_string(reinterpret_cast<uintptr_t>(t.memory_data));
+    auto it = tex_cache_.find(key);
+    if (it != tex_cache_.end()) return it->second;
+    const TextureHandle h = tex_provider_->resolve(t);   // may be invalid; cached so we don't retry
+    tex_cache_.emplace(std::move(key), h);
+    return h;
+}
+
 void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
                             TextureHandle atlas, const float proj[16],
                             int fb_w, int fb_h, float scale) {
@@ -109,45 +142,73 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
 
     verts_.clear();
 
-    struct Range { uint32_t first, count; int sx, sy, sw, sh; };
-    std::vector<Range> ranges;
-    Range cur{ 0, 0, 0, 0, fb_w, fb_h };   // default: full-screen scissor (= no clip)
-    uint32_t vert_count = 0;
+    // Solid + glyph quads use the atlas pipeline (one bound sampler2DArray, so they
+    // batch freely); each image is its own sampler2D texture. To keep correct depth
+    // order, walk the draw order once into segments — a run of primitives sharing a
+    // pipeline (and, for images, the same texture) under one scissor — and replay
+    // them in order. A run of glyphs/solids stays a single draw; a new image texture
+    // (or a clip change) starts a new segment.
+    enum class Kind { Atlas, Image };
+    struct Segment { Kind kind; int tex; uint32_t first, count; int sx, sy, sw, sh; };
+    std::vector<Segment> segs;
+
+    int sx = 0, sy = 0, sw = fb_w, sh = fb_h;   // running scissor (full = no clip)
+    Segment cur{ Kind::Atlas, -1, 0, 0, sx, sy, sw, sh };
+    bool have_cur = false, force_break = false;
+    uint32_t vc = 0;
+    auto flush = [&]() { if (have_cur && cur.count > 0) segs.push_back(cur); };
 
     using Pool = WidgetRenderInfo::DrawRef::Pool;
     for (const auto& ref : info.get_draw_order()) {
         if (ref.clip_changed) {
-            if (cur.count > 0) ranges.push_back(cur);
-            cur = Range{ vert_count, 0, 0, 0, fb_w, fb_h };
+            sx = 0; sy = 0; sw = fb_w; sh = fb_h;
             const float bw = math::box_width(ref.clip), bh = math::box_height(ref.clip);
             if (bw > 0.0f && bh > 0.0f) {
                 const float bx = math::x(math::box_min(ref.clip));
                 const float by = math::y(math::box_min(ref.clip));
-                cur.sx = int(bx * scale);
-                cur.sw = int(bw * scale);
-                cur.sh = int(bh * scale);
-                cur.sy = int(fb_h - (by + bh) * scale);   // GL scissor origin = bottom-left
+                sx = int(bx * scale); sw = int(bw * scale); sh = int(bh * scale);
+                sy = int(fb_h - (by + bh) * scale);   // GL scissor origin = bottom-left
+            }
+            force_break = true;   // applies even if the next primitive(s) are skipped
+        }
+
+        // Classify the primitive: which pipeline, and (for images) which texture.
+        Kind kind = Kind::Atlas; int tex = -1;
+        if (ref.pool == Pool::Texture) {
+            const auto& t = info.textures[ref.index];
+            if (t.atlas_layer < 0) {                 // file/memory image
+                const TextureHandle h = resolve_texture(t);
+                if (!h.valid()) continue;            // no provider / unresolved → skip
+                kind = Kind::Image; tex = h.id;
             }
         }
+
+        if (!have_cur || force_break || kind != cur.kind || (kind == Kind::Image && tex != cur.tex)) {
+            flush();
+            cur = Segment{ kind, tex, vc, 0, sx, sy, sw, sh };
+            have_cur = true; force_break = false;
+        }
+
         if (ref.pool == Pool::Color) {
             const auto& c = info.colors[ref.index];
             const float px = math::x(math::box_min(c.dest)), py = math::y(math::box_min(c.dest));
             const float pw = math::box_width(c.dest),        ph = math::box_height(c.dest);
-            if (c.shape == DrawShape::Circle) { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vert_count += 24 * 3; cur.count += 24 * 3; }
-            else                              { emit_quad(px, py, pw, ph, 0,0,0,0, -1.0f, c.color);              vert_count += 6;      cur.count += 6; }
+            if (c.shape == DrawShape::Circle) { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vc += 24 * 3; cur.count += 24 * 3; }
+            else                              { emit_quad(px, py, pw, ph, 0,0,0,0, -1.0f, c.color);              vc += 6;      cur.count += 6; }
         } else if (ref.pool == Pool::Texture) {
             const auto& t = info.textures[ref.index];
-            if (t.atlas_layer < 0) continue;   // file/memory image textures: TODO (separate sampler/pass)
             const float px = math::x(math::box_min(t.dest)), py = math::y(math::box_min(t.dest));
             const float pw = math::box_width(t.dest),        ph = math::box_height(t.dest);
             const float u0 = math::x(math::box_min(t.uv)),   v0 = math::y(math::box_min(t.uv));
             const float u1 = math::x(math::box_max(t.uv)),   v1 = math::y(math::box_max(t.uv));
-            emit_quad(px, py, pw, ph, u0, v0, u1, v1, float(t.atlas_layer), t.tint);
-            vert_count += 6; cur.count += 6;
+            // Glyph → uvw.z = atlas layer (>=0); image → layer unused by its shader.
+            const float layer = (t.atlas_layer >= 0) ? float(t.atlas_layer) : 0.0f;
+            emit_quad(px, py, pw, ph, u0, v0, u1, v1, layer, t.tint);
+            vc += 6; cur.count += 6;
         }
         // Slice9 / Text refs do not survive flatten(); ignored if present.
     }
-    if (cur.count > 0) ranges.push_back(cur);
+    flush();
     if (verts_.empty()) return;
 
     const uint32_t bytes = uint32_t(verts_.size() * sizeof(float));
@@ -160,13 +221,14 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
         device_->update_buffer(vbo_, verts_.data(), bytes, 0);
     }
 
-    cmd->set_pipeline(pipeline_);
-    cmd->push_constants(0, proj, 16 * sizeof(float));
-    cmd->bind_vertex_buffer(0, vbo_);
-    if (atlas.valid()) cmd->bind_texture(0, atlas);
-    for (const auto& r : ranges) {
-        cmd->set_scissor(ScissorRect{ r.sx, r.sy, r.sw, r.sh });
-        cmd->draw(r.count, r.first);
+    for (const auto& s : segs) {
+        cmd->set_pipeline(s.kind == Kind::Image ? image_pipeline_ : pipeline_);
+        cmd->push_constants(0, proj, 16 * sizeof(float));
+        cmd->bind_vertex_buffer(0, vbo_);
+        if (s.kind == Kind::Image) { const TextureHandle h{ s.tex }; cmd->bind_texture(0, h); }
+        else if (atlas.valid())    cmd->bind_texture(0, atlas);
+        cmd->set_scissor(ScissorRect{ s.sx, s.sy, s.sw, s.sh });
+        cmd->draw(s.count, s.first);
     }
 }
 

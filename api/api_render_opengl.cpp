@@ -147,16 +147,31 @@ void gl_vertex_attrib(VertexFormat f, GLint& comps, GLenum& type, GLboolean& nor
         case VertexFormat::Float2: comps=2; type=GL_FLOAT; return;
         case VertexFormat::Float3: comps=3; type=GL_FLOAT; return;
         case VertexFormat::Float4: comps=4; type=GL_FLOAT; return;
-        case VertexFormat::Int1: comps=1; type=GL_INT; integer=true; return;
-        case VertexFormat::Int2: comps=2; type=GL_INT; integer=true; return;
-        case VertexFormat::Int4: comps=4; type=GL_INT; integer=true; return;
+        // Integer formats (consumed as ints in-shader → glVertexAttribIPointer).
+        case VertexFormat::Int1:  comps=1; type=GL_INT; integer=true; return;
+        case VertexFormat::Int2:  comps=2; type=GL_INT; integer=true; return;
+        case VertexFormat::Int3:  comps=3; type=GL_INT; integer=true; return;
+        case VertexFormat::Int4:  comps=4; type=GL_INT; integer=true; return;
         case VertexFormat::UInt1: comps=1; type=GL_UNSIGNED_INT; integer=true; return;
-        case VertexFormat::UByte4N: comps=4; type=GL_UNSIGNED_BYTE; norm=GL_TRUE; return;
-        case VertexFormat::Byte4N: comps=4; type=GL_BYTE; norm=GL_TRUE; return;
-        case VertexFormat::Half2: comps=2; type=GL_HALF_FLOAT; return;
-        case VertexFormat::Half4: comps=4; type=GL_HALF_FLOAT; return;
+        case VertexFormat::UInt2: comps=2; type=GL_UNSIGNED_INT; integer=true; return;
+        case VertexFormat::UInt3: comps=3; type=GL_UNSIGNED_INT; integer=true; return;
+        case VertexFormat::UInt4: comps=4; type=GL_UNSIGNED_INT; integer=true; return;
+        case VertexFormat::Short2:  comps=2; type=GL_SHORT; integer=true; return;
+        case VertexFormat::Short4:  comps=4; type=GL_SHORT; integer=true; return;
+        case VertexFormat::UShort2: comps=2; type=GL_UNSIGNED_SHORT; integer=true; return;
+        case VertexFormat::UShort4: comps=4; type=GL_UNSIGNED_SHORT; integer=true; return;
+        case VertexFormat::Byte4:   comps=4; type=GL_BYTE; integer=true; return;
+        case VertexFormat::UByte4:  comps=4; type=GL_UNSIGNED_BYTE; integer=true; return;
+        // Normalized formats (scaled to [0,1]/[-1,1] floats in-shader).
+        case VertexFormat::Short2N:  comps=2; type=GL_SHORT; norm=GL_TRUE; return;
+        case VertexFormat::Short4N:  comps=4; type=GL_SHORT; norm=GL_TRUE; return;
         case VertexFormat::UShort2N: comps=2; type=GL_UNSIGNED_SHORT; norm=GL_TRUE; return;
         case VertexFormat::UShort4N: comps=4; type=GL_UNSIGNED_SHORT; norm=GL_TRUE; return;
+        case VertexFormat::Byte4N:   comps=4; type=GL_BYTE; norm=GL_TRUE; return;
+        case VertexFormat::UByte4N:  comps=4; type=GL_UNSIGNED_BYTE; norm=GL_TRUE; return;
+        case VertexFormat::Half2: comps=2; type=GL_HALF_FLOAT; return;
+        case VertexFormat::Half4: comps=4; type=GL_HALF_FLOAT; return;
+        case VertexFormat::RGB10A2: comps=4; type=GL_UNSIGNED_INT_2_10_10_10_REV; norm=GL_TRUE; return;
         default: comps=4; type=GL_FLOAT; return;
     }
 }
@@ -392,10 +407,32 @@ public:
 
     void set_render_target_backbuffer() override { glBindFramebuffer(GL_FRAMEBUFFER, 0); }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
-        // Single-FBO simplification: bind the first color target's FBO (or depth's).
-        int id = (count > 0 && colors) ? colors[0].id : depth.id;
-        if (auto* rt = dev_->rt(id)) glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
-        else glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        // Use the first color target's FBO (or the depth target's) as the base, then
+        // (re)attach the whole set onto it: colors → COLOR_ATTACHMENT0..N-1 (MRT),
+        // depth → DEPTH[_STENCIL]_ATTACHMENT. glDrawBuffers limits writes to the
+        // listed attachments, so any stale attachment beyond `count` is ignored.
+        GLRenderTarget* base = (count > 0 && colors) ? dev_->rt(colors[0].id) : dev_->rt(depth.id);
+        if (!base) { glBindFramebuffer(GL_FRAMEBUFFER, 0); return; }
+        glBindFramebuffer(GL_FRAMEBUFFER, base->fbo);
+
+        GLenum draw_bufs[8]; int nbuf = 0;
+        for (int i = 0; i < count && i < 8 && colors; ++i) {
+            GLuint tex = 0;
+            if (auto* rt = dev_->rt(colors[i].id))
+                if (auto* t = dev_->texture(rt->color_tex)) tex = t->id;
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, tex, 0);
+            draw_bufs[nbuf++] = GLenum(GL_COLOR_ATTACHMENT0 + i);
+        }
+        if (nbuf) glDrawBuffers(nbuf, draw_bufs);
+
+        if (depth.valid()) {
+            if (auto* dt = dev_->rt(depth.id))
+                if (auto* t = dev_->texture(dt->depth_tex)) {
+                    const GLenum slot = t->fmt.stencil ? GL_DEPTH_STENCIL_ATTACHMENT
+                                                       : GL_DEPTH_ATTACHMENT;
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, slot, GL_TEXTURE_2D, t->id, 0);
+                }
+        }
     }
     void set_viewport(const Viewport& v) override {
         glViewport(GLint(v.x), GLint(v.y), GLsizei(v.width), GLsizei(v.height));

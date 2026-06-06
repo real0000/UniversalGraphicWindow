@@ -253,7 +253,11 @@ public:
             ri_.push_text("9-slice", bx, by, bw, bh,
                           math::Vec4(tint_.x*0.7f, tint_.y*0.8f, tint_.z*0.9f, 0.7f),
                           13.0f, Alignment::Center, d++, noclip);
+        } else if (!image_name_.empty()) {
+            // Real image: the renderer resolves the name → a GPU texture.
+            ri_.push_image_file(image_name_.c_str(), bx, by, bw, bh, tint_, d++, noclip);
         } else {
+            // No image set: draw a placeholder (cross + outline).
             math::Vec4 ch(tint_.x*0.5f, tint_.y*0.5f, tint_.z*0.5f, 0.5f);
             ri_.push_rect(bx, by+bh*0.5f-1, bw, 2, ch, d++, noclip);
             ri_.push_rect(bx+bw*0.5f-1, by, 2, bh, ch, d++, noclip);

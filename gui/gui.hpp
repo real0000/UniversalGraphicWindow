@@ -511,6 +511,22 @@ struct WidgetRenderInfo {
         if (!t || !t[0]) return;
         texts.push_back({t, math::make_box(x,y,w,h), col, font_size, align, depth, clip});
     }
+    // Image quad resolved from a file path (the renderer maps path/name → texture).
+    void push_image_file(const char* path, float x, float y, float w, float h,
+                         const math::Vec4& tint, int32_t depth, const math::Box& clip,
+                         const math::Box& uv = math::make_box(0.f, 0.f, 1.f, 1.f)) {
+        if (!path || !path[0]) return;
+        textures.push_back({TextureSourceType::File, path, nullptr, 0, -1,
+                            math::make_box(x,y,w,h), uv, tint, depth, clip});
+    }
+    // Image quad resolved from an in-memory blob (keyed by the pointer).
+    void push_image_memory(const void* data, size_t size, float x, float y, float w, float h,
+                           const math::Vec4& tint, int32_t depth, const math::Box& clip,
+                           const math::Box& uv = math::make_box(0.f, 0.f, 1.f, 1.f)) {
+        if (!data) return;
+        textures.push_back({TextureSourceType::Memory, nullptr, data, size, -1,
+                            math::make_box(x,y,w,h), uv, tint, depth, clip});
+    }
 
     // Discard all pools and cached data; called by IGuiWidget::mark_dirty().
     void invalidate() {
