@@ -12,7 +12,10 @@
 
 #if defined(WINDOW_SUPPORT_OPENGL)
 #include "glad.h"
+#include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
 #include <vector>
 #endif
 
@@ -20,6 +23,30 @@ namespace window {
 
 #if defined(WINDOW_SUPPORT_OPENGL)
 namespace {
+
+// Log once per feature that core OpenGL cannot do (mesh shaders, etc.), then no-op.
+void gl_unsupported(const char* feature) {
+    static std::set<std::string> logged;
+    if (logged.insert(feature).second)
+        std::fprintf(stderr, "[UGW/OpenGL] %s not supported on this backend (no-op)\n", feature);
+}
+
+GLbitfield gl_barrier_bits(uint32_t bits) {
+    if (bits == GPU_BARRIER_ALL) return GL_ALL_BARRIER_BITS;
+    GLbitfield b = 0;
+    if (bits & GPU_BARRIER_VERTEX_BUFFER)  b |= GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT;
+    if (bits & GPU_BARRIER_INDEX_BUFFER)   b |= GL_ELEMENT_ARRAY_BARRIER_BIT;
+    if (bits & GPU_BARRIER_UNIFORM_BUFFER) b |= GL_UNIFORM_BARRIER_BIT;
+    if (bits & GPU_BARRIER_STORAGE_BUFFER) b |= GL_SHADER_STORAGE_BARRIER_BIT;
+    if (bits & GPU_BARRIER_TEXTURE)        b |= GL_TEXTURE_FETCH_BARRIER_BIT;
+    if (bits & GPU_BARRIER_STORAGE_IMAGE)  b |= GL_SHADER_IMAGE_ACCESS_BARRIER_BIT;
+    if (bits & GPU_BARRIER_INDIRECT_ARGS)  b |= GL_COMMAND_BARRIER_BIT;
+    if (bits & GPU_BARRIER_RENDER_TARGET)  b |= GL_FRAMEBUFFER_BARRIER_BIT;
+    return b;
+}
+GLenum gl_image_access(StorageAccess a) {
+    switch (a) { case StorageAccess::Read: return GL_READ_ONLY; case StorageAccess::Write: return GL_WRITE_ONLY; default: return GL_READ_WRITE; }
+}
 
 //-----------------------------------------------------------------------------
 // Enum / format conversions
@@ -156,6 +183,8 @@ struct GLPipeline {
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
     BlendState blend; DepthStencilState depth; RasterizerState raster;
     bool compute = false;
+    bool is_patch = false;   // tessellation
+    int  patch_points = 0;
 };
 struct GLRenderTarget { GLuint fbo = 0; int color_tex = -1; int depth_tex = -1; };
 
@@ -226,10 +255,14 @@ public:
         cur();
         GLenum type = GL_VERTEX_SHADER;
         switch (d.stage) {
-            case ShaderStage::Fragment: type = GL_FRAGMENT_SHADER; break;
-            case ShaderStage::Geometry: type = GL_GEOMETRY_SHADER; break;
-            case ShaderStage::Compute:  type = GL_COMPUTE_SHADER; break;
-            default: break;
+            case ShaderStage::Fragment:    type = GL_FRAGMENT_SHADER; break;
+            case ShaderStage::Geometry:    type = GL_GEOMETRY_SHADER; break;
+            case ShaderStage::TessControl: type = GL_TESS_CONTROL_SHADER; break;
+            case ShaderStage::TessEval:    type = GL_TESS_EVALUATION_SHADER; break;
+            case ShaderStage::Compute:     type = GL_COMPUTE_SHADER; break;
+            case ShaderStage::Task:
+            case ShaderStage::Mesh:        gl_unsupported("mesh/task shaders"); return { -1 };
+            default: break; // Vertex
         }
         GLShader sh; sh.stage = d.stage; sh.id = glCreateShader(type);
         const char* src = static_cast<const char*>(d.code);
@@ -245,12 +278,19 @@ public:
 
     PipelineHandle create_pipeline(const PipelineDesc& d) override {
         cur();
+        if (d.mesh_shader.valid()) { gl_unsupported("mesh-shader pipelines"); return { -1 }; }
         GLPipeline p; p.layout = d.vertex_layout; p.topology = d.topology;
         p.blend = d.blend; p.depth = d.depth_stencil; p.raster = d.rasterizer;
         p.program = glCreateProgram();
         auto attach = [&](ShaderHandle h) { if (auto* s = shaders_.get(h.id)) glAttachShader(p.program, s->id); };
         if (d.compute_shader.valid()) { p.compute = true; attach(d.compute_shader); }
-        else { attach(d.vertex_shader); attach(d.fragment_shader); }
+        else {
+            attach(d.vertex_shader); attach(d.fragment_shader);
+            if (d.geometry_shader.valid())     attach(d.geometry_shader);
+            if (d.tess_control_shader.valid()) attach(d.tess_control_shader);
+            if (d.tess_eval_shader.valid())    attach(d.tess_eval_shader);
+            if (d.patch_control_points > 0) { p.is_patch = true; p.patch_points = int(d.patch_control_points); }
+        }
         glLinkProgram(p.program);
         GLint ok = 0; glGetProgramiv(p.program, GL_LINK_STATUS, &ok);
         if (!ok) { glDeleteProgram(p.program); return { -1 }; }
@@ -359,6 +399,7 @@ public:
         pipeline_ = h.id;
         auto* p = dev_->pipeline(h.id); if (!p) return;
         glUseProgram(p->program);
+        if (p->is_patch) glPatchParameteri(GL_PATCH_VERTICES, p->patch_points);
         // Blend
         if (p->blend.enabled) {
             glEnable(GL_BLEND);
@@ -428,8 +469,49 @@ public:
     }
     void dispatch(uint32_t x, uint32_t y, uint32_t z) override { glDispatchCompute(x, y, z); }
 
+    // Storage (UAV) bindings.
+    void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override {
+        auto* b = dev_->buffer(h.id); if (!b) return;
+        if (size) glBindBufferRange(GL_SHADER_STORAGE_BUFFER, slot, b->id, offset, size);
+        else      glBindBufferBase(GL_SHADER_STORAGE_BUFFER, slot, b->id);
+    }
+    void bind_storage_texture(uint32_t slot, TextureHandle h, int mip, StorageAccess access) override {
+        auto* t = dev_->texture(h.id); if (!t) return;
+        glBindImageTexture(slot, t->id, mip, GL_FALSE, 0, gl_image_access(access), GLenum(t->fmt.internal_fmt));
+    }
+
+    // Indirect (GPU-driven) draws / dispatch.
+    void draw_indirect(BufferHandle args, uint32_t offset, uint32_t draw_count, uint32_t stride) override {
+        auto* b = dev_->buffer(args.id); if (!b) return;
+        configure_attribs();
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, b->id);
+        const void* off = reinterpret_cast<const void*>(size_t(offset));
+        if (draw_count > 1) glMultiDrawArraysIndirect(topology(), off, draw_count, stride);
+        else                glDrawArraysIndirect(topology(), off);
+    }
+    void draw_indexed_indirect(BufferHandle args, uint32_t offset, uint32_t draw_count, uint32_t stride) override {
+        auto* b = dev_->buffer(args.id); if (!b) return;
+        configure_attribs();
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, b->id);
+        const void* off = reinterpret_cast<const void*>(size_t(offset));
+        if (draw_count > 1) glMultiDrawElementsIndirect(topology(), index_type_, off, draw_count, stride);
+        else                glDrawElementsIndirect(topology(), index_type_, off);
+    }
+    void dispatch_indirect(BufferHandle args, uint32_t offset) override {
+        auto* b = dev_->buffer(args.id); if (!b) return;
+        glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, b->id);
+        glDispatchComputeIndirect(GLintptr(offset));
+    }
+
+    // Mesh-shader pipeline — not core OpenGL.
+    void draw_mesh_tasks(uint32_t, uint32_t, uint32_t) override { gl_unsupported("draw_mesh_tasks"); }
+    void draw_mesh_tasks_indirect(BufferHandle, uint32_t, uint32_t, uint32_t) override { gl_unsupported("draw_mesh_tasks_indirect"); }
+
+    void memory_barrier(uint32_t bits) override { glMemoryBarrier(gl_barrier_bits(bits)); }
+
 private:
-    GLenum topology() const { auto* p = dev_->pipeline(pipeline_); return p ? gl_topology(p->topology) : GL_TRIANGLES; }
+    GLenum topology() const { auto* p = dev_->pipeline(pipeline_); if (p && p->is_patch) return GL_PATCHES; return p ? gl_topology(p->topology) : GL_TRIANGLES; }
     void configure_attribs() {
         auto* p = dev_->pipeline(pipeline_); if (!p) return;
         const VertexLayout& l = p->layout;
@@ -445,6 +527,7 @@ private:
             const void* off = reinterpret_cast<const void*>(size_t(vbo_off_[a.buffer_slot]) + a.offset);
             if (integer) glVertexAttribIPointer(a.location, comps, type, stride, off);
             else         glVertexAttribPointer(a.location, comps, type, norm, stride, off);
+            glVertexAttribDivisor(a.location, l.input_rates[a.buffer_slot] == VertexInputRate::PerInstance ? 1u : 0u);
         }
     }
 

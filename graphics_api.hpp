@@ -985,8 +985,26 @@ WINDOW_GFX_HANDLE(RenderTargetHandle);
 enum class BufferType : uint8_t { Vertex, Index, Uniform, Storage, Indirect };
 enum class ResourceUsage : uint8_t { Immutable, Default, Dynamic, Staging };
 enum class IndexFormat : uint8_t { UInt16, UInt32 };
-enum class ShaderStage : uint8_t { Vertex, Fragment, Geometry, TessControl, TessEval, Compute };
+// Programmable stages: classic graphics + tessellation + compute + the mesh-shader
+// pipeline (Task = amplification/Mesh). Backends without a stage log + no-op.
+enum class ShaderStage : uint8_t { Vertex, Fragment, Geometry, TessControl, TessEval, Compute, Task, Mesh };
 enum class ShaderLanguage : uint8_t { Auto, GLSL, ESSL, SPIRV, HLSL, DXBC, DXIL, MSL, WGSL };
+// Per-vertex vs per-instance stepping for a vertex buffer slot (instancing).
+enum class VertexInputRate : uint8_t { PerVertex, PerInstance };
+// Access for storage (UAV) image bindings in compute / fragment.
+enum class StorageAccess : uint8_t { Read, Write, ReadWrite };
+// Memory-barrier scopes between passes (compute↔graphics, indirect args, etc.).
+enum GpuBarrier : uint32_t {
+    GPU_BARRIER_VERTEX_BUFFER  = 1u << 0,
+    GPU_BARRIER_INDEX_BUFFER   = 1u << 1,
+    GPU_BARRIER_UNIFORM_BUFFER = 1u << 2,
+    GPU_BARRIER_STORAGE_BUFFER = 1u << 3,
+    GPU_BARRIER_TEXTURE        = 1u << 4,
+    GPU_BARRIER_STORAGE_IMAGE  = 1u << 5,
+    GPU_BARRIER_INDIRECT_ARGS  = 1u << 6,
+    GPU_BARRIER_RENDER_TARGET  = 1u << 7,
+    GPU_BARRIER_ALL            = 0xFFFFFFFFu
+};
 
 // Texture usage flags (bitwise OR).
 enum TextureUsage : uint32_t {
@@ -1052,17 +1070,28 @@ struct VertexLayout {
     static const int MAX_BUFFER_SLOTS = 8;
     VertexAttribute attributes[MAX_ATTRIBUTES] = {};
     int             attribute_count = 0;
-    uint32_t        strides[MAX_BUFFER_SLOTS] = {}; // byte stride per vertex buffer slot
+    uint32_t        strides[MAX_BUFFER_SLOTS] = {};       // byte stride per vertex buffer slot
+    VertexInputRate input_rates[MAX_BUFFER_SLOTS] = {};   // per-vertex (default) or per-instance, per slot
     int             buffer_count = 0;
 };
 
 // Pipeline state object (immutable once created), mirroring modern explicit APIs.
+// Pipeline kind is inferred from which shaders are valid:
+//   compute_shader            → compute pipeline
+//   mesh_shader (+ task?)      → mesh-shader pipeline (no vertex input)
+//   else vertex (+ tess/geom)  → classic graphics pipeline
 struct PipelineDesc {
     ShaderHandle      vertex_shader;
     ShaderHandle      fragment_shader;
-    ShaderHandle      compute_shader;               // valid → a compute pipeline (graphics fields ignored)
+    ShaderHandle      geometry_shader;              // optional
+    ShaderHandle      tess_control_shader;          // optional (tessellation)
+    ShaderHandle      tess_eval_shader;             // optional (tessellation)
+    ShaderHandle      compute_shader;               // valid → a compute pipeline
+    ShaderHandle      task_shader;                  // optional amplification (mesh pipeline)
+    ShaderHandle      mesh_shader;                  // valid → a mesh-shader pipeline
     VertexLayout      vertex_layout;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
+    uint32_t          patch_control_points = 0;     // >0 → tessellation patches (overrides topology)
     BlendState        blend;
     DepthStencilState depth_stencil;
     RasterizerState   rasterizer;
@@ -1141,13 +1170,35 @@ public:
     virtual void bind_sampler(uint32_t slot, SamplerHandle h) = 0;
     virtual void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t offset = 0, uint32_t size = 0) = 0;
     virtual void push_constants(uint32_t offset, const void* data, uint32_t size) = 0;  // small per-draw constants
+    // Storage (UAV) resources for compute / read-write shaders.
+    virtual void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t offset = 0, uint32_t size = 0) = 0;
+    virtual void bind_storage_texture(uint32_t slot, TextureHandle h, int mip = 0,
+                                      StorageAccess access = StorageAccess::ReadWrite) = 0;
 
-    // Draw / dispatch.
+    // Direct draws / dispatch (instance_count + first_instance drive instancing;
+    // per-instance vertex stepping comes from VertexLayout::input_rates).
     virtual void draw(uint32_t vertex_count, uint32_t first_vertex = 0,
                       uint32_t instance_count = 1, uint32_t first_instance = 0) = 0;
     virtual void draw_indexed(uint32_t index_count, uint32_t first_index = 0, int32_t base_vertex = 0,
                               uint32_t instance_count = 1, uint32_t first_instance = 0) = 0;
     virtual void dispatch(uint32_t group_x, uint32_t group_y = 1, uint32_t group_z = 1) = 0;
+
+    // GPU-driven (indirect) draws / dispatch — args read from a BufferType::Indirect
+    // buffer. `draw_count` > 1 = multi-draw indirect; `stride` 0 = tightly packed.
+    virtual void draw_indirect(BufferHandle args, uint32_t offset = 0,
+                               uint32_t draw_count = 1, uint32_t stride = 0) = 0;
+    virtual void draw_indexed_indirect(BufferHandle args, uint32_t offset = 0,
+                                       uint32_t draw_count = 1, uint32_t stride = 0) = 0;
+    virtual void dispatch_indirect(BufferHandle args, uint32_t offset = 0) = 0;
+
+    // Mesh-shader pipeline dispatch (task/mesh). Backends without mesh shaders
+    // (e.g. core OpenGL) log once and no-op.
+    virtual void draw_mesh_tasks(uint32_t group_x, uint32_t group_y = 1, uint32_t group_z = 1) = 0;
+    virtual void draw_mesh_tasks_indirect(BufferHandle args, uint32_t offset = 0,
+                                          uint32_t draw_count = 1, uint32_t stride = 0) = 0;
+
+    // Memory/execution barrier between passes (GpuBarrier bits OR'd).
+    virtual void memory_barrier(uint32_t barrier_bits) = 0;
 
 protected:
     GraphicCommander() = default;
