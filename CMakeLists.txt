@@ -635,6 +635,7 @@ if(WINDOW_ENABLE_GUI)
         gui/gui_sizer.cpp
         gui/gui_animation.cpp
         gui/gui_serialization.cpp
+        gui/gui_renderer.cpp
     )
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_GUI)
     message(STATUS "GUI support enabled")
