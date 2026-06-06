@@ -53,7 +53,12 @@ option(WINDOW_MATH_SVE "Enable SVE SIMD acceleration for math (ARM)" OFF)
 
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF CACHE BOOL "" FORCE)
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/third" CACHE PATH "" FORCE)
+# Keep fetched deps under <build>/third when UGW is the top-level project, but
+# do NOT hijack a parent project's FetchContent base when added via
+# add_subdirectory (that would dump deps into the consumer's source tree).
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_BINARY_DIR}/third" CACHE PATH "" FORCE)
+endif()
 
 # Helper function to declare FetchContent with git progress
 # Usage: window_fetch_content(name GIT_REPOSITORY url GIT_TAG tag [other args...])
