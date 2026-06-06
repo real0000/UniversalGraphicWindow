@@ -216,6 +216,7 @@ public:
         cur();
         GLTexture t; t.fmt = gl_format(d.format); t.w = d.width; t.h = d.height;
         t.target = (d.cube ? GL_TEXTURE_CUBE_MAP : (d.array_layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D));
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // R8 / odd-width rows
         glGenTextures(1, &t.id);
         glBindTexture(t.target, t.id);
         if (t.target == GL_TEXTURE_2D) {
@@ -229,9 +230,12 @@ public:
     }
     void update_texture(TextureHandle h, const TextureRegion& r, const void* data) override {
         cur(); if (auto* t = textures_.get(h.id)) {
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // R8 / odd-width rows
             glBindTexture(t->target, t->id);
             if (t->target == GL_TEXTURE_2D)
                 glTexSubImage2D(GL_TEXTURE_2D, r.mip, r.x, r.y, r.width, r.height, t->fmt.format, t->fmt.type, data);
+            else if (t->target == GL_TEXTURE_2D_ARRAY)
+                glTexSubImage3D(GL_TEXTURE_2D_ARRAY, r.mip, r.x, r.y, r.layer, r.width, r.height, 1, t->fmt.format, t->fmt.type, data);
         }
     }
     void generate_mipmaps(TextureHandle h) override { cur(); if (auto* t = textures_.get(h.id)) { glBindTexture(t->target, t->id); glGenerateMipmap(t->target); } }
