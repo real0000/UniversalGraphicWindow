@@ -125,6 +125,10 @@ message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
 
 # Add platform-independent source files
 list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input_keyboard.cpp input/input_mouse.cpp input/input_gamepad.cpp input/input_wheel.cpp)
+# Render device/commander abstraction (graphics_api.hpp). Added unconditionally so
+# the create_device/create_commander factory is always defined; the OpenGL bodies
+# self-guard with WINDOW_SUPPORT_OPENGL (other backends get their own api_render_*).
+list(APPEND WINDOW_SOURCES api/api_render_opengl.cpp)
 
 # Add device enumeration files (platform-specific)
 if(WIN32)
