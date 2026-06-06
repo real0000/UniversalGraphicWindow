@@ -189,7 +189,7 @@ struct Pool {
 };
 
 struct GLBuffer   { GLuint id = 0; GLenum target = GL_ARRAY_BUFFER; uint32_t size = 0; };
-struct GLTexture  { GLuint id = 0; GLenum target = GL_TEXTURE_2D; GLFormat fmt{}; int w = 0, h = 0; };
+struct GLTexture  { GLuint id = 0; GLenum target = GL_TEXTURE_2D; GLFormat fmt{}; int w = 0, h = 0; int levels = 1, layers = 1; };
 struct GLSampler  { GLuint id = 0; };
 struct GLShader   { GLuint id = 0; ShaderStage stage = ShaderStage::Vertex; };
 struct GLPipeline {
@@ -200,11 +200,17 @@ struct GLPipeline {
     bool compute = false;
     bool is_patch = false;   // tessellation
     int  patch_points = 0;
+    bool alpha_to_coverage = false;
 };
 struct GLRenderTarget { GLuint fbo = 0; int color_tex = -1; int depth_tex = -1; };
 struct GLFence     { GLsync sync = nullptr; bool signaled = false; };
 struct GLSemaphore { };  // OpenGL has one implicit queue; semaphores are no-ops
 struct GLQuery     { GLuint id = 0; GLenum target = GL_TIMESTAMP; };
+// Binding model (OpenGL has no descriptor sets — we store the layout/writes and
+// replay them as individual slot binds in bind_descriptor_set).
+struct GLDescSetLayout  { DescriptorSetLayoutDesc desc; };
+struct GLPipelineLayout { PipelineLayoutDesc desc; };
+struct GLDescriptorSet  { std::vector<DescriptorWrite> writes; DescriptorSetLayoutHandle layout; };
 
 //-----------------------------------------------------------------------------
 // GLDevice
@@ -215,7 +221,19 @@ public:
     ~GLDevice() override = default;
 
     Backend get_backend() const override { return Backend::OpenGL; }
-    void get_capabilities(GraphicsCapabilities* out) const override { if (ctx_ && out) ctx_->get_capabilities(out); }
+    void get_capabilities(GraphicsCapabilities* out) const override {
+        if (ctx_ && out) ctx_->get_capabilities(out);
+        if (!out) return;
+        const_cast<GLDevice*>(this)->cur();
+        GLint v = 0;
+        glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &v);        out->min_uniform_buffer_offset_alignment = v;
+        glGetIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &v); out->min_storage_buffer_offset_alignment = v;
+        glGetIntegerv(GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT, &v);        out->min_texel_buffer_offset_alignment = v;
+        glGetIntegerv(GL_MAX_UNIFORM_BLOCK_SIZE, &v);                 out->max_uniform_buffer_range = v;
+        glGetIntegerv(GL_MAX_SHADER_STORAGE_BLOCK_SIZE, &v);         out->max_storage_buffer_range = v;
+        out->max_push_constant_size  = 256;                       // emulated via a UBO; 256 = safe cross-API budget
+        out->max_bound_descriptor_sets = PipelineLayoutDesc::MAX_SETS;
+    }
 
     BufferHandle create_buffer(const BufferDesc& d) override {
         cur();
@@ -223,7 +241,9 @@ public:
         glGenBuffers(1, &b.id);
         glBindBuffer(b.target, b.id);
         glBufferData(b.target, d.size, d.initial_data, gl_usage(d.usage));
-        return { buffers_.alloc(b) };
+        const int id = buffers_.alloc(b);
+        if (d.debug_name && glObjectLabel) glObjectLabel(GL_BUFFER, b.id, -1, d.debug_name);
+        return { id };
     }
     void update_buffer(BufferHandle h, const void* data, uint32_t size, uint32_t offset) override {
         cur(); if (auto* b = buffers_.get(h.id)) { glBindBuffer(b->target, b->id); glBufferSubData(b->target, offset, size, data); }
@@ -234,18 +254,27 @@ public:
         cur();
         GLTexture t; t.fmt = gl_format(d.format); t.w = d.width; t.h = d.height;
         t.target = (d.cube ? GL_TEXTURE_CUBE_MAP : ((d.array_layers > 1 || d.array_texture) ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D));
+        t.layers = (t.target == GL_TEXTURE_2D_ARRAY) ? (d.array_layers > 1 ? d.array_layers : 1) : 1;
+        // mip_levels: >0 explicit, 0 = full chain. Immutable storage needs a count.
+        t.levels = d.mip_levels > 0 ? d.mip_levels : 1;
+        if (d.mip_levels == 0) { int s = d.width > d.height ? d.width : d.height; t.levels = 1; while (s > 1) { s >>= 1; ++t.levels; } }
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // R8 / odd-width rows
         glGenTextures(1, &t.id);
         glBindTexture(t.target, t.id);
-        if (t.target == GL_TEXTURE_2D) {
-            glTexImage2D(GL_TEXTURE_2D, 0, t.fmt.internal_fmt, d.width, d.height, 0, t.fmt.format, t.fmt.type, d.initial_data);
-        } else if (t.target == GL_TEXTURE_2D_ARRAY) {
-            const int layers = d.array_layers > 1 ? d.array_layers : 1;
-            glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, t.fmt.internal_fmt, d.width, d.height, layers, 0, t.fmt.format, t.fmt.type, d.initial_data);
+        // Immutable storage (glTexStorage) so the texture can back glTextureView().
+        if (t.target == GL_TEXTURE_2D_ARRAY) {
+            glTexStorage3D(t.target, t.levels, t.fmt.internal_fmt, d.width, d.height, t.layers);
+            if (d.initial_data) glTexSubImage3D(t.target, 0, 0, 0, 0, d.width, d.height, t.layers, t.fmt.format, t.fmt.type, d.initial_data);
+        } else { // GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP
+            glTexStorage2D(t.target, t.levels, t.fmt.internal_fmt, d.width, d.height);
+            if (d.initial_data && t.target == GL_TEXTURE_2D)
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, d.width, d.height, t.fmt.format, t.fmt.type, d.initial_data);
         }
-        glTexParameteri(t.target, GL_TEXTURE_MIN_FILTER, d.mip_levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+        glTexParameteri(t.target, GL_TEXTURE_MIN_FILTER, t.levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         glTexParameteri(t.target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        return { textures_.alloc(t) };
+        const int id = textures_.alloc(t);
+        if (d.debug_name && glObjectLabel) glObjectLabel(GL_TEXTURE, t.id, -1, d.debug_name);
+        return { id };
     }
     void update_texture(TextureHandle h, const TextureRegion& r, const void* data) override {
         cur(); if (auto* t = textures_.get(h.id)) {
@@ -316,6 +345,7 @@ public:
         if (d.mesh_shader.valid()) { gl_unsupported("mesh-shader pipelines"); return { -1 }; }
         GLPipeline p; p.layout = d.vertex_layout; p.topology = d.topology;
         p.blend = d.blend; p.depth = d.depth_stencil; p.raster = d.rasterizer;
+        p.alpha_to_coverage = d.alpha_to_coverage;
         p.program = glCreateProgram();
         auto attach = [&](ShaderHandle h) { if (auto* s = shaders_.get(h.id)) glAttachShader(p.program, s->id); };
         if (d.compute_shader.valid()) { p.compute = true; attach(d.compute_shader); }
@@ -333,7 +363,9 @@ public:
             std::fprintf(stderr, "[UGW/OpenGL] program link failed:\n%s\n", log);
             glDeleteProgram(p.program); return { -1 };
         }
-        return { pipelines_.alloc(p) };
+        const int id = pipelines_.alloc(p);
+        if (d.debug_name && glObjectLabel) glObjectLabel(GL_PROGRAM, p.program, -1, d.debug_name);
+        return { id };
     }
     void destroy_pipeline(PipelineHandle h) override { cur(); if (auto* p = pipelines_.get(h.id)) { if (p->program) glDeleteProgram(p->program); pipelines_.release(h.id); } }
 
@@ -435,6 +467,53 @@ public:
         glDeleteFramebuffers(1, &fbo);
     }
 
+    // ---- Texture views ------------------------------------------------------
+    TextureHandle create_texture_view(const TextureViewDesc& d) override {
+        cur(); auto* src = textures_.get(d.texture.id); if (!src) return { -1 };
+        GLTexture v;
+        v.fmt    = (d.format == TextureFormat::Unknown) ? src->fmt : gl_format(d.format);
+        v.target = d.cube ? GL_TEXTURE_CUBE_MAP : src->target;
+        v.w = src->w; v.h = src->h;
+        v.levels = d.mip_count   ? d.mip_count   : (src->levels - d.base_mip);
+        v.layers = d.layer_count ? d.layer_count : (src->layers - d.base_layer);
+        glGenTextures(1, &v.id);
+        glTextureView(v.id, v.target, src->id, v.fmt.internal_fmt,
+                      d.base_mip, v.levels, d.base_layer, v.layers);
+        glBindTexture(v.target, v.id);
+        glTexParameteri(v.target, GL_TEXTURE_MIN_FILTER, v.levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+        glTexParameteri(v.target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        return { textures_.alloc(v) };
+    }
+
+    // ---- Binding model (descriptor sets / pipeline layout = root signature) ---
+    DescriptorSetLayoutHandle create_descriptor_set_layout(const DescriptorSetLayoutDesc& d) override { return { dsls_.alloc(GLDescSetLayout{ d }) }; }
+    void destroy_descriptor_set_layout(DescriptorSetLayoutHandle h) override { dsls_.release(h.id); }
+    PipelineLayoutHandle create_pipeline_layout(const PipelineLayoutDesc& d) override { return { plls_.alloc(GLPipelineLayout{ d }) }; }
+    void destroy_pipeline_layout(PipelineLayoutHandle h) override { plls_.release(h.id); }
+    DescriptorSetHandle create_descriptor_set(const DescriptorSetDesc& d) override {
+        GLDescriptorSet s; s.layout = d.layout; s.writes.assign(d.writes, d.writes + d.write_count);
+        return { dsets_.alloc(std::move(s)) };
+    }
+    void update_descriptor_set(DescriptorSetHandle h, const DescriptorSetDesc& d) override {
+        if (auto* s = dsets_.get(h.id)) { s->layout = d.layout; s->writes.assign(d.writes, d.writes + d.write_count); }
+    }
+    void destroy_descriptor_set(DescriptorSetHandle h) override { dsets_.release(h.id); }
+
+    // ---- Debug labels -------------------------------------------------------
+    void set_debug_name(ObjectType type, uint32_t id, const char* name) override {
+        cur(); if (!glObjectLabel || !name) return;
+        GLenum ns = GL_TEXTURE; GLuint obj = 0;
+        switch (type) {
+            case ObjectType::Buffer:       ns = GL_BUFFER;     if (auto* b = buffers_.get(int(id)))   obj = b->id; break;
+            case ObjectType::Texture:      ns = GL_TEXTURE;    if (auto* t = textures_.get(int(id)))  obj = t->id; break;
+            case ObjectType::Sampler:      ns = GL_SAMPLER;    if (auto* s = samplers_.get(int(id)))  obj = s->id; break;
+            case ObjectType::Shader:       ns = GL_SHADER;     if (auto* s = shaders_.get(int(id)))   obj = s->id; break;
+            case ObjectType::Pipeline:     ns = GL_PROGRAM;    if (auto* p = pipelines_.get(int(id))) obj = p->program; break;
+            case ObjectType::RenderTarget: ns = GL_FRAMEBUFFER;if (auto* r = rts_.get(int(id)))       obj = r->fbo; break;
+        }
+        if (obj) glObjectLabel(ns, obj, -1, name);
+    }
+
     // Internal accessors for the commander.
     GLBuffer*   buffer(int id)   { return buffers_.get(id); }
     GLTexture*  texture(int id)  { return textures_.get(id); }
@@ -442,6 +521,7 @@ public:
     GLPipeline* pipeline(int id) { return pipelines_.get(id); }
     GLRenderTarget* rt(int id)   { return rts_.get(id); }
     GLQuery*    query(int id)    { return queries_.get(id); }
+    GLDescriptorSet* descriptor_set(int id) { return dsets_.get(id); }
     void cur() { if (ctx_) ctx_->make_current(); }
 
 private:
@@ -466,6 +546,7 @@ private:
     Pool<GLBuffer> buffers_; Pool<GLTexture> textures_; Pool<GLSampler> samplers_;
     Pool<GLShader> shaders_; Pool<GLPipeline> pipelines_; Pool<GLRenderTarget> rts_;
     Pool<GLFence> fences_; Pool<GLSemaphore> semaphores_; Pool<GLQuery> queries_;
+    Pool<GLDescSetLayout> dsls_; Pool<GLPipelineLayout> plls_; Pool<GLDescriptorSet> dsets_;
 };
 
 //-----------------------------------------------------------------------------
@@ -553,8 +634,8 @@ public:
             const auto& ff = p->depth.front_face; const auto& bf = p->depth.back_face;
             glStencilOpSeparate(GL_FRONT, gl_stencil_op(ff.stencil_fail), gl_stencil_op(ff.depth_fail), gl_stencil_op(ff.pass));
             glStencilOpSeparate(GL_BACK,  gl_stencil_op(bf.stencil_fail), gl_stencil_op(bf.depth_fail), gl_stencil_op(bf.pass));
-            glStencilFuncSeparate(GL_FRONT, gl_compare(ff.func), 0, p->depth.stencil_read_mask);
-            glStencilFuncSeparate(GL_BACK,  gl_compare(bf.func), 0, p->depth.stencil_read_mask);
+            glStencilFuncSeparate(GL_FRONT, gl_compare(ff.func), GLint(stencil_ref_), p->depth.stencil_read_mask);
+            glStencilFuncSeparate(GL_BACK,  gl_compare(bf.func), GLint(stencil_ref_), p->depth.stencil_read_mask);
             glStencilMask(p->depth.stencil_write_mask);
         } else glDisable(GL_STENCIL_TEST);
         // Rasterizer
@@ -564,6 +645,12 @@ public:
         glFrontFace(p->raster.front_face == FrontFace::Clockwise ? GL_CW : GL_CCW);
         if (p->raster.scissor_enable) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
         if (p->raster.multisample_enable) glEnable(GL_MULTISAMPLE); else glDisable(GL_MULTISAMPLE);
+        if (p->alpha_to_coverage) glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE); else glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        // Static depth bias from the pipeline (dynamic set_depth_bias overrides later).
+        if (p->raster.depth_bias != 0 || p->raster.slope_scaled_depth_bias != 0.0f) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(p->raster.slope_scaled_depth_bias, float(p->raster.depth_bias));
+        } else glDisable(GL_POLYGON_OFFSET_FILL);
     }
 
     void bind_vertex_buffer(uint32_t slot, BufferHandle h, uint32_t offset) override {
@@ -688,6 +775,95 @@ public:
                                  GL_DEBUG_SEVERITY_NOTIFICATION, -1, name ? name : "");
     }
 
+    // ---- Descriptor sets (emulated: replay the set's writes as slot binds) ----
+    void bind_descriptor_set(uint32_t /*set_index*/, DescriptorSetHandle set,
+                             const uint32_t* dyn_offsets, int dyn_count) override {
+        auto* s = dev_->descriptor_set(set.id); if (!s) return;
+        // OpenGL has a flat binding space; the write's `binding` is used directly.
+        // Dynamic offsets are consumed in order by Uniform/Storage buffer bindings.
+        int dyn = 0;
+        for (const auto& w : s->writes) {
+            switch (w.type) {
+                case BindingType::UniformBuffer:
+                case BindingType::StorageBuffer: {
+                    auto* b = dev_->buffer(w.buffer.id); if (!b) break;
+                    uint32_t off = w.buffer_offset + ((dyn_offsets && dyn < dyn_count) ? dyn_offsets[dyn++] : 0);
+                    const GLenum tgt = (w.type == BindingType::UniformBuffer) ? GL_UNIFORM_BUFFER : GL_SHADER_STORAGE_BUFFER;
+                    if (w.buffer_size) glBindBufferRange(tgt, w.binding, b->id, off, w.buffer_size);
+                    else               glBindBufferBase(tgt, w.binding, b->id);
+                    break;
+                }
+                case BindingType::SampledTexture:
+                case BindingType::CombinedImageSampler: {
+                    if (auto* t = dev_->texture(w.texture.id)) { glActiveTexture(GL_TEXTURE0 + w.binding); glBindTexture(t->target, t->id); }
+                    if (w.type == BindingType::CombinedImageSampler) if (auto* sm = dev_->sampler(w.sampler.id)) glBindSampler(w.binding, sm->id);
+                    break;
+                }
+                case BindingType::Sampler:
+                    if (auto* sm = dev_->sampler(w.sampler.id)) glBindSampler(w.binding, sm->id);
+                    break;
+                case BindingType::StorageTexture:
+                    if (auto* t = dev_->texture(w.texture.id))
+                        glBindImageTexture(w.binding, t->id, w.texture_mip, GL_FALSE, 0, gl_image_access(w.storage_access), GLenum(t->fmt.internal_fmt));
+                    break;
+            }
+        }
+    }
+
+    // ---- Dynamic pipeline state ---------------------------------------------
+    void set_stencil_reference(uint32_t ref) override {
+        stencil_ref_ = ref;
+        auto* p = dev_->pipeline(pipeline_);
+        if (p && p->depth.stencil_enable) {
+            glStencilFuncSeparate(GL_FRONT, gl_compare(p->depth.front_face.func), GLint(ref), p->depth.stencil_read_mask);
+            glStencilFuncSeparate(GL_BACK,  gl_compare(p->depth.back_face.func),  GLint(ref), p->depth.stencil_read_mask);
+        }
+    }
+    void set_blend_constants(const float rgba[4]) override { if (rgba) glBlendColor(rgba[0], rgba[1], rgba[2], rgba[3]); }
+    void set_depth_bias(float constant, float /*clamp*/, float slope) override {
+        glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(slope, constant);   // GL lacks a portable bias clamp
+    }
+    void set_line_width(float w) override { glLineWidth(w); }
+
+    // ---- Multiple viewports / scissors --------------------------------------
+    void set_viewports(const Viewport* vps, int count) override {
+        if (!vps || count <= 0) return;
+        std::vector<GLfloat> v(size_t(count) * 4); std::vector<GLdouble> d(size_t(count) * 2);
+        for (int i = 0; i < count; ++i) {
+            v[i*4+0] = vps[i].x; v[i*4+1] = vps[i].y; v[i*4+2] = vps[i].width; v[i*4+3] = vps[i].height;
+            d[i*2+0] = vps[i].min_depth; d[i*2+1] = vps[i].max_depth;
+        }
+        glViewportArrayv(0, count, v.data());
+        glDepthRangeArrayv(0, count, d.data());
+    }
+    void set_scissors(const ScissorRect* rs, int count) override {
+        if (!rs || count <= 0) return;
+        std::vector<GLint> s(size_t(count) * 4);
+        for (int i = 0; i < count; ++i) { s[i*4+0] = rs[i].x; s[i*4+1] = rs[i].y; s[i*4+2] = rs[i].width; s[i*4+3] = rs[i].height; }
+        glScissorArrayv(0, count, s.data());
+    }
+
+    // ---- Indirect draw with a GPU-supplied count (≈ ExecuteIndirect) ---------
+    void draw_indirect_count(BufferHandle args, uint32_t args_off, BufferHandle count_buf, uint32_t count_off,
+                             uint32_t max_draws, uint32_t stride) override {
+        auto* a = dev_->buffer(args.id); auto* c = dev_->buffer(count_buf.id); if (!a || !c) return;
+        configure_attribs();
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, a->id);
+        glBindBuffer(GL_PARAMETER_BUFFER, c->id);
+        glMultiDrawArraysIndirectCount(topology(), reinterpret_cast<const void*>(size_t(args_off)),
+                                       GLintptr(count_off), max_draws, stride);
+    }
+    void draw_indexed_indirect_count(BufferHandle args, uint32_t args_off, BufferHandle count_buf, uint32_t count_off,
+                                     uint32_t max_draws, uint32_t stride) override {
+        auto* a = dev_->buffer(args.id); auto* c = dev_->buffer(count_buf.id); if (!a || !c) return;
+        configure_attribs();
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
+        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, a->id);
+        glBindBuffer(GL_PARAMETER_BUFFER, c->id);
+        glMultiDrawElementsIndirectCount(topology(), index_type_, reinterpret_cast<const void*>(size_t(args_off)),
+                                         GLintptr(count_off), max_draws, stride);
+    }
+
 private:
     GLuint fbo_of(RenderTargetHandle h) { if (auto* rt = dev_->rt(h.id)) return rt->fbo; return 0; }  // invalid → backbuffer
     GLenum topology() const { auto* p = dev_->pipeline(pipeline_); if (p && p->is_patch) return GL_PATCHES; return p ? gl_topology(p->topology) : GL_TRIANGLES; }
@@ -715,6 +891,7 @@ private:
     GLuint vbo_[VertexLayout::MAX_BUFFER_SLOTS] = {}; uint32_t vbo_off_[VertexLayout::MAX_BUFFER_SLOTS] = {};
     GLuint ibo_ = 0; GLenum index_type_ = GL_UNSIGNED_INT; uint32_t index_off_ = 0; int index_size_ = 4;
     int pipeline_ = -1;
+    uint32_t stencil_ref_ = 0;
 };
 
 } // namespace

@@ -357,6 +357,18 @@ struct GraphicsCapabilities {
     int max_scissor_rects       = 1;  // Max simultaneous scissor rectangles
 
     //-------------------------------------------------------------------------
+    // Binding / shader-data alignment  (what offsets must be multiples of)
+    //-------------------------------------------------------------------------
+
+    int min_uniform_buffer_offset_alignment = 0; // bind_uniform_buffer offset granularity (bytes)
+    int min_storage_buffer_offset_alignment = 0; // bind_storage_buffer offset granularity (bytes)
+    int min_texel_buffer_offset_alignment   = 0; // texel-buffer binding granularity (bytes)
+    int max_uniform_buffer_range            = 0; // Max bytes bindable as one uniform buffer
+    int max_storage_buffer_range            = 0; // Max bytes bindable as one storage buffer
+    int max_push_constant_size              = 0; // Bytes available to push_constants() / root constants
+    int max_bound_descriptor_sets           = 0; // Max descriptor sets bound at once (root-signature width)
+
+    //-------------------------------------------------------------------------
     // Compute limits  (zeros indicate compute is unsupported)
     //-------------------------------------------------------------------------
 
@@ -982,6 +994,9 @@ WINDOW_GFX_HANDLE(RenderTargetHandle);
 WINDOW_GFX_HANDLE(FenceHandle);      // CPU waits for GPU completion
 WINDOW_GFX_HANDLE(SemaphoreHandle);  // GPU↔GPU / queue↔queue ordering (no-op on single-queue backends)
 WINDOW_GFX_HANDLE(QueryHandle);      // timestamp / occlusion / pipeline-statistics
+WINDOW_GFX_HANDLE(DescriptorSetLayoutHandle); // one descriptor set's binding layout (≈ VkDescriptorSetLayout)
+WINDOW_GFX_HANDLE(PipelineLayoutHandle);      // the full binding layout (≈ D3D12 root signature / VkPipelineLayout)
+WINDOW_GFX_HANDLE(DescriptorSetHandle);       // a written set of bound resources (≈ descriptor table / bind group)
 #undef WINDOW_GFX_HANDLE
 
 // ---- Resource enums ---------------------------------------------------------
@@ -1057,6 +1072,19 @@ struct TextureRegion {
     int layer = 0;
 };
 
+// A reinterpreting view onto an existing texture (different format and/or a mip /
+// layer sub-range). format = Unknown keeps the source format. The source must use
+// immutable storage (it does). Free the view with destroy_texture().
+struct TextureViewDesc {
+    TextureHandle texture;
+    TextureFormat format = TextureFormat::Unknown;  // Unknown = same as source
+    int  base_mip = 0;
+    int  mip_count = 0;        // 0 = all remaining levels
+    int  base_layer = 0;
+    int  layer_count = 0;      // 0 = all remaining layers
+    bool cube = false;         // view as a cubemap
+};
+
 struct ShaderDesc {
     ShaderStage    stage = ShaderStage::Vertex;
     ShaderLanguage language = ShaderLanguage::Auto; // Auto = pick the backend's native
@@ -1104,12 +1132,93 @@ struct PipelineDesc {
     BlendState        blend;
     DepthStencilState depth_stencil;
     RasterizerState   rasterizer;
+    PipelineLayoutHandle layout;                    // optional root signature; invalid → reflected/auto bindings
     TextureFormat     color_formats[8] = { TextureFormat::RGBA8_UNORM };
     int               color_format_count = 1;
     TextureFormat     depth_format = TextureFormat::D24_UNORM_S8_UINT;
     int               samples = 1;
+    bool              alpha_to_coverage = false;     // MSAA alpha-to-coverage
     const char*       debug_name = nullptr;
 };
+
+// ---- Resource binding model (descriptor sets / root signature) --------------
+// Modern explicit binding: a PipelineLayout (≈ D3D12 root signature) is built from
+// per-set DescriptorSetLayouts + push-constant ranges; resources are written into
+// DescriptorSets (≈ descriptor tables / bind groups) and bound as a unit. Backends
+// without native descriptor sets (OpenGL) emulate a set as a list of slot binds.
+
+// Shader-stage visibility bits (bitmask form of ShaderStage).
+enum ShaderStageBits : uint32_t {
+    STAGE_VERTEX       = 1u << 0,
+    STAGE_FRAGMENT     = 1u << 1,
+    STAGE_GEOMETRY     = 1u << 2,
+    STAGE_TESS_CONTROL = 1u << 3,
+    STAGE_TESS_EVAL    = 1u << 4,
+    STAGE_COMPUTE      = 1u << 5,
+    STAGE_TASK         = 1u << 6,
+    STAGE_MESH         = 1u << 7,
+    STAGE_ALL          = 0xFFu,
+};
+
+enum class BindingType : uint8_t {
+    UniformBuffer,        // constant buffer (UBO / cbuffer)
+    StorageBuffer,        // read/write structured buffer (SSBO / UAV buffer)
+    SampledTexture,       // sampled image (SRV)
+    StorageTexture,       // read/write image (image2D / UAV texture)
+    Sampler,              // standalone sampler
+    CombinedImageSampler, // texture+sampler in one binding (GLSL sampler2D)
+};
+
+// One binding within a descriptor set layout.
+struct DescriptorBinding {
+    uint32_t    binding = 0;                 // binding index within the set
+    BindingType type = BindingType::UniformBuffer;
+    uint32_t    count = 1;                   // array size (>1 for descriptor arrays)
+    uint32_t    stages = STAGE_ALL;          // ShaderStageBits visibility
+};
+
+struct DescriptorSetLayoutDesc {
+    static const int MAX_BINDINGS = 16;
+    DescriptorBinding bindings[MAX_BINDINGS] = {};
+    int               binding_count = 0;
+};
+
+// A range of push constants (root constants) visible to some stages.
+struct PushConstantRange {
+    uint32_t offset = 0;
+    uint32_t size = 0;
+    uint32_t stages = STAGE_ALL;
+};
+
+// The full binding layout for a pipeline — D3D12 calls this the root signature.
+struct PipelineLayoutDesc {
+    static const int MAX_SETS = 4;
+    static const int MAX_PUSH = 4;
+    DescriptorSetLayoutHandle set_layouts[MAX_SETS] = {};
+    int                       set_layout_count = 0;
+    PushConstantRange         push_constants[MAX_PUSH] = {};
+    int                       push_constant_count = 0;
+};
+
+// One resource written into a descriptor set slot (tagged by the binding's type).
+struct DescriptorWrite {
+    uint32_t      binding = 0;
+    BindingType   type = BindingType::UniformBuffer;
+    BufferHandle  buffer;  uint32_t buffer_offset = 0; uint32_t buffer_size = 0;  // (Storage|Uniform)Buffer
+    TextureHandle texture; int      texture_mip = 0;                              // (Storage|Sampled)Texture
+    SamplerHandle sampler;                                                        // Sampler / CombinedImageSampler
+    StorageAccess storage_access = StorageAccess::ReadWrite;                      // StorageTexture
+};
+
+struct DescriptorSetDesc {
+    static const int MAX_WRITES = 16;
+    DescriptorSetLayoutHandle layout;
+    DescriptorWrite           writes[MAX_WRITES] = {};
+    int                       write_count = 0;
+};
+
+// Object kind for set_debug_name().
+enum class ObjectType : uint8_t { Buffer, Texture, Sampler, Shader, Pipeline, RenderTarget };
 
 //-----------------------------------------------------------------------------
 // GraphicDevice — resource creation/update/destruction (handle-based).
@@ -1177,6 +1286,24 @@ public:
     // Read back GPU data to CPU memory (blocking).
     virtual void  read_buffer(BufferHandle h, void* dst, uint32_t size, uint32_t offset = 0) = 0;
     virtual void  read_texture(TextureHandle h, const TextureRegion& region, void* dst) = 0;
+
+    // ---- Texture views ------------------------------------------------------
+    // A reinterpreting view (format/mip/layer sub-range) onto a texture. Returns a
+    // TextureHandle usable anywhere a texture is; free it with destroy_texture().
+    virtual TextureHandle create_texture_view(const TextureViewDesc& desc) = 0;
+
+    // ---- Binding model: descriptor sets / pipeline layout (root signature) ---
+    virtual DescriptorSetLayoutHandle create_descriptor_set_layout(const DescriptorSetLayoutDesc& desc) = 0;
+    virtual void destroy_descriptor_set_layout(DescriptorSetLayoutHandle h) = 0;
+    virtual PipelineLayoutHandle create_pipeline_layout(const PipelineLayoutDesc& desc) = 0;   // ≈ root signature
+    virtual void destroy_pipeline_layout(PipelineLayoutHandle h) = 0;
+    // Allocate + write a descriptor set (bind group). update_descriptor_set rewrites it.
+    virtual DescriptorSetHandle create_descriptor_set(const DescriptorSetDesc& desc) = 0;
+    virtual void update_descriptor_set(DescriptorSetHandle h, const DescriptorSetDesc& desc) = 0;
+    virtual void destroy_descriptor_set(DescriptorSetHandle h) = 0;
+
+    // ---- Debug labels -------------------------------------------------------
+    virtual void set_debug_name(ObjectType type, uint32_t handle_id, const char* name) = 0;
 
 protected:
     GraphicDevice() = default;
@@ -1259,6 +1386,31 @@ public:
     virtual void push_debug_group(const char* name) = 0;   // RenderDoc/PIX capture grouping
     virtual void pop_debug_group() = 0;
     virtual void insert_debug_marker(const char* name) = 0;
+
+    // ---- Descriptor sets ----------------------------------------------------
+    // Bind a written descriptor set at a set index of the active pipeline's layout.
+    // dynamic_offsets feed the set's dynamic uniform/storage buffer bindings in order.
+    virtual void bind_descriptor_set(uint32_t set_index, DescriptorSetHandle set,
+                                     const uint32_t* dynamic_offsets = nullptr,
+                                     int dynamic_offset_count = 0) = 0;
+
+    // ---- Dynamic pipeline state (override without rebuilding the pipeline) ----
+    virtual void set_stencil_reference(uint32_t ref) = 0;
+    virtual void set_blend_constants(const float rgba[4]) = 0;
+    virtual void set_depth_bias(float constant, float clamp, float slope) = 0;
+    virtual void set_line_width(float width) = 0;
+
+    // ---- Multiple viewports / scissors (viewport-index in geometry/mesh) ------
+    virtual void set_viewports(const Viewport* viewports, int count) = 0;
+    virtual void set_scissors(const ScissorRect* rects, int count) = 0;
+
+    // ---- GPU-driven draw with a count read from a buffer (≈ ExecuteIndirect) --
+    virtual void draw_indirect_count(BufferHandle args, uint32_t args_offset,
+                                     BufferHandle count_buffer, uint32_t count_offset,
+                                     uint32_t max_draws, uint32_t stride) = 0;
+    virtual void draw_indexed_indirect_count(BufferHandle args, uint32_t args_offset,
+                                             BufferHandle count_buffer, uint32_t count_offset,
+                                             uint32_t max_draws, uint32_t stride) = 0;
 
 protected:
     GraphicCommander() = default;
