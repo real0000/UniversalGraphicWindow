@@ -997,6 +997,9 @@ WINDOW_GFX_HANDLE(QueryHandle);      // timestamp / occlusion / pipeline-statist
 WINDOW_GFX_HANDLE(DescriptorSetLayoutHandle); // one descriptor set's binding layout (≈ VkDescriptorSetLayout)
 WINDOW_GFX_HANDLE(PipelineLayoutHandle);      // the full binding layout (≈ D3D12 root signature / VkPipelineLayout)
 WINDOW_GFX_HANDLE(DescriptorSetHandle);       // a written set of bound resources (≈ descriptor table / bind group)
+WINDOW_GFX_HANDLE(PipelineCacheHandle);       // compiled-pipeline cache (PSO cache / VkPipelineCache)
+WINDOW_GFX_HANDLE(TimelineSemaphoreHandle);   // monotonic 64-bit timeline (VkTimelineSemaphore / D3D12 fence-value)
+WINDOW_GFX_HANDLE(AccelStructHandle);         // ray-tracing acceleration structure (BLAS/TLAS)
 #undef WINDOW_GFX_HANDLE
 
 // ---- Resource enums ---------------------------------------------------------
@@ -1009,7 +1012,11 @@ enum class ResourceUsage : uint8_t { Immutable, Default, Dynamic, Staging };
 enum class IndexFormat : uint8_t { UInt16, UInt32 };
 // Programmable stages: classic graphics + tessellation + compute + the mesh-shader
 // pipeline (Task = amplification/Mesh). Backends without a stage log + no-op.
-enum class ShaderStage : uint8_t { Vertex, Fragment, Geometry, TessControl, TessEval, Compute, Task, Mesh };
+enum class ShaderStage : uint8_t {
+    Vertex, Fragment, Geometry, TessControl, TessEval, Compute, Task, Mesh,
+    // Ray-tracing stages (exposed for RT-capable backends; OpenGL logs + no-ops).
+    RayGen, Miss, ClosestHit, AnyHit, Intersection, Callable
+};
 enum class ShaderLanguage : uint8_t { Auto, GLSL, ESSL, SPIRV, HLSL, DXBC, DXIL, MSL, WGSL };
 // Per-vertex vs per-instance stepping for a vertex buffer slot (instancing).
 enum class VertexInputRate : uint8_t { PerVertex, PerInstance };
@@ -1044,6 +1051,7 @@ struct BufferDesc {
     BufferType    type = BufferType::Vertex;
     ResourceUsage usage = ResourceUsage::Default;
     uint32_t      stride = 0;                      // structured/vertex element stride
+    bool          sparse = false;                  // partially-resident (tiled) buffer
     const void*   initial_data = nullptr;          // optional upload at creation
     const char*   debug_name = nullptr;
 };
@@ -1060,6 +1068,8 @@ struct TextureDesc {
     bool          cube = false;
     bool          array_texture = false;           // force an array view even at array_layers==1
                                                    // (e.g. a sampler2DArray glyph atlas)
+    bool          sparse = false;                  // partially-resident (tiled) texture; commit tiles
+                                                   // with update_texture_residency()
     const void*   initial_data = nullptr;          // mip 0 / layer 0, tightly packed
     const char*   debug_name = nullptr;
 };
@@ -1133,6 +1143,7 @@ struct PipelineDesc {
     DepthStencilState depth_stencil;
     RasterizerState   rasterizer;
     PipelineLayoutHandle layout;                    // optional root signature; invalid → reflected/auto bindings
+    PipelineCacheHandle  cache;                      // optional PSO cache to reuse/populate compiled state
     TextureFormat     color_formats[8] = { TextureFormat::RGBA8_UNORM };
     int               color_format_count = 1;
     TextureFormat     depth_format = TextureFormat::D24_UNORM_S8_UINT;
@@ -1220,6 +1231,30 @@ struct DescriptorSetDesc {
 // Object kind for set_debug_name().
 enum class ObjectType : uint8_t { Buffer, Texture, Sampler, Shader, Pipeline, RenderTarget };
 
+// ---- Ray tracing (acceleration structures) ---------------------------------
+// Exposed for RT-capable backends (Vulkan KHR ray tracing / DXR). OpenGL has no
+// ray tracing and logs + returns invalid; the interface keeps cross-backend parity.
+enum class AccelStructType : uint8_t { BottomLevel, TopLevel };   // BLAS = geometry, TLAS = instances
+enum AccelStructBuildFlags : uint32_t {
+    ACCEL_ALLOW_UPDATE      = 1u << 0,
+    ACCEL_ALLOW_COMPACTION  = 1u << 1,
+    ACCEL_PREFER_FAST_TRACE = 1u << 2,
+    ACCEL_PREFER_FAST_BUILD = 1u << 3,
+    ACCEL_LOW_MEMORY        = 1u << 4,
+};
+struct AccelStructDesc {
+    AccelStructType type = AccelStructType::BottomLevel;
+    uint32_t        flags = ACCEL_PREFER_FAST_TRACE;     // AccelStructBuildFlags
+    // Bottom-level (triangle geometry):
+    BufferHandle    vertex_buffer;  uint32_t vertex_count = 0;  uint32_t vertex_stride = 0;
+    VertexFormat    vertex_format = VertexFormat::Float3;
+    BufferHandle    index_buffer;   uint32_t index_count = 0;   IndexFormat index_format = IndexFormat::UInt32;
+    BufferHandle    transform_buffer;                            // optional 3x4 row-major transforms
+    // Top-level (instances):
+    BufferHandle    instance_buffer; uint32_t instance_count = 0;
+    bool            update = false;                              // refit an existing structure in place
+};
+
 //-----------------------------------------------------------------------------
 // GraphicDevice — resource creation/update/destruction (handle-based).
 // Obtained for a live Graphics context via create_device(). Owns no commands;
@@ -1304,6 +1339,28 @@ public:
 
     // ---- Debug labels -------------------------------------------------------
     virtual void set_debug_name(ObjectType type, uint32_t handle_id, const char* name) = 0;
+
+    // ---- Pipeline (PSO) cache ----------------------------------------------
+    // Reuse compiled pipeline state across runs. Seed from previously saved data,
+    // pass the handle in PipelineDesc.cache, then persist get_pipeline_cache_data().
+    virtual PipelineCacheHandle create_pipeline_cache(const void* initial_data = nullptr, size_t size = 0) = 0;
+    virtual size_t get_pipeline_cache_data(PipelineCacheHandle h, void* dst, size_t capacity) = 0; // returns bytes (dst null = query size)
+    virtual void   destroy_pipeline_cache(PipelineCacheHandle h) = 0;
+
+    // ---- Timeline semaphores (monotonic 64-bit value) -----------------------
+    virtual TimelineSemaphoreHandle create_timeline_semaphore(uint64_t initial_value = 0) = 0;
+    virtual void     destroy_timeline_semaphore(TimelineSemaphoreHandle h) = 0;
+    virtual void     signal_timeline_semaphore(TimelineSemaphoreHandle h, uint64_t value) = 0;   // host signal
+    virtual bool     wait_timeline_semaphore(TimelineSemaphoreHandle h, uint64_t value, uint64_t timeout_ns = ~0ull) = 0;
+    virtual uint64_t get_timeline_value(TimelineSemaphoreHandle h) = 0;
+
+    // ---- Sparse / tiled residency -------------------------------------------
+    // Commit or release backing memory for a region of a sparse texture.
+    virtual void update_texture_residency(TextureHandle h, const TextureRegion& region, bool resident) = 0;
+
+    // ---- Ray tracing --------------------------------------------------------
+    virtual AccelStructHandle create_acceleration_structure(const AccelStructDesc& desc) = 0;
+    virtual void              destroy_acceleration_structure(AccelStructHandle h) = 0;
 
 protected:
     GraphicDevice() = default;
@@ -1412,6 +1469,11 @@ public:
                                              BufferHandle count_buffer, uint32_t count_offset,
                                              uint32_t max_draws, uint32_t stride) = 0;
 
+    // ---- Ray tracing --------------------------------------------------------
+    // Build/refit an acceleration structure, then trace from the bound RT pipeline.
+    virtual void build_acceleration_structure(AccelStructHandle dst, const AccelStructDesc& desc) = 0;
+    virtual void trace_rays(uint32_t width, uint32_t height, uint32_t depth = 1) = 0;
+
 protected:
     GraphicCommander() = default;
 };
@@ -1432,6 +1494,9 @@ void              submit_commander(Graphics* context, GraphicCommander* commande
 // Submit and signal `fence` (from create_fence) once the work completes; pass an
 // invalid handle to skip signaling. Wait on it via GraphicDevice::wait_fence().
 void              submit_commander(Graphics* context, GraphicCommander* commander, FenceHandle signal_fence);
+// Submit and signal a timeline semaphore to `value` on completion (≈ D3D12 fence-value).
+void              submit_commander(Graphics* context, GraphicCommander* commander,
+                                   TimelineSemaphoreHandle signal_timeline, uint64_t value);
 
 } // namespace window
 

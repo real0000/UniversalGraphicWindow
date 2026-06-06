@@ -12,10 +12,13 @@
 
 #if defined(WINDOW_SUPPORT_OPENGL)
 #include "glad.h"
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #endif
 
@@ -211,6 +214,11 @@ struct GLQuery     { GLuint id = 0; GLenum target = GL_TIMESTAMP; };
 struct GLDescSetLayout  { DescriptorSetLayoutDesc desc; };
 struct GLPipelineLayout { PipelineLayoutDesc desc; };
 struct GLDescriptorSet  { std::vector<DescriptorWrite> writes; DescriptorSetLayoutHandle layout; };
+// PSO cache: key (hash of shaders+state) → [GLenum format][program binary bytes].
+struct GLPipelineCache  { std::unordered_map<uint64_t, std::vector<uint8_t>> entries; };
+// Timeline semaphore: current value + GPU fences pending against future values.
+struct GLTimeline       { uint64_t value = 0; std::vector<std::pair<uint64_t, GLsync>> pending; };
+struct GLAccelStruct    { AccelStructType type = AccelStructType::BottomLevel; };  // RT: stub on OpenGL
 
 //-----------------------------------------------------------------------------
 // GLDevice
@@ -261,6 +269,9 @@ public:
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // R8 / odd-width rows
         glGenTextures(1, &t.id);
         glBindTexture(t.target, t.id);
+#if defined(GL_TEXTURE_SPARSE_ARB)
+        if (d.sparse) glTexParameteri(t.target, GL_TEXTURE_SPARSE_ARB, GL_TRUE);  // commit tiles via update_texture_residency()
+#endif
         // Immutable storage (glTexStorage) so the texture can back glTextureView().
         if (t.target == GL_TEXTURE_2D_ARRAY) {
             glTexStorage3D(t.target, t.levels, t.fmt.internal_fmt, d.width, d.height, t.layers);
@@ -314,6 +325,9 @@ public:
             case ShaderStage::Compute:     type = GL_COMPUTE_SHADER; break;
             case ShaderStage::Task:
             case ShaderStage::Mesh:        gl_unsupported("mesh/task shaders"); return { -1 };
+            case ShaderStage::RayGen: case ShaderStage::Miss: case ShaderStage::ClosestHit:
+            case ShaderStage::AnyHit: case ShaderStage::Intersection: case ShaderStage::Callable:
+                                           gl_unsupported("ray-tracing shaders"); return { -1 };
             default: break; // Vertex
         }
         GLShader sh; sh.stage = d.stage; sh.id = glCreateShader(type);
@@ -356,12 +370,39 @@ public:
             if (d.tess_eval_shader.valid())    attach(d.tess_eval_shader);
             if (d.patch_control_points > 0) { p.is_patch = true; p.patch_points = int(d.patch_control_points); }
         }
-        glLinkProgram(p.program);
-        GLint ok = 0; glGetProgramiv(p.program, GL_LINK_STATUS, &ok);
+        // PSO cache: try to load a previously compiled binary; else link + store one.
+        GLPipelineCache* pc = d.cache.valid() ? pcaches_.get(d.cache.id) : nullptr;
+        const uint64_t key = pipeline_cache_key(d);
+        GLint ok = 0;
+        bool loaded = false;
+        if (pc) {
+            auto it = pc->entries.find(key);
+            if (it != pc->entries.end() && it->second.size() > sizeof(GLenum)) {
+                GLenum fmt = 0; std::memcpy(&fmt, it->second.data(), sizeof(GLenum));
+                glProgramBinary(p.program, fmt, it->second.data() + sizeof(GLenum), GLsizei(it->second.size() - sizeof(GLenum)));
+                glGetProgramiv(p.program, GL_LINK_STATUS, &ok); loaded = (ok != 0);
+            }
+            if (!loaded) glProgramParameteri(p.program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+        }
+        if (!loaded) {
+            glLinkProgram(p.program);
+            glGetProgramiv(p.program, GL_LINK_STATUS, &ok);
+        }
         if (!ok) {
             char log[1024] = {0}; GLsizei n = 0; glGetProgramInfoLog(p.program, sizeof(log) - 1, &n, log);
             std::fprintf(stderr, "[UGW/OpenGL] program link failed:\n%s\n", log);
             glDeleteProgram(p.program); return { -1 };
+        }
+        if (pc && !loaded) {   // persist the freshly-linked binary into the cache
+            GLint len = 0; glGetProgramiv(p.program, GL_PROGRAM_BINARY_LENGTH, &len);
+            if (len > 0) {
+                std::vector<uint8_t> blob(sizeof(GLenum) + size_t(len));
+                GLenum fmt = 0; GLsizei written = 0;
+                glGetProgramBinary(p.program, len, &written, &fmt, blob.data() + sizeof(GLenum));
+                std::memcpy(blob.data(), &fmt, sizeof(GLenum));
+                blob.resize(sizeof(GLenum) + size_t(written));
+                pc->entries[key] = std::move(blob);
+            }
         }
         const int id = pipelines_.alloc(p);
         if (d.debug_name && glObjectLabel) glObjectLabel(GL_PROGRAM, p.program, -1, d.debug_name);
@@ -514,6 +555,82 @@ public:
         if (obj) glObjectLabel(ns, obj, -1, name);
     }
 
+    // ---- Pipeline (PSO) cache -----------------------------------------------
+    PipelineCacheHandle create_pipeline_cache(const void* data, size_t size) override {
+        GLPipelineCache c;
+        // Deserialize: repeated [u64 key][u32 len][len bytes].
+        const uint8_t* p = static_cast<const uint8_t*>(data); size_t off = 0;
+        while (data && off + 12 <= size) {
+            uint64_t key; uint32_t len;
+            std::memcpy(&key, p + off, 8); std::memcpy(&len, p + off + 8, 4); off += 12;
+            if (off + len > size) break;
+            c.entries[key].assign(p + off, p + off + len); off += len;
+        }
+        return { pcaches_.alloc(std::move(c)) };
+    }
+    size_t get_pipeline_cache_data(PipelineCacheHandle h, void* dst, size_t cap) override {
+        auto* c = pcaches_.get(h.id); if (!c) return 0;
+        size_t need = 0; for (auto& e : c->entries) need += 12 + e.second.size();
+        if (!dst) return need;
+        uint8_t* p = static_cast<uint8_t*>(dst); size_t off = 0;
+        for (auto& e : c->entries) {
+            const uint32_t len = uint32_t(e.second.size());
+            if (off + 12 + len > cap) break;
+            std::memcpy(p + off, &e.first, 8); std::memcpy(p + off + 8, &len, 4); off += 12;
+            std::memcpy(p + off, e.second.data(), len); off += len;
+        }
+        return off;
+    }
+    void destroy_pipeline_cache(PipelineCacheHandle h) override { pcaches_.release(h.id); }
+
+    // ---- Timeline semaphores (CPU value + GPU fences pending future values) --
+    TimelineSemaphoreHandle create_timeline_semaphore(uint64_t initial) override { return { timelines_.alloc(GLTimeline{ initial, {} }) }; }
+    void destroy_timeline_semaphore(TimelineSemaphoreHandle h) override { cur(); if (auto* t = timelines_.get(h.id)) { for (auto& pr : t->pending) if (pr.second) glDeleteSync(pr.second); timelines_.release(h.id); } }
+    void signal_timeline_semaphore(TimelineSemaphoreHandle h, uint64_t value) override { if (auto* t = timelines_.get(h.id)) if (value > t->value) t->value = value; }  // host signal
+    void timeline_collect(GLTimeline* t, bool block, uint64_t want) {
+        cur();
+        for (auto it = t->pending.begin(); it != t->pending.end();) {
+            GLenum r = glClientWaitSync(it->second, GL_SYNC_FLUSH_COMMANDS_BIT, block ? 1000000000ull : 0);
+            if (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED) {
+                if (it->first > t->value) t->value = it->first;
+                glDeleteSync(it->second); it = t->pending.erase(it);
+            } else ++it;
+        }
+        (void)want;
+    }
+    bool wait_timeline_semaphore(TimelineSemaphoreHandle h, uint64_t value, uint64_t /*timeout*/) override {
+        auto* t = timelines_.get(h.id); if (!t) return false;
+        timeline_collect(t, /*block=*/true, value);
+        return t->value >= value;
+    }
+    uint64_t get_timeline_value(TimelineSemaphoreHandle h) override {
+        auto* t = timelines_.get(h.id); if (!t) return 0;
+        timeline_collect(t, /*block=*/false, 0);
+        return t->value;
+    }
+    // Called by submit_commander() to signal a timeline value on GPU completion.
+    void signal_timeline_on_submit(TimelineSemaphoreHandle h, uint64_t value) {
+        cur(); if (auto* t = timelines_.get(h.id)) t->pending.emplace_back(value, glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
+    }
+
+    // ---- Sparse / tiled residency -------------------------------------------
+    void update_texture_residency(TextureHandle h, const TextureRegion& r, bool resident) override {
+        cur(); auto* t = textures_.get(h.id); if (!t) return;
+#if defined(GL_TEXTURE_SPARSE_ARB)
+        if (glTexPageCommitmentARB) {
+            glBindTexture(t->target, t->id);
+            glTexPageCommitmentARB(t->target, r.mip, r.x, r.y, r.layer,
+                                   r.width, r.height, r.depth ? r.depth : 1, resident ? GL_TRUE : GL_FALSE);
+            return;
+        }
+#endif
+        gl_unsupported("sparse texture residency");
+    }
+
+    // ---- Ray tracing (no core OpenGL support) -------------------------------
+    AccelStructHandle create_acceleration_structure(const AccelStructDesc& d) override { gl_unsupported("acceleration structures"); return { accels_.alloc(GLAccelStruct{ d.type }) }; }
+    void destroy_acceleration_structure(AccelStructHandle h) override { accels_.release(h.id); }
+
     // Internal accessors for the commander.
     GLBuffer*   buffer(int id)   { return buffers_.get(id); }
     GLTexture*  texture(int id)  { return textures_.get(id); }
@@ -525,6 +642,16 @@ public:
     void cur() { if (ctx_) ctx_->make_current(); }
 
 private:
+    // Deterministic key for the PSO cache (shaders + a few state bits).
+    static uint64_t pipeline_cache_key(const PipelineDesc& d) {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](uint64_t v) { h ^= v + 1; h *= 1099511628211ull; };
+        mix(uint64_t(d.vertex_shader.id));   mix(uint64_t(d.fragment_shader.id));
+        mix(uint64_t(d.geometry_shader.id)); mix(uint64_t(d.tess_control_shader.id));
+        mix(uint64_t(d.tess_eval_shader.id)); mix(uint64_t(d.compute_shader.id));
+        mix(uint64_t(int(d.topology)));      mix(uint64_t(d.patch_control_points));
+        return h;
+    }
     static GLenum buffer_target(BufferType t) {
         switch (t) {
             case BufferType::Index:    return GL_ELEMENT_ARRAY_BUFFER;
@@ -547,6 +674,7 @@ private:
     Pool<GLShader> shaders_; Pool<GLPipeline> pipelines_; Pool<GLRenderTarget> rts_;
     Pool<GLFence> fences_; Pool<GLSemaphore> semaphores_; Pool<GLQuery> queries_;
     Pool<GLDescSetLayout> dsls_; Pool<GLPipelineLayout> plls_; Pool<GLDescriptorSet> dsets_;
+    Pool<GLPipelineCache> pcaches_; Pool<GLTimeline> timelines_; Pool<GLAccelStruct> accels_;
 };
 
 //-----------------------------------------------------------------------------
@@ -864,6 +992,10 @@ public:
                                          GLintptr(count_off), max_draws, stride);
     }
 
+    // ---- Ray tracing — no core OpenGL support -------------------------------
+    void build_acceleration_structure(AccelStructHandle, const AccelStructDesc&) override { gl_unsupported("build_acceleration_structure"); }
+    void trace_rays(uint32_t, uint32_t, uint32_t) override { gl_unsupported("trace_rays"); }
+
 private:
     GLuint fbo_of(RenderTargetHandle h) { if (auto* rt = dev_->rt(h.id)) return rt->fbo; return 0; }  // invalid → backbuffer
     GLenum topology() const { auto* p = dev_->pipeline(pipeline_); if (p && p->is_patch) return GL_PATCHES; return p ? gl_topology(p->topology) : GL_TRIANGLES; }
@@ -945,6 +1077,16 @@ void submit_commander(Graphics* context, GraphicCommander* commander, FenceHandl
         static_cast<GLCommander*>(commander)->device()->signal_fence_on_submit(signal_fence);
 #else
     (void)signal_fence;
+#endif
+}
+
+void submit_commander(Graphics* context, GraphicCommander* commander, TimelineSemaphoreHandle signal, uint64_t value) {
+    submit_commander(context, commander);
+#if defined(WINDOW_SUPPORT_OPENGL)
+    if (commander && signal.valid())
+        static_cast<GLCommander*>(commander)->device()->signal_timeline_on_submit(signal, value);
+#else
+    (void)signal; (void)value;
 #endif
 }
 
