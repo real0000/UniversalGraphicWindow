@@ -388,7 +388,9 @@ public:
         std::vector<VkDescriptorSetLayout> sets;
         for (int i = 0; i < d.set_layout_count; ++i) if (auto* l = dsls_.get(d.set_layouts[i].id)) sets.push_back(l->layout);
         std::vector<VkPushConstantRange> pcs;
-        for (int i = 0; i < d.push_constant_count; ++i) pcs.push_back({ stage_flags(d.push_constants[i].stages), d.push_constants[i].offset, d.push_constants[i].size });
+        // Use VK_SHADER_STAGE_ALL so it matches vkCmdPushConstants (which pushes with
+        // ALL — the commander doesn't track per-range stages).
+        for (int i = 0; i < d.push_constant_count; ++i) pcs.push_back({ VK_SHADER_STAGE_ALL, d.push_constants[i].offset, d.push_constants[i].size });
         VkPipelineLayoutCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         ci.setLayoutCount = (uint32_t)sets.size(); ci.pSetLayouts = sets.data();
         ci.pushConstantRangeCount = (uint32_t)pcs.size(); ci.pPushConstantRanges = pcs.data();
@@ -687,19 +689,19 @@ public:
     void begin() override { vkResetCommandBuffer(cb_, 0); VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }; bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; vkBeginCommandBuffer(cb_, &bi); in_pass_ = false; }
     void end() override { end_pass(); vkEndCommandBuffer(cb_); }
 
-    void set_render_target_backbuffer() override { end_pass(); color_ = nullptr; }   // present path TODO
+    void set_render_target_backbuffer() override { end_pass(); color_tex_ = -1; }   // present path TODO
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle) override {
-        end_pass(); color_ = nullptr;
-        if (count > 0 && colors) if (auto* rt = dev_->rt(colors[0].id)) color_ = dev_->texture(rt->color_tex);
+        end_pass(); color_tex_ = -1;
+        if (count > 0 && colors) if (auto* rt = dev_->rt(colors[0].id)) color_tex_ = rt->color_tex;
     }
     void set_viewport(const Viewport& v) override { VkViewport vp{ v.x, v.y, v.width, v.height, v.min_depth, v.max_depth }; vkCmdSetViewport(cb_, 0, 1, &vp); }
     void set_scissor(const ScissorRect& r) override { VkRect2D s{ { r.x, r.y }, { (uint32_t)r.width, (uint32_t)r.height } }; vkCmdSetScissor(cb_, 0, 1, &s); }
     void clear_color(const ClearColor& c) override {
-        if (!color_) return;
-        VKDevice::barrier(cb_, color_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        auto* color = dev_->texture(color_tex_); if (!color) return;
+        VKDevice::barrier(cb_, color, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkClearColorValue cc{}; cc.float32[0] = c.r; cc.float32[1] = c.g; cc.float32[2] = c.b; cc.float32[3] = c.a;
-        VkImageSubresourceRange rng{ color_->aspect, 0, (uint32_t)color_->levels, 0, (uint32_t)color_->layers };
-        vkCmdClearColorImage(cb_, color_->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc, 1, &rng);
+        VkImageSubresourceRange rng{ color->aspect, 0, (uint32_t)color->levels, 0, (uint32_t)color->layers };
+        vkCmdClearColorImage(cb_, color->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc, 1, &rng);
     }
     void clear_depth_stencil(const ClearDepthStencil&) override { vk_unsupported("clear_depth_stencil (no bound depth path yet)"); }
     void set_pipeline(PipelineHandle h) override { auto* p = dev_->pipeline(h.id); if (!p) return; cur_pipeline_ = p; vkCmdBindPipeline(cb_, p->bind, p->pipeline); }
@@ -773,16 +775,17 @@ public:
 
 private:
     void ensure_pass() {
-        if (in_pass_ || !cur_pipeline_ || cur_pipeline_->bind != VK_PIPELINE_BIND_POINT_GRAPHICS || !color_) return;
+        if (in_pass_ || !cur_pipeline_ || cur_pipeline_->bind != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
+        auto* color = dev_->texture(color_tex_); if (!color) return;   // look up fresh: the Pool may have reallocated
         // Begin a transient framebuffer + render pass matching the bound target.
-        VKDevice::barrier(cb_, color_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VKDevice::barrier(cb_, color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-        fci.renderPass = cur_pipeline_->render_pass; fci.attachmentCount = 1; fci.pAttachments = &color_->view;
-        fci.width = color_->w; fci.height = color_->h; fci.layers = 1;
+        fci.renderPass = cur_pipeline_->render_pass; fci.attachmentCount = 1; fci.pAttachments = &color->view;
+        fci.width = color->w; fci.height = color->h; fci.layers = 1;
         vkCreateFramebuffer(dev_->dev, &fci, nullptr, &fb_);
         VkRenderPassBeginInfo rbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
         rbi.renderPass = cur_pipeline_->render_pass; rbi.framebuffer = fb_;
-        rbi.renderArea = { { 0, 0 }, { (uint32_t)color_->w, (uint32_t)color_->h } };
+        rbi.renderArea = { { 0, 0 }, { (uint32_t)color->w, (uint32_t)color->h } };
         vkCmdBeginRenderPass(cb_, &rbi, VK_SUBPASS_CONTENTS_INLINE);
         in_pass_ = true;
     }
@@ -791,7 +794,7 @@ private:
     VKDevice* dev_ = nullptr;
     VkCommandBuffer cb_ = VK_NULL_HANDLE;
     VkFramebuffer fb_ = VK_NULL_HANDLE;
-    VKTexture* color_ = nullptr;
+    int color_tex_ = -1;   // bound colour target's texture id (looked up per use; Pool may move)
     VKPipeline* cur_pipeline_ = nullptr;
     bool in_pass_ = false;
 };

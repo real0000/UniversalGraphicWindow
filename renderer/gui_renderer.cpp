@@ -1,4 +1,7 @@
 #include "gui_renderer.hpp"
+#include "gui_vk_vert.spv.h"        // Vulkan SPIR-V (glslangValidator): proj via push constant
+#include "gui_vk_atlas_frag.spv.h"  // sampler2DArray atlas (alpha mask / solid)
+#include "gui_vk_image_frag.spv.h"  // sampler2D image * tint
 
 #include <cmath>
 #include <cstdint>
@@ -47,18 +50,46 @@ void main() { FragColor = texture(uImage, vUVW.xy) * vColor; }
 bool GpuGuiRenderer::init(GraphicDevice* device) {
     device_ = device;
     if (!device_) return false;
+    backend_ = device_->get_backend();
 
-    ShaderDesc vd;  vd.stage  = ShaderStage::Vertex;   vd.language  = ShaderLanguage::GLSL; vd.code  = VS_GLSL;
-    ShaderDesc fd;  fd.stage  = ShaderStage::Fragment; fd.language  = ShaderLanguage::GLSL; fd.code  = FS_GLSL;
-    ShaderDesc fid; fid.stage = ShaderStage::Fragment; fid.language = ShaderLanguage::GLSL; fid.code = FS_IMAGE_GLSL;
+    // Shaders are per-backend: GL uses GLSL (proj via a UBO emulating push_constants,
+    // atlas via bind_texture); Vulkan uses SPIR-V (proj via a real push constant,
+    // atlas/image via a descriptor set). D3D/Metal renderer shaders are a follow-up.
+    ShaderDesc vd; vd.stage = ShaderStage::Vertex;
+    ShaderDesc fd; fd.stage = ShaderStage::Fragment;
+    ShaderDesc fid; fid.stage = ShaderStage::Fragment;
+    if (backend_ == Backend::Vulkan) {
+        vd.language  = ShaderLanguage::SPIRV; vd.code  = gui_vk_vert_spv;        vd.code_size  = sizeof(gui_vk_vert_spv);
+        fd.language  = ShaderLanguage::SPIRV; fd.code  = gui_vk_atlas_frag_spv;  fd.code_size  = sizeof(gui_vk_atlas_frag_spv);
+        fid.language = ShaderLanguage::SPIRV; fid.code = gui_vk_image_frag_spv;  fid.code_size = sizeof(gui_vk_image_frag_spv);
+    } else if (backend_ == Backend::OpenGL) {
+        vd.language  = ShaderLanguage::GLSL; vd.code  = VS_GLSL;
+        fd.language  = ShaderLanguage::GLSL; fd.code  = FS_GLSL;
+        fid.language = ShaderLanguage::GLSL; fid.code = FS_IMAGE_GLSL;
+    } else {
+        return false;   // D3D/Metal GUI shaders not provided yet (follow-up)
+    }
     vs_       = device_->create_shader(vd);
     fs_       = device_->create_shader(fd);
     fs_image_ = device_->create_shader(fid);
     if (!vs_.valid() || !fs_.valid() || !fs_image_.valid()) return false;
 
+    // Modern backends: a pipeline layout (push range for proj + a 1-binding atlas/
+    // image descriptor set) and a sampler. GL ignores the layout (UBO + bind_texture).
+    if (uses_descriptor_sets()) {
+        DescriptorSetLayoutDesc dl; dl.binding_count = 1;
+        dl.bindings[0] = { 0, BindingType::CombinedImageSampler, 1, STAGE_FRAGMENT };
+        set_layout_ = device_->create_descriptor_set_layout(dl);
+        PipelineLayoutDesc pll; pll.set_layout_count = 1; pll.set_layouts[0] = set_layout_;
+        pll.push_constant_count = 1; pll.push_constants[0] = { 0, 16 * sizeof(float), STAGE_VERTEX };
+        pipe_layout_ = device_->create_pipeline_layout(pll);
+        SamplerState ss; sampler_ = device_->create_sampler(ss);
+    }
+
     // Both pipelines share everything but the fragment shader (atlas vs image).
     PipelineDesc pd;
     pd.vertex_shader   = vs_;
+    pd.layout          = pipe_layout_;     // invalid on GL → reflected/auto bindings
     pd.topology        = PrimitiveTopology::TriangleList;
     pd.blend           = BlendState::alpha_blend();
     pd.depth_stencil   = DepthStencilState::disabled();
@@ -77,6 +108,19 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     return pipeline_.valid() && image_pipeline_.valid();
 }
 
+// Per-texture descriptor set (cached by texture id) for the modern-binding path:
+// one combined-image-sampler at binding 0 (atlas = sampler2DArray, image = sampler2D).
+DescriptorSetHandle GpuGuiRenderer::desc_set_for(TextureHandle tex) {
+    auto it = desc_sets_.find(tex.id);
+    if (it != desc_sets_.end()) return it->second;
+    DescriptorSetDesc d; d.layout = set_layout_; d.write_count = 1;
+    d.writes[0].binding = 0; d.writes[0].type = BindingType::CombinedImageSampler;
+    d.writes[0].texture = tex; d.writes[0].sampler = sampler_;
+    DescriptorSetHandle set = device_->create_descriptor_set(d);
+    desc_sets_.emplace(tex.id, set);
+    return set;
+}
+
 void GpuGuiRenderer::shutdown() {
     if (!device_) return;
     if (vbo_.valid())            device_->destroy_buffer(vbo_);
@@ -85,6 +129,11 @@ void GpuGuiRenderer::shutdown() {
     if (vs_.valid())             device_->destroy_shader(vs_);
     if (fs_.valid())             device_->destroy_shader(fs_);
     if (fs_image_.valid())       device_->destroy_shader(fs_image_);
+    for (auto& kv : desc_sets_) device_->destroy_descriptor_set(kv.second);
+    desc_sets_.clear();
+    if (set_layout_.valid())  device_->destroy_descriptor_set_layout(set_layout_);
+    if (pipe_layout_.valid()) device_->destroy_pipeline_layout(pipe_layout_);
+    if (sampler_.valid())     device_->destroy_sampler(sampler_);
     tex_cache_.clear();   // handles only; the provider owns the textures
     device_ = nullptr;
 }
@@ -167,7 +216,8 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
                 const float bx = math::x(math::box_min(ref.clip));
                 const float by = math::y(math::box_min(ref.clip));
                 sx = int(bx * scale); sw = int(bw * scale); sh = int(bh * scale);
-                sy = int(fb_h - (by + bh) * scale);   // GL scissor origin = bottom-left
+                // GL scissor origin is bottom-left (Y flip); Vulkan/D3D/Metal are top-left.
+                sy = uses_descriptor_sets() ? int(by * scale) : int(fb_h - (by + bh) * scale);
             }
             force_break = true;   // applies even if the next primitive(s) are skipped
         }
@@ -225,8 +275,14 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
         cmd->set_pipeline(s.kind == Kind::Image ? image_pipeline_ : pipeline_);
         cmd->push_constants(0, proj, 16 * sizeof(float));
         cmd->bind_vertex_buffer(0, vbo_);
-        if (s.kind == Kind::Image) { const TextureHandle h{ s.tex }; cmd->bind_texture(0, h); }
-        else if (atlas.valid())    cmd->bind_texture(0, atlas);
+        const TextureHandle tex = (s.kind == Kind::Image) ? TextureHandle{ s.tex } : atlas;
+        if (uses_descriptor_sets()) {
+            // Vulkan/D3D/Metal: bind the texture through a (cached) descriptor set.
+            if (tex.valid()) cmd->bind_descriptor_set(0, desc_set_for(tex));
+        } else {
+            // OpenGL: direct texture binding (proj is the emulated UBO at binding 0).
+            if (tex.valid()) cmd->bind_texture(0, tex);
+        }
         cmd->set_scissor(ScissorRect{ s.sx, s.sy, s.sw, s.sh });
         cmd->draw(s.count, s.first);
     }

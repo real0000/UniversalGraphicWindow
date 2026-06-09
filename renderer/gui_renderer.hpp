@@ -59,7 +59,10 @@ private:
     void emit_circle(float cx, float cy, float radius, const math::Vec4& c);
     TextureHandle resolve_texture(const WidgetRenderInfo::TextureCmd& t);
 
+    DescriptorSetHandle desc_set_for(TextureHandle tex);   // per-texture bind group (non-GL), cached
+
     GraphicDevice*      device_ = nullptr;
+    Backend             backend_ = Backend::OpenGL;
     IGuiTextRasterizer* rasterizer_ = nullptr;
     IGuiTextureProvider* tex_provider_ = nullptr;
     ShaderHandle        vs_, fs_, fs_image_;
@@ -69,6 +72,14 @@ private:
     uint32_t            vbo_capacity_ = 0;  // bytes
     std::vector<float>  verts_;
     std::unordered_map<std::string, TextureHandle> tex_cache_;
+
+    // Modern-binding backends (Vulkan/D3D12/Metal): proj via push constants + the
+    // atlas/image texture via a descriptor set, instead of GL's UBO + bind_texture.
+    bool uses_descriptor_sets() const { return backend_ != Backend::OpenGL; }
+    SamplerHandle             sampler_;
+    DescriptorSetLayoutHandle set_layout_;
+    PipelineLayoutHandle      pipe_layout_;
+    std::unordered_map<int, DescriptorSetHandle> desc_sets_;  // texture id → bind group
 };
 
 } // namespace gui
