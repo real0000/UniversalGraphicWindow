@@ -131,10 +131,20 @@ message(STATUS "Window library platform: ${WINDOW_PLATFORM}")
 
 # Add platform-independent source files
 list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input_keyboard.cpp input/input_mouse.cpp input/input_gamepad.cpp input/input_wheel.cpp)
-# Render device/commander abstraction (graphics_api.hpp). Added unconditionally so
-# the create_device/create_commander factory is always defined; the OpenGL bodies
-# self-guard with WINDOW_SUPPORT_OPENGL (other backends get their own api_render_*).
-list(APPEND WINDOW_SOURCES api/api_render_opengl.cpp)
+# Render device/commander abstraction (graphics_api.hpp). The dispatcher
+# (api_render.cpp) is always present; each backend lives in its own api_render_*
+# TU and self-guards with its WINDOW_SUPPORT_* macro (returning ErrorNotSupported
+# when compiled out), so the factory always links regardless of enabled backends.
+list(APPEND WINDOW_SOURCES
+    api/api_render.cpp          # public factory → dispatches on Backend
+    api/api_render_opengl.cpp   # OpenGL (+ GLES via EGL, WebGL via WASM)
+    api/api_render_vulkan.cpp
+    api/api_render_d3d11.cpp
+    api/api_render_d3d12.cpp    # + D3D12 Ultimate (WINDOW_SUPPORT_D3D12_ULTIMATE)
+)
+if(APPLE)
+    list(APPEND WINDOW_SOURCES api/api_render_metal.mm)
+endif()
 
 # Add device enumeration files (platform-specific)
 if(WIN32)

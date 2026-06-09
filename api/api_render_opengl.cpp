@@ -9,6 +9,7 @@
 // then reports ErrorNotSupported). Other backends get their own api_render_*.cpp.
 
 #include "../graphics_api.hpp"
+#include "api_render_internal.hpp"
 
 #if defined(WINDOW_SUPPORT_OPENGL)
 #include "glad.h"
@@ -1030,23 +1031,23 @@ private:
 #endif // WINDOW_SUPPORT_OPENGL
 
 //-----------------------------------------------------------------------------
-// Public factory (always defined; dispatches by backend).
+// OpenGL backend creators (called by the dispatcher in api_render.cpp). Always
+// defined; return ErrorNotSupported / no-op when OpenGL is compiled out.
 //-----------------------------------------------------------------------------
-GraphicDevice* create_device(Graphics* context, Result* out_result) {
+GraphicDevice* create_device_gl(Graphics* context, Result* out_result) {
 #if defined(WINDOW_SUPPORT_OPENGL)
     if (context && context->get_backend() == Backend::OpenGL) {
         if (out_result) *out_result = Result::Success;
         return new GLDevice(context);
     }
 #endif
+    (void)context;
     if (out_result) *out_result = Result::ErrorNotSupported;
     return nullptr;
 }
-void destroy_device(GraphicDevice* device) { delete device; }
-
-GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, Result* out_result) {
+GraphicCommander* create_commander_gl(Graphics* context, GraphicDevice* device, QueueType /*queue*/, Result* out_result) {
 #if defined(WINDOW_SUPPORT_OPENGL)
-    if (context && device && context->get_backend() == Backend::OpenGL) {
+    if (context && device && context->get_backend() == Backend::OpenGL) {   // single implicit queue
         if (out_result) *out_result = Result::Success;
         return new GLCommander(context, static_cast<GLDevice*>(device));
     }
@@ -1055,38 +1056,16 @@ GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, Res
     if (out_result) *out_result = Result::ErrorNotSupported;
     return nullptr;
 }
-// OpenGL has a single implicit queue, so the queue type is advisory only.
-GraphicCommander* create_commander(Graphics* context, GraphicDevice* device, QueueType queue, Result* out_result) {
-    (void)queue;
-    return create_commander(context, device, out_result);
-}
-void destroy_commander(GraphicCommander* commander) { delete commander; }
-
-void submit_commander(Graphics* context, GraphicCommander* commander) {
-    (void)context; (void)commander;
+void submit_commander_gl(Graphics* context, GraphicCommander* commander,
+                         FenceHandle fence, TimelineSemaphoreHandle timeline, uint64_t value) {
+    (void)context; (void)commander; (void)fence; (void)timeline; (void)value;
 #if defined(WINDOW_SUPPORT_OPENGL)
     glFlush(); // GL records immediately; nothing to replay, just flush the stream
-#endif
-}
-
-void submit_commander(Graphics* context, GraphicCommander* commander, FenceHandle signal_fence) {
-    submit_commander(context, commander);
-#if defined(WINDOW_SUPPORT_OPENGL)
-    // Place the fence after the submitted work so the CPU can wait on completion.
-    if (commander && signal_fence.valid())
-        static_cast<GLCommander*>(commander)->device()->signal_fence_on_submit(signal_fence);
-#else
-    (void)signal_fence;
-#endif
-}
-
-void submit_commander(Graphics* context, GraphicCommander* commander, TimelineSemaphoreHandle signal, uint64_t value) {
-    submit_commander(context, commander);
-#if defined(WINDOW_SUPPORT_OPENGL)
-    if (commander && signal.valid())
-        static_cast<GLCommander*>(commander)->device()->signal_timeline_on_submit(signal, value);
-#else
-    (void)signal; (void)value;
+    if (commander) {
+        GLDevice* dev = static_cast<GLCommander*>(commander)->device();
+        if (fence.valid())    dev->signal_fence_on_submit(fence);          // CPU can wait on completion
+        if (timeline.valid()) dev->signal_timeline_on_submit(timeline, value);
+    }
 #endif
 }
 
