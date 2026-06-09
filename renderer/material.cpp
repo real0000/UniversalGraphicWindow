@@ -33,9 +33,31 @@ MaterialParamType parse_param_type(const std::string& s) {
 }
 uint32_t parse_stage(const std::string& s) {
     if (s == "vertex")   return STAGE_VERTEX;
-    if (s == "fragment") return STAGE_FRAGMENT;
+    if (s == "fragment" || s == "pixel") return STAGE_FRAGMENT;
+    if (s == "geometry") return STAGE_GEOMETRY;
     if (s == "compute")  return STAGE_COMPUTE;
+    if (s == "mesh")     return STAGE_MESH;
+    if (s == "task")     return STAGE_TASK;
     return STAGE_ALL;
+}
+// Map a [shader] config key to a ShaderStage (covers all stages incl. ray tracing).
+// Returns -1 for non-stage keys (e.g. "source"). Accepts HLSL-ish aliases.
+int stage_from_key(const std::string& k) {
+    if (k == "vertex")                     return int(ShaderStage::Vertex);
+    if (k == "fragment" || k == "pixel")   return int(ShaderStage::Fragment);
+    if (k == "geometry")                   return int(ShaderStage::Geometry);
+    if (k == "hull" || k == "tess_control")return int(ShaderStage::TessControl);
+    if (k == "domain" || k == "tess_eval") return int(ShaderStage::TessEval);
+    if (k == "compute")                    return int(ShaderStage::Compute);
+    if (k == "task" || k == "amplification") return int(ShaderStage::Task);
+    if (k == "mesh")                       return int(ShaderStage::Mesh);
+    if (k == "raygen")                     return int(ShaderStage::RayGen);
+    if (k == "miss")                       return int(ShaderStage::Miss);
+    if (k == "closesthit")                 return int(ShaderStage::ClosestHit);
+    if (k == "anyhit")                     return int(ShaderStage::AnyHit);
+    if (k == "intersection")               return int(ShaderStage::Intersection);
+    if (k == "callable")                   return int(ShaderStage::Callable);
+    return -1;
 }
 BindingType to_binding_type(MaterialParamType t) {
     switch (t) {
@@ -97,9 +119,18 @@ bool MaterialDesc::load(const char* path, MaterialDesc* out) {
     try { boost::property_tree::ini_parser::read_ini(path, pt); }
     catch (const std::exception& e) { std::fprintf(stderr, "[Material] parse %s: %s\n", path, e.what()); return false; }
 
-    out->shader_source = pt.get<std::string>("shader.source", "");
-    out->vertex_entry  = pt.get<std::string>("shader.vertex_entry", "vs_main");
-    out->pixel_entry   = pt.get<std::string>("shader.pixel_entry", "ps_main");
+    // [shader]: source + one entry per stage. Keys are stage names (vertex, pixel,
+    // geometry, hull, domain, compute, task, mesh, raygen, miss, closesthit, anyhit,
+    // intersection, callable); "<stage>_entry" aliases are accepted too.
+    if (auto sh = pt.get_child_optional("shader")) {
+        for (auto& kv : *sh) {
+            std::string key = kv.first;
+            if (key == "source") { out->shader_source = kv.second.get_value<std::string>(); continue; }
+            const std::string alias = key.size() > 6 && key.compare(key.size() - 6, 6, "_entry") == 0 ? key.substr(0, key.size() - 6) : key;
+            int st = stage_from_key(alias);
+            if (st >= 0) out->entry[st] = kv.second.get_value<std::string>();
+        }
+    }
 
     const std::string blend = pt.get<std::string>("state.blend", "none");
     if (blend == "alpha") out->blend = BlendState::alpha_blend();
@@ -109,6 +140,7 @@ bool MaterialDesc::load(const char* path, MaterialDesc* out) {
     out->rasterizer = (cull == "none") ? RasterizerState::no_cull() : RasterizerState::default_state();
     out->rasterizer.scissor_enable = true;
     out->topology = PrimitiveTopology::TriangleList;  // (only triangles needed so far)
+    out->patch_control_points = (uint32_t)pt.get<int>("state.patch_control_points", 0);  // >0 → tessellation
 
     // Vertex layout: "<loc> = <format>:<offset>:<slot>", plus "stride = N".
     VertexLayout& vl = out->vertex_layout; vl.attribute_count = 0;
@@ -143,21 +175,28 @@ Material* Material::create(GraphicDevice* device, const char* material_path, con
     if (!MaterialDesc::load(material_path, &d)) { if (out_result) *out_result = Result::ErrorInvalidParameter; return nullptr; }
 
     const Backend backend = device->get_backend();
-    std::vector<uint8_t> vsb, psb; ShaderLanguage vlang, plang;
-    if (!load_shader_blob(backend, shader_dir, d, d.vertex_entry, vsb, vlang) ||
-        !load_shader_blob(backend, shader_dir, d, d.pixel_entry,  psb, plang)) {
-        std::fprintf(stderr, "[Material] no shader blob for backend %d (%s)\n", int(backend), d.shader_source.c_str());
-        if (out_result) *out_result = Result::ErrorNotSupported; return nullptr;
-    }
-
     auto* m = new Material();
     m->device_ = device; m->desc_ = std::move(d);
 
-    ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.language = vlang; vd.code = vsb.data(); vd.code_size = vsb.size(); vd.entry_point = m->desc_.vertex_entry.c_str();
-    ShaderDesc pd; pd.stage = ShaderStage::Fragment; pd.language = plang; pd.code = psb.data(); pd.code_size = psb.size(); pd.entry_point = m->desc_.pixel_entry.c_str();
-    m->vs_ = device->create_shader(vd);
-    m->ps_ = device->create_shader(pd);
-    if (!m->vs_.valid() || !m->ps_.valid()) { m->destroy(); if (out_result) *out_result = Result::ErrorUnknown; return nullptr; }
+    // Create a shader module for every stage that declares an entry point. Keep the
+    // blob bytes alive until create_shader has consumed them.
+    std::vector<std::vector<uint8_t>> blobs(MaterialDesc::STAGE_COUNT);
+    int created = 0;
+    for (int s = 0; s < MaterialDesc::STAGE_COUNT; ++s) {
+        const ShaderStage stage = ShaderStage(s);
+        if (!m->desc_.has(stage)) continue;
+        ShaderLanguage lang;
+        if (!load_shader_blob(backend, shader_dir, m->desc_, m->desc_.entry[s], blobs[s], lang)) {
+            std::fprintf(stderr, "[Material] no shader blob for stage %d backend %d (%s)\n", s, int(backend), m->desc_.shader_source.c_str());
+            m->destroy(); if (out_result) *out_result = Result::ErrorNotSupported; return nullptr;
+        }
+        ShaderDesc sd; sd.stage = stage; sd.language = lang; sd.code = blobs[s].data(); sd.code_size = blobs[s].size();
+        sd.entry_point = m->desc_.entry[s].c_str();
+        m->shaders_[s] = device->create_shader(sd);
+        if (!m->shaders_[s].valid()) { m->destroy(); if (out_result) *out_result = Result::ErrorUnknown; return nullptr; }
+        ++created;
+    }
+    if (created == 0) { m->destroy(); if (out_result) *out_result = Result::ErrorInvalidParameter; return nullptr; }
 
     // Descriptor set layout + pipeline layout from the declared bindings.
     DescriptorSetLayoutDesc dl; dl.binding_count = 0;
@@ -168,12 +207,33 @@ Material* Material::create(GraphicDevice* device, const char* material_path, con
     PipelineLayoutDesc pl; pl.set_layout_count = 1; pl.set_layouts[0] = m->set_layout_;
     m->layout_ = device->create_pipeline_layout(pl);
 
+    // Assemble the pipeline from whichever stages are present. compute_shader →
+    // compute; mesh_shader → mesh pipeline (+ optional task); else graphics
+    // (vertex + fragment + optional geometry/tessellation). Ray-tracing stage
+    // modules are created above and kept for an RT pipeline (backend-specific; the
+    // graphics PipelineDesc doesn't carry them).
+    auto sh = [&](ShaderStage s) { return m->shaders_[int(s)]; };
     PipelineDesc gp;
-    gp.vertex_shader = m->vs_; gp.fragment_shader = m->ps_; gp.layout = m->layout_;
+    gp.layout = m->layout_;
+    gp.compute_shader     = sh(ShaderStage::Compute);
+    gp.mesh_shader        = sh(ShaderStage::Mesh);
+    gp.task_shader        = sh(ShaderStage::Task);
+    gp.vertex_shader      = sh(ShaderStage::Vertex);
+    gp.fragment_shader    = sh(ShaderStage::Fragment);
+    gp.geometry_shader    = sh(ShaderStage::Geometry);
+    gp.tess_control_shader= sh(ShaderStage::TessControl);
+    gp.tess_eval_shader   = sh(ShaderStage::TessEval);
+    gp.patch_control_points = m->desc_.patch_control_points;
     gp.vertex_layout = m->desc_.vertex_layout; gp.topology = m->desc_.topology;
     gp.blend = m->desc_.blend; gp.depth_stencil = m->desc_.depth_stencil; gp.rasterizer = m->desc_.rasterizer;
-    m->pipeline_ = device->create_pipeline(gp);
-    if (!m->pipeline_.valid()) { m->destroy(); if (out_result) *out_result = Result::ErrorUnknown; return nullptr; }
+    const bool ray_only = !gp.compute_shader.valid() && !gp.mesh_shader.valid() && !gp.vertex_shader.valid();
+    if (ray_only) {
+        // RT-only material: modules created; RT pipeline assembly is backend-specific (TODO).
+        std::fprintf(stderr, "[Material] ray-tracing-only material: shader modules created, RT pipeline assembly pending\n");
+    } else {
+        m->pipeline_ = device->create_pipeline(gp);
+        if (!m->pipeline_.valid()) { m->destroy(); if (out_result) *out_result = Result::ErrorUnknown; return nullptr; }
+    }
 
     // One descriptor write slot per param (filled in by set_*).
     m->writes_.resize(m->desc_.params.size());
@@ -191,8 +251,7 @@ void Material::destroy() {
         if (pipeline_.valid())   device_->destroy_pipeline(pipeline_);
         if (layout_.valid())     device_->destroy_pipeline_layout(layout_);
         if (set_layout_.valid()) device_->destroy_descriptor_set_layout(set_layout_);
-        if (vs_.valid())         device_->destroy_shader(vs_);
-        if (ps_.valid())         device_->destroy_shader(ps_);
+        for (auto& s : shaders_) if (s.valid()) device_->destroy_shader(s);
     }
     delete this;
 }

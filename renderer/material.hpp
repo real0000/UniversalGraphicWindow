@@ -30,16 +30,25 @@ struct MaterialParam {
 
 // Parsed .material config. Authored alongside the .hlsl shader.
 struct MaterialDesc {
+    // One entry point per ShaderStage (count == number of ShaderStage values).
+    // Empty string = that stage is absent. Covers the whole pipeline: vertex,
+    // fragment/pixel, geometry, hull(tess control), domain(tess eval), compute,
+    // task(amplification), mesh, and the ray-tracing stages (raygen/miss/closesthit/
+    // anyhit/intersection/callable).
+    static const int STAGE_COUNT = 14;
+
     std::string  shader_source;             // HLSL authoring file, e.g. "quad.hlsl"
-    std::string  vertex_entry = "vs_main";
-    std::string  pixel_entry  = "ps_main";
+    std::string  entry[STAGE_COUNT];        // entry[(int)ShaderStage::X]
     VertexLayout vertex_layout;
     BlendState        blend;
     DepthStencilState depth_stencil;
     RasterizerState   rasterizer;
     PrimitiveTopology topology = PrimitiveTopology::TriangleList;
+    uint32_t          patch_control_points = 0;   // >0 → tessellation patches
     std::vector<MaterialParam> params;
 
+    bool        has(ShaderStage s) const { return !entry[int(s)].empty(); }
+    const char* entry_of(ShaderStage s) const { return entry[int(s)].c_str(); }
     static bool load(const char* path, MaterialDesc* out);   // parse a .material INI
 };
 
@@ -68,7 +77,7 @@ private:
 
     GraphicDevice*            device_ = nullptr;
     MaterialDesc              desc_;
-    ShaderHandle              vs_, ps_;
+    ShaderHandle              shaders_[MaterialDesc::STAGE_COUNT];   // one per stage (invalid = absent)
     DescriptorSetLayoutHandle set_layout_;
     PipelineLayoutHandle      layout_;
     PipelineHandle            pipeline_;
