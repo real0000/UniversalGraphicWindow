@@ -540,6 +540,8 @@ Window* create_window_impl(const Config& config, Result* out_result) {
 
 void Window::destroy() {
     if (impl) {
+        // Capture the backend before the graphics object is freed below.
+        const bool vulkan_backend = impl->gfx && impl->gfx->get_backend() == Backend::Vulkan;
         if (impl->owns_graphics && impl->gfx) {
             impl->gfx->destroy();
         }
@@ -553,7 +555,11 @@ void Window::destroy() {
             XDestroyWindow(impl->display, impl->xwindow);
         }
         if (impl->display) {
-            XCloseDisplay(impl->display);
+            // NVIDIA's Vulkan ICD leaves a dangling XESetCloseDisplay hook after
+            // vkDestroyInstance, so XCloseDisplay() then jumps into freed driver
+            // code and crashes. Leak the Display for Vulkan windows (a one-time
+            // teardown leak — the same mitigation GLFW uses for this driver bug).
+            if (!vulkan_backend) XCloseDisplay(impl->display);
         }
         delete impl;
         impl = nullptr;
