@@ -671,6 +671,7 @@ if(WINDOW_ENABLE_RENDERER AND WINDOW_ENABLE_GUI)
     list(APPEND WINDOW_SOURCES
         renderer/gui_renderer.cpp
         renderer/gui_text_rasterizer.cpp
+        renderer/material.cpp
     )
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_RENDERER)
     message(STATUS "GPU GUI renderer enabled")

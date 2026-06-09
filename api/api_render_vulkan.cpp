@@ -131,7 +131,7 @@ struct VKTexture { VkImage image = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_
                    VkFormat format = VK_FORMAT_UNDEFINED; VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
                    int w = 0, h = 0, layers = 1, levels = 1; VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED; bool owns = true; };
 struct VKSampler { VkSampler sampler = VK_NULL_HANDLE; };
-struct VKShader  { VkShaderModule mod = VK_NULL_HANDLE; ShaderStage stage = ShaderStage::Vertex; };
+struct VKShader  { VkShaderModule mod = VK_NULL_HANDLE; ShaderStage stage = ShaderStage::Vertex; std::string entry = "main"; };
 struct VKPipeline{ VkPipeline pipeline = VK_NULL_HANDLE; VkPipelineLayout layout = VK_NULL_HANDLE; bool owns_layout = false;
                    VkRenderPass render_pass = VK_NULL_HANDLE; VkPipelineBindPoint bind = VK_PIPELINE_BIND_POINT_GRAPHICS; };
 struct VKRenderTarget { int color_tex = -1; int depth_tex = -1; };
@@ -367,7 +367,7 @@ public:
         if (d.language != ShaderLanguage::SPIRV) { vk_unsupported("non-SPIR-V shader (compile to SPIR-V)"); return { -1 }; }
         VkShaderModuleCreateInfo mi{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
         mi.codeSize = d.code_size; mi.pCode = static_cast<const uint32_t*>(d.code);
-        VKShader sh; sh.stage = d.stage; VK_OK(vkCreateShaderModule(dev, &mi, nullptr, &sh.mod));
+        VKShader sh; sh.stage = d.stage; sh.entry = d.entry_point ? d.entry_point : "main"; VK_OK(vkCreateShaderModule(dev, &mi, nullptr, &sh.mod));
         if (!sh.mod) return { -1 };
         return { shaders_.alloc(sh) };
     }
@@ -462,14 +462,14 @@ public:
             auto* cs = shaders_.get(d.compute_shader.id); if (!cs) return { -1 };
             VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
             ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }; ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            ci.stage.module = cs->mod; ci.stage.pName = "main"; ci.layout = p.layout;
+            ci.stage.module = cs->mod; ci.stage.pName = cs->entry.c_str(); ci.layout = p.layout;
             VK_OK(vkCreateComputePipelines(dev, cache, 1, &ci, nullptr, &p.pipeline));
             return p.pipeline ? PipelineHandle{ pipelines_.alloc(p) } : PipelineHandle{ -1 };
         }
         if (d.mesh_shader.valid()) { vk_unsupported("mesh-shader pipelines"); return { -1 }; }
 
         std::vector<VkPipelineShaderStageCreateInfo> stages;
-        auto add = [&](ShaderHandle h) { if (auto* s = shaders_.get(h.id)) { VkPipelineShaderStageCreateInfo si{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }; si.stage = shader_stage(s->stage); si.module = s->mod; si.pName = "main"; stages.push_back(si); } };
+        auto add = [&](ShaderHandle h) { if (auto* s = shaders_.get(h.id)) { VkPipelineShaderStageCreateInfo si{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }; si.stage = shader_stage(s->stage); si.module = s->mod; si.pName = s->entry.c_str(); stages.push_back(si); } };
         add(d.vertex_shader); add(d.fragment_shader);
         if (d.geometry_shader.valid()) add(d.geometry_shader);
         if (d.tess_control_shader.valid()) add(d.tess_control_shader);

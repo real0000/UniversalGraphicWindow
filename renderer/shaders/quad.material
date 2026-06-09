@@ -1,0 +1,27 @@
+; quad.material — Material config (INI). Describes the shader, render state, vertex
+; layout and resource bindings. Shaders are authored in HLSL (quad.hlsl); the build
+; emits per-backend blobs alongside (quad.vs_main.spv, quad.ps_main.spv, ...).
+[shader]
+source       = quad.hlsl
+vertex_entry = vs_main
+pixel_entry  = ps_main
+
+[state]
+blend      = alpha
+depth_test = false
+cull       = none
+topology   = triangles
+
+; vertex attributes: <loc> = <format>:<byte_offset>:<buffer_slot>
+[vertex_layout]
+0      = float2:0:0
+1      = float2:8:0
+2      = float4:16:0
+stride = 32
+
+; resource bindings: <name> = <set>:<binding>:<type>[:<stages>]
+;   type = uniform_buffer | sampled_texture | sampler | combined_image_sampler | storage_buffer | storage_texture
+[bindings]
+uProj = 0:0:uniform_buffer:vertex
+uTex  = 0:1:sampled_texture:fragment
+uSamp = 0:2:sampler:fragment
