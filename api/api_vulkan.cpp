@@ -102,6 +102,18 @@ public:
     void* native_context() const override { return graphics_queue; }
     void* native_swapchain() const override { return swapchain; }
 
+    bool get_vulkan_info(VulkanGraphicsInfo* out) const override {
+        if (!out) return false;
+        out->instance              = instance;
+        out->physical_device       = physical_device;
+        out->device                = device;
+        out->graphics_queue        = graphics_queue;
+        out->graphics_queue_family = queue_family_index;
+        out->surface               = surface;
+        out->swapchain             = swapchain;
+        return device != VK_NULL_HANDLE;
+    }
+
     void get_capabilities(GraphicsCapabilities* out_caps) const override {
         if (!out_caps || physical_device == VK_NULL_HANDLE) return;
         GraphicsCapabilities& c = *out_caps;

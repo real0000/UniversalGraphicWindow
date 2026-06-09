@@ -537,6 +537,20 @@ struct ExternalWindowConfig {
 // Graphics Context Interface
 //=============================================================================
 
+// Vulkan handles from a Backend::Vulkan Graphics, enough to build a Vulkan
+// GraphicDevice on top. Opaque void* (cast to the Vulkan types in the backend) so
+// graphics_api.hpp need not include vulkan.h. Only populated when get_vulkan_info()
+// returns true (i.e. the context is Vulkan).
+struct VulkanGraphicsInfo {
+    void*    instance = nullptr;          // VkInstance
+    void*    physical_device = nullptr;   // VkPhysicalDevice
+    void*    device = nullptr;            // VkDevice
+    void*    graphics_queue = nullptr;    // VkQueue
+    uint32_t graphics_queue_family = 0;
+    void*    surface = nullptr;           // VkSurfaceKHR (may be null)
+    void*    swapchain = nullptr;         // VkSwapchainKHR (may be null)
+};
+
 class Graphics {
 public:
     virtual ~Graphics() = default;
@@ -570,6 +584,10 @@ public:
     virtual void* native_device() const = 0;
     virtual void* native_context() const = 0;
     virtual void* native_swapchain() const = 0;
+
+    // Vulkan-only: fill the full handle set for a Vulkan render device. Returns
+    // false on non-Vulkan backends (default). Overridden by the Vulkan Graphics.
+    virtual bool get_vulkan_info(VulkanGraphicsInfo* /*out*/) const { return false; }
 
     // Query backend capabilities and hardware limits.
     // Fills *out_caps completely; any field that cannot be determined is left
