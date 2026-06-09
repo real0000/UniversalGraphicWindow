@@ -21,6 +21,16 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+// GLES / WebGL flavour: this same TU serves OpenGL ES (EGL) and WebGL (Emscripten).
+// Those profiles lack a handful of desktop-GL entry points; UGW_GL_ES guards them so
+// they log "unsupported" instead of referencing absent symbols. It is never defined
+// for the desktop GL build (the path validated by the gui demo is byte-identical).
+#if defined(__EMSCRIPTEN__) || defined(WINDOW_GLES) || defined(GL_ES_VERSION_3_0)
+#define UGW_GL_ES 1
+#else
+#define UGW_GL_ES 0
+#endif
 #endif
 
 namespace window {
@@ -333,11 +343,15 @@ public:
         }
         GLShader sh; sh.stage = d.stage; sh.id = glCreateShader(type);
         if (d.language == ShaderLanguage::SPIRV) {
+#if UGW_GL_ES
+            gl_unsupported("SPIR-V shaders (GLES/WebGL has no ARB_gl_spirv; provide ESSL)"); glDeleteShader(sh.id); return { -1 };
+#else
             // Cross-API path: ingest SPIR-V directly (GL 4.6 / ARB_gl_spirv), the same
             // bytecode a Vulkan backend consumes. One shader blob, many backends.
             if (!glSpecializeShader) { gl_unsupported("SPIR-V shaders (needs GL 4.6)"); glDeleteShader(sh.id); return { -1 }; }
             glShaderBinary(1, &sh.id, GL_SHADER_BINARY_FORMAT_SPIR_V, d.code, GLsizei(d.code_size));
             glSpecializeShader(sh.id, d.entry_point ? d.entry_point : "main", 0, nullptr, nullptr);
+#endif
         } else {
             const char* src = static_cast<const char*>(d.code);
             const GLint len = d.code_size ? GLint(d.code_size) : -1;
@@ -768,7 +782,9 @@ public:
             glStencilMask(p->depth.stencil_write_mask);
         } else glDisable(GL_STENCIL_TEST);
         // Rasterizer
-        glPolygonMode(GL_FRONT_AND_BACK, p->raster.fill_mode == FillMode::Wireframe ? GL_LINE : GL_FILL);
+#if !UGW_GL_ES
+        glPolygonMode(GL_FRONT_AND_BACK, p->raster.fill_mode == FillMode::Wireframe ? GL_LINE : GL_FILL);  // GLES is always FILL
+#endif
         if (p->raster.cull_mode == CullMode::None) glDisable(GL_CULL_FACE);
         else { glEnable(GL_CULL_FACE); glCullFace(p->raster.cull_mode == CullMode::Front ? GL_FRONT : GL_BACK); }
         glFrontFace(p->raster.front_face == FrontFace::Clockwise ? GL_CW : GL_CCW);
@@ -837,8 +853,14 @@ public:
         configure_attribs();
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, b->id);
         const void* off = reinterpret_cast<const void*>(size_t(offset));
+#if UGW_GL_ES
+        if (draw_count > 1) gl_unsupported("multi-draw indirect (GLES: single draw only)");
+        glDrawArraysIndirect(topology(), off);   // ES 3.1 supports a single indirect draw
+        (void)stride;
+#else
         if (draw_count > 1) glMultiDrawArraysIndirect(topology(), off, draw_count, stride);
         else                glDrawArraysIndirect(topology(), off);
+#endif
     }
     void draw_indexed_indirect(BufferHandle args, uint32_t offset, uint32_t draw_count, uint32_t stride) override {
         auto* b = dev_->buffer(args.id); if (!b) return;
@@ -846,8 +868,14 @@ public:
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, b->id);
         const void* off = reinterpret_cast<const void*>(size_t(offset));
+#if UGW_GL_ES
+        if (draw_count > 1) gl_unsupported("multi-draw indexed indirect (GLES: single draw only)");
+        glDrawElementsIndirect(topology(), index_type_, off);
+        (void)stride;
+#else
         if (draw_count > 1) glMultiDrawElementsIndirect(topology(), index_type_, off, draw_count, stride);
         else                glDrawElementsIndirect(topology(), index_type_, off);
+#endif
     }
     void dispatch_indirect(BufferHandle args, uint32_t offset) override {
         auto* b = dev_->buffer(args.id); if (!b) return;
@@ -871,8 +899,12 @@ public:
     void copy_texture(TextureHandle dst, const TextureRegion& dr, TextureHandle src, const TextureRegion& sr) override {
         auto* s = dev_->texture(src.id); auto* d = dev_->texture(dst.id); if (!s || !d) return;
         const int w = sr.width ? sr.width : s->w, h = sr.height ? sr.height : s->h, depth = sr.depth ? sr.depth : 1;
+#if UGW_GL_ES && !defined(GL_ES_VERSION_3_2)
+        gl_unsupported("copy_texture (glCopyImageSubData needs GLES 3.2; blit instead)"); (void)w; (void)h; (void)depth; (void)dr;
+#else
         glCopyImageSubData(s->id, s->target, sr.mip, sr.x, sr.y, sr.layer,
                            d->id, d->target, dr.mip, dr.x, dr.y, dr.layer, w, h, depth);
+#endif
     }
     void blit_render_target(RenderTargetHandle dst, RenderTargetHandle src,
                             int sx0, int sy0, int sx1, int sy1,
@@ -957,6 +989,12 @@ public:
     // ---- Multiple viewports / scissors --------------------------------------
     void set_viewports(const Viewport* vps, int count) override {
         if (!vps || count <= 0) return;
+#if UGW_GL_ES
+        if (count > 1) gl_unsupported("multi-viewport (GLES: viewport 0 only)");
+        const Viewport& v0 = vps[0];
+        glViewport(GLint(v0.x), GLint(v0.y), GLsizei(v0.width), GLsizei(v0.height));
+        glDepthRangef(v0.min_depth, v0.max_depth);
+#else
         std::vector<GLfloat> v(size_t(count) * 4); std::vector<GLdouble> d(size_t(count) * 2);
         for (int i = 0; i < count; ++i) {
             v[i*4+0] = vps[i].x; v[i*4+1] = vps[i].y; v[i*4+2] = vps[i].width; v[i*4+3] = vps[i].height;
@@ -964,26 +1002,39 @@ public:
         }
         glViewportArrayv(0, count, v.data());
         glDepthRangeArrayv(0, count, d.data());
+#endif
     }
     void set_scissors(const ScissorRect* rs, int count) override {
         if (!rs || count <= 0) return;
+#if UGW_GL_ES
+        if (count > 1) gl_unsupported("multi-scissor (GLES: scissor 0 only)");
+        glScissor(rs[0].x, rs[0].y, rs[0].width, rs[0].height);
+#else
         std::vector<GLint> s(size_t(count) * 4);
         for (int i = 0; i < count; ++i) { s[i*4+0] = rs[i].x; s[i*4+1] = rs[i].y; s[i*4+2] = rs[i].width; s[i*4+3] = rs[i].height; }
         glScissorArrayv(0, count, s.data());
+#endif
     }
 
     // ---- Indirect draw with a GPU-supplied count (≈ ExecuteIndirect) ---------
     void draw_indirect_count(BufferHandle args, uint32_t args_off, BufferHandle count_buf, uint32_t count_off,
                              uint32_t max_draws, uint32_t stride) override {
+#if UGW_GL_ES
+        gl_unsupported("draw_indirect_count (no GLES count buffer)"); (void)args; (void)args_off; (void)count_buf; (void)count_off; (void)max_draws; (void)stride;
+#else
         auto* a = dev_->buffer(args.id); auto* c = dev_->buffer(count_buf.id); if (!a || !c) return;
         configure_attribs();
         glBindBuffer(GL_DRAW_INDIRECT_BUFFER, a->id);
         glBindBuffer(GL_PARAMETER_BUFFER, c->id);
         glMultiDrawArraysIndirectCount(topology(), reinterpret_cast<const void*>(size_t(args_off)),
                                        GLintptr(count_off), max_draws, stride);
+#endif
     }
     void draw_indexed_indirect_count(BufferHandle args, uint32_t args_off, BufferHandle count_buf, uint32_t count_off,
                                      uint32_t max_draws, uint32_t stride) override {
+#if UGW_GL_ES
+        gl_unsupported("draw_indexed_indirect_count (no GLES count buffer)"); (void)args; (void)args_off; (void)count_buf; (void)count_off; (void)max_draws; (void)stride;
+#else
         auto* a = dev_->buffer(args.id); auto* c = dev_->buffer(count_buf.id); if (!a || !c) return;
         configure_attribs();
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_);
@@ -991,6 +1042,7 @@ public:
         glBindBuffer(GL_PARAMETER_BUFFER, c->id);
         glMultiDrawElementsIndirectCount(topology(), index_type_, reinterpret_cast<const void*>(size_t(args_off)),
                                          GLintptr(count_off), max_draws, stride);
+#endif
     }
 
     // ---- Ray tracing — no core OpenGL support -------------------------------
