@@ -61,6 +61,7 @@ public:
     VkQueue graphics_queue = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    VkFormat swapchain_format = VK_FORMAT_UNDEFINED;
     std::string device_name;
     bool owns_instance = false;
     bool owns_device = true;
@@ -111,6 +112,7 @@ public:
         out->graphics_queue_family = queue_family_index;
         out->surface               = surface;
         out->swapchain             = swapchain;
+        out->swapchain_format      = static_cast<uint32_t>(swapchain_format);
         return device != VK_NULL_HANDLE;
     }
 
@@ -414,6 +416,7 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
     VkPhysicalDevice physical_device = VK_NULL_HANDLE;
     VkQueue graphics_queue = VK_NULL_HANDLE;
     bool owns_device = true;
+    uint32_t queue_family = 0;
 
     // Check for shared Vulkan device
     if (shared_graphics && shared_graphics->get_backend() == Backend::Vulkan) {
@@ -421,6 +424,7 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
         device = shared_vk->device;
         physical_device = shared_vk->physical_device;
         graphics_queue = shared_vk->graphics_queue;
+        queue_family = shared_vk->queue_family_index;
         owns_device = false;
     } else {
         physical_device = select_physical_device(instance, surface);
@@ -430,7 +434,7 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
             return nullptr;
         }
 
-        uint32_t queue_family = find_graphics_queue_family(physical_device, surface);
+        queue_family = find_graphics_queue_family(physical_device, surface);
         if (queue_family == UINT32_MAX) {
             vkDestroySurfaceKHR(instance, surface, nullptr);
             if (owns_instance) vkDestroyInstance(instance, nullptr);
@@ -515,9 +519,11 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
     gfx->graphics_queue = graphics_queue;
     gfx->surface = surface;
     gfx->swapchain = swapchain;
+    gfx->swapchain_format = surface_format.format;
     gfx->device_name = props.deviceName;
     gfx->owns_instance = owns_instance;
     gfx->owns_device = owns_device;
+    gfx->queue_family_index = queue_family;
 
     return gfx;
 }

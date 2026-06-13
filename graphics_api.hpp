@@ -549,6 +549,7 @@ struct VulkanGraphicsInfo {
     uint32_t graphics_queue_family = 0;
     void*    surface = nullptr;           // VkSurfaceKHR (may be null)
     void*    swapchain = nullptr;         // VkSwapchainKHR (may be null)
+    uint32_t swapchain_format = 0;        // VkFormat of the swapchain images (0 = VK_FORMAT_UNDEFINED)
 };
 
 class Graphics {
