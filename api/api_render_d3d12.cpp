@@ -186,7 +186,7 @@ public:
         out->max_texture_size = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
         out->max_color_attachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT;
         out->max_bound_descriptor_sets = 8; out->min_uniform_buffer_offset_alignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-        out->max_push_constant_size = 256; out->compute_shaders = true; out->indirect_draw = true; out->mesh_shaders = true;
+        out->max_push_constant_size = 256; out->compute_shaders = true; out->indirect_draw = true; out->mesh_shaders = true; out->timestamp_query = true;
         // Highest MSAA sample count the default colour format supports.
         for (UINT n = 8; n >= 2; n >>= 1) { D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q{ DXGI_FORMAT_R8G8B8A8_UNORM, n, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0 };
             if (SUCCEEDED(dev->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q, sizeof q)) && q.NumQualityLevels > 0) { out->max_samples = int(n); break; } }

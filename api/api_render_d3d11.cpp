@@ -167,7 +167,7 @@ public:
         out->max_bound_descriptor_sets = 4;
         out->min_uniform_buffer_offset_alignment = 256;   // CB offset granularity (D3D11.1 VSSetConstantBuffers1)
         out->max_push_constant_size = 256;
-        out->compute_shaders = true; out->instancing = true; out->indirect_draw = true;
+        out->compute_shaders = true; out->instancing = true; out->indirect_draw = true; out->timestamp_query = true;
         // Highest MSAA sample count the default colour format supports.
         for (UINT n = 8; n >= 2; n >>= 1) { UINT q = 0; if (SUCCEEDED(dev->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, n, &q)) && q > 0) { out->max_samples = int(n); break; } }
     }
