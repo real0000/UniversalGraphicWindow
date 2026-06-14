@@ -166,6 +166,24 @@ void GpuGuiRenderer::emit_circle(float cx, float cy, float radius, const math::V
     }
 }
 
+// Thick line p0→p1 as a rotated quad (two triangles), solid colour (layer = -1).
+void GpuGuiRenderer::emit_line(float x0, float y0, float x1, float y1, float width, const math::Vec4& c) {
+    auto v = [&](float px, float py) {
+        verts_.push_back(px); verts_.push_back(py);
+        verts_.push_back(0);  verts_.push_back(0); verts_.push_back(-1.0f);
+        verts_.push_back(c.x); verts_.push_back(c.y); verts_.push_back(c.z); verts_.push_back(c.w);
+    };
+    float dx = x1 - x0, dy = y1 - y0;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1e-4f) { emit_quad(x0 - width * 0.5f, y0 - width * 0.5f, width, width, 0,0,0,0, -1.0f, c); return; }
+    const float hw = width * 0.5f;
+    const float nx = -dy / len * hw, ny = dx / len * hw;   // half-width normal
+    const float ax = x0 + nx, ay = y0 + ny, bx = x0 - nx, by = y0 - ny;
+    const float cxp = x1 + nx, cyp = y1 + ny, dxp = x1 - nx, dyp = y1 - ny;
+    v(ax, ay); v(bx, by); v(cxp, cyp);
+    v(cxp, cyp); v(bx, by); v(dxp, dyp);
+}
+
 TextureHandle GpuGuiRenderer::resolve_texture(const WidgetRenderInfo::TextureCmd& t) {
     if (!tex_provider_) return {};
     // Key by source, matching flatten()'s own dedup (File→path, Memory→pointer).
@@ -243,8 +261,9 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
             const auto& c = info.colors[ref.index];
             const float px = math::x(math::box_min(c.dest)), py = math::y(math::box_min(c.dest));
             const float pw = math::box_width(c.dest),        ph = math::box_height(c.dest);
-            if (c.shape == DrawShape::Circle) { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vc += 24 * 3; cur.count += 24 * 3; }
-            else                              { emit_quad(px, py, pw, ph, 0,0,0,0, -1.0f, c.color);              vc += 6;      cur.count += 6; }
+            if      (c.shape == DrawShape::Circle) { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vc += 24 * 3; cur.count += 24 * 3; }
+            else if (c.shape == DrawShape::Line)   { emit_line(px, py, c.line_x1, c.line_y1, c.line_w, c.color);     vc += 6;      cur.count += 6; }
+            else                                   { emit_quad(px, py, pw, ph, 0,0,0,0, -1.0f, c.color);             vc += 6;      cur.count += 6; }
         } else if (ref.pool == Pool::Texture) {
             const auto& t = info.textures[ref.index];
             const float px = math::x(math::box_min(t.dest)), py = math::y(math::box_min(t.dest));

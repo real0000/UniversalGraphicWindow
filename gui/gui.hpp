@@ -360,7 +360,8 @@ enum class TextureSourceType : uint8_t {
 // Shape variant for ColorCmd
 enum class DrawShape : uint8_t {
     Rect = 0,   // Filled rectangle (default)
-    Circle      // Filled circle inscribed in dest
+    Circle,     // Filled circle inscribed in dest
+    Line        // Thick line from dest.min to (line_x1,line_y1), width line_w (rotated quad)
 };
 
 // 9-slice (9-patch) center behaviour
@@ -393,6 +394,8 @@ struct WidgetRenderInfo {
         DrawShape  shape = DrawShape::Rect;
         int32_t    depth = 0;
         math::Box  clip;
+        // Line shape only: second endpoint + stroke width (dest.min is the first).
+        float      line_x1 = 0.0f, line_y1 = 0.0f, line_w = 0.0f;
     };
 
     // Component: textured quad (atlas layer or file path)
@@ -495,6 +498,11 @@ struct WidgetRenderInfo {
                      const math::Vec4& col, int32_t depth, const math::Box& clip) {
         float d2 = radius * 2.0f;
         colors.push_back({math::make_box(cx-radius,cy-radius,d2,d2), col, DrawShape::Circle, depth, clip});
+    }
+    // Thick line segment (p0→p1, stroke width w) rendered as a rotated quad.
+    void push_line(float x0, float y0, float x1, float y1, float w,
+                   const math::Vec4& col, int32_t depth, const math::Box& clip) {
+        colors.push_back({math::make_box(x0,y0,0,0), col, DrawShape::Line, depth, clip, x1, y1, w});
     }
     // 4-edge outline; depth is incremented 4 times (pass by ref)
     void push_outline(float x, float y, float w, float h,

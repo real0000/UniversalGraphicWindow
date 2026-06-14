@@ -57,6 +57,7 @@ private:
                    float u0, float v0, float u1, float v1,
                    float layer, const math::Vec4& c);
     void emit_circle(float cx, float cy, float radius, const math::Vec4& c);
+    void emit_line(float x0, float y0, float x1, float y1, float width, const math::Vec4& c);
     TextureHandle resolve_texture(const WidgetRenderInfo::TextureCmd& t);
 
     DescriptorSetHandle desc_set_for(TextureHandle tex);   // per-texture bind group (non-GL), cached
