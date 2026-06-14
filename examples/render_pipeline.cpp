@@ -192,7 +192,8 @@ static DxbcBlob d3d_dxbc(SK k) {
         case SK::FS_RED:    return { DXBC_RED_PS,    sizeof DXBC_RED_PS };
         case SK::FS_UBO:    return { DXBC_UBO_PS,    sizeof DXBC_UBO_PS };
         case SK::FS_TEX:    return { DXBC_TEX_PS,    sizeof DXBC_TEX_PS };
-        default:            return { nullptr, 0 };  // CS_FILL: no compute DXBC here
+        case SK::CS_FILL:   return { DXBC_FILL_CS,   sizeof DXBC_FILL_CS };
+        default:            return { nullptr, 0 };
     }
 }
 // Backend-aware shader source: GLSL on OpenGL, SPIR-V on Vulkan, DXBC on D3D11.
@@ -352,7 +353,7 @@ static void begin_rt(Ctx& c, RenderTargetHandle rt, RenderTargetHandle depth = R
 // Modern-binding backends (Vulkan) bind resources only through descriptor sets, so
 // the UBO / texture / storage-buffer tests must build a 1-binding set + pipeline
 // layout there. On OpenGL these stay invalid and the test uses slot binding instead.
-static bool uses_desc_sets(Ctx& c) { return c.backend == Backend::Vulkan; }
+static bool uses_desc_sets(Ctx& c) { return c.backend == Backend::Vulkan || c.backend == Backend::D3D12; }
 
 struct DescSet {
     DescriptorSetLayoutHandle dsl;
@@ -893,17 +894,15 @@ static bool run_backend(Backend backend, const char* name) {
         test_vertex_color(c);
         test_indexed(c);
         test_instanced(c);
+        test_uniform_buffer(c);   // CBV via the shader-visible descriptor heap
+        test_texture_sample(c);   // SRV + SAMPLER descriptor tables
         test_depth(c);
         test_blend(c);
         test_scissor(c);
         test_blit(c);
         test_msaa_resolve(c);  // auto-skips: D3D12 backend doesn't wire MSAA sample counts (caps=0)
+        test_compute(c);          // UAV (RWByteAddressBuffer) via descriptor table
         test_timestamp(c);     // auto-skips: timestamp_query caps = 0 on this backend
-        // Resource binding for these needs a GPU-visible CBV/SRV/UAV heap + bind_descriptor_set,
-        // which is still stubbed in api_render_d3d12.cpp.
-        skip("draw.uniform_buffer", "D3D12 bind_descriptor_set needs a GPU-visible descriptor heap (stubbed)");
-        skip("draw.texture_sample", "D3D12 bind_descriptor_set needs a GPU-visible descriptor heap (stubbed)");
-        skip("compute.ssbo",        "D3D12 bind_descriptor_set / UAV heap is stubbed");
     } else {
         skip("pipeline.tierB", "unhandled backend");
     }

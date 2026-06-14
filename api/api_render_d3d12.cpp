@@ -104,13 +104,17 @@ struct D12Buffer  { ID3D12Resource* res = nullptr; UINT64 size = 0; D3D12_RESOUR
 struct D12Texture { ID3D12Resource* res = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; int w = 0, h = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; };
 struct D12Sampler { D3D12_SAMPLER_DESC desc{}; };
 struct D12Shader  { std::vector<uint8_t> bytecode; ShaderStage stage = ShaderStage::Vertex; };
+// Per descriptor set, the root-parameter index of its CBV/SRV/UAV table and (separate,
+// as D3D12 requires) its SAMPLER table. -1 = that set has no table of that kind.
+struct SetParams { int srv_param = -1; int samp_param = -1; };
 struct D12Pipeline{ ID3D12PipelineState* pso = nullptr; ID3D12RootSignature* root = nullptr; bool compute = false;
-                    D3D_PRIMITIVE_TOPOLOGY topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; VertexLayout vl; };
+                    D3D_PRIMITIVE_TOPOLOGY topo = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST; VertexLayout vl;
+                    std::vector<SetParams> set_params; };
 struct D12RenderTarget { int color_tex = -1; int depth_tex = -1; D3D12_CPU_DESCRIPTOR_HANDLE rtv{}; D3D12_CPU_DESCRIPTOR_HANDLE dsv{}; };
 struct D12Fence   { ID3D12Fence* fence = nullptr; UINT64 value = 0; };
 struct D12Query   { ID3D12QueryHeap* heap = nullptr; ID3D12Resource* readback = nullptr; QueryType type = QueryType::Timestamp; };
 struct D12DescSetLayout { DescriptorSetLayoutDesc desc; };
-struct D12PipelineLayout{ ID3D12RootSignature* root = nullptr; PipelineLayoutDesc desc; };
+struct D12PipelineLayout{ ID3D12RootSignature* root = nullptr; PipelineLayoutDesc desc; std::vector<SetParams> set_params; };
 struct D12DescriptorSet { std::vector<DescriptorWrite> writes; };
 
 class D12Device : public GraphicDevice {
@@ -125,7 +129,13 @@ public:
     // targets allocate one descriptor each; a rolling index is plenty for a frame's RTs.
     ID3D12DescriptorHeap* rtv_heap = nullptr; UINT rtv_size = 0, rtv_next = 0;
     ID3D12DescriptorHeap* dsv_heap = nullptr; UINT dsv_size = 0, dsv_next = 0;
+    // GPU-visible (shader-visible) heaps for descriptor-table binding: one CBV/SRV/UAV
+    // heap + one SAMPLER heap, allocated as small rings per bound descriptor set.
+    ID3D12DescriptorHeap* gpu_heap = nullptr; UINT gpu_size = 0, gpu_next = 0;
+    ID3D12DescriptorHeap* samp_heap = nullptr; UINT samp_size = 0, samp_next = 0;
     static const UINT kHeapCount = 256;
+    static const UINT kGpuHeapCount = 4096;
+    static const UINT kSampHeapCount = 256;
 
     explicit D12Device(Graphics* g) {
         dev = (ID3D12Device*)g->native_device(); queue = (ID3D12CommandQueue*)g->native_context();
@@ -135,11 +145,26 @@ public:
         dev->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&rtv_heap)); rtv_size = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         D3D12_DESCRIPTOR_HEAP_DESC dh{ D3D12_DESCRIPTOR_HEAP_TYPE_DSV, kHeapCount, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
         dev->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&dsv_heap)); dsv_size = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        D3D12_DESCRIPTOR_HEAP_DESC gh{ D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kGpuHeapCount, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0 };
+        dev->CreateDescriptorHeap(&gh, IID_PPV_ARGS(&gpu_heap)); gpu_size = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        D3D12_DESCRIPTOR_HEAP_DESC sh{ D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSampHeapCount, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0 };
+        dev->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&samp_heap)); samp_size = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     }
-    ~D12Device() override { if (default_root_) default_root_->Release(); if (rtv_heap) rtv_heap->Release(); if (dsv_heap) dsv_heap->Release(); if (imm_fence) imm_fence->Release(); if (imm_event) CloseHandle(imm_event); }
+    ~D12Device() override { if (samp_heap) samp_heap->Release(); if (gpu_heap) gpu_heap->Release(); if (default_root_) default_root_->Release(); if (rtv_heap) rtv_heap->Release(); if (dsv_heap) dsv_heap->Release(); if (imm_fence) imm_fence->Release(); if (imm_event) CloseHandle(imm_event); }
 
     D3D12_CPU_DESCRIPTOR_HANDLE alloc_rtv() { auto h = rtv_heap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(rtv_next++ % kHeapCount) * rtv_size; return h; }
     D3D12_CPU_DESCRIPTOR_HANDLE alloc_dsv() { auto h = dsv_heap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(dsv_next++ % kHeapCount) * dsv_size; return h; }
+    // Allocate `n` contiguous shader-visible CBV/SRV/UAV descriptors; returns both handles to the base.
+    void alloc_gpu(UINT n, D3D12_CPU_DESCRIPTOR_HANDLE& cpu, D3D12_GPU_DESCRIPTOR_HANDLE& gpu) {
+        UINT base = gpu_next; gpu_next = (gpu_next + n) % kGpuHeapCount; if (gpu_next < base) base = 0, gpu_next = n;  // avoid wrap-split
+        cpu = gpu_heap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr += SIZE_T(base) * gpu_size;
+        gpu = gpu_heap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr += UINT64(base) * gpu_size;
+    }
+    void alloc_samp(UINT n, D3D12_CPU_DESCRIPTOR_HANDLE& cpu, D3D12_GPU_DESCRIPTOR_HANDLE& gpu) {
+        UINT base = samp_next; samp_next = (samp_next + n) % kSampHeapCount; if (samp_next < base) base = 0, samp_next = n;
+        cpu = samp_heap->GetCPUDescriptorHandleForHeapStart(); cpu.ptr += SIZE_T(base) * samp_size;
+        gpu = samp_heap->GetGPUDescriptorHandleForHeapStart(); gpu.ptr += UINT64(base) * samp_size;
+    }
 
     // A graphics PSO requires a root signature even with no bound resources; share an
     // empty one (IA-input-layout allowed) for pipelines created without a layout.
@@ -235,30 +260,40 @@ public:
     DescriptorSetLayoutHandle create_descriptor_set_layout(const DescriptorSetLayoutDesc& d) override { return { dsls_.alloc(D12DescSetLayout{ d }) }; }
     void destroy_descriptor_set_layout(DescriptorSetLayoutHandle h) override { dsls_.release(h.id); }
     PipelineLayoutHandle create_pipeline_layout(const PipelineLayoutDesc& d) override {
-        // Build a root signature: one descriptor table per set + root constants per push range.
+        // Per set, build up to two descriptor tables: a CBV/SRV/UAV table and (since D3D12
+        // forbids mixing) a separate SAMPLER table. CombinedImageSampler contributes to both.
         std::vector<D3D12_ROOT_PARAMETER> params; std::vector<std::vector<D3D12_DESCRIPTOR_RANGE>> ranges;
-        for (int i = 0; i < d.set_layout_count; ++i) {
-            auto* l = dsls_.get(d.set_layouts[i].id); if (!l) continue;
-            std::vector<D3D12_DESCRIPTOR_RANGE> rs;
-            for (int b = 0; b < l->desc.binding_count; ++b) {
-                D3D12_DESCRIPTOR_RANGE_TYPE rt = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-                switch (l->desc.bindings[b].type) {
-                    case BindingType::UniformBuffer: rt = D3D12_DESCRIPTOR_RANGE_TYPE_CBV; break;
-                    case BindingType::StorageBuffer: case BindingType::StorageTexture: rt = D3D12_DESCRIPTOR_RANGE_TYPE_UAV; break;
-                    case BindingType::SampledTexture: case BindingType::CombinedImageSampler: rt = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; break;
-                    case BindingType::Sampler: rt = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER; break;
-                }
-                rs.push_back({ rt, l->desc.bindings[b].count, l->desc.bindings[b].binding, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND });
-            }
+        std::vector<SetParams> set_params(d.set_layout_count);
+        const UINT APPEND = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        auto push_table = [&](std::vector<D3D12_DESCRIPTOR_RANGE>&& rs) -> int {
             ranges.push_back(std::move(rs));
             D3D12_ROOT_PARAMETER p = {}; p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             p.DescriptorTable.NumDescriptorRanges = (UINT)ranges.back().size(); p.DescriptorTable.pDescriptorRanges = ranges.back().data();
-            params.push_back(p);
+            int idx = (int)params.size(); params.push_back(p); return idx;
+        };
+        for (int i = 0; i < d.set_layout_count; ++i) {
+            auto* l = dsls_.get(d.set_layouts[i].id); if (!l) continue;
+            std::vector<D3D12_DESCRIPTOR_RANGE> res, samp;   // CBV/SRV/UAV ranges, SAMPLER ranges
+            for (int b = 0; b < l->desc.binding_count; ++b) {
+                const auto& bd = l->desc.bindings[b];
+                switch (bd.type) {
+                    case BindingType::UniformBuffer:  res.push_back({ D3D12_DESCRIPTOR_RANGE_TYPE_CBV, bd.count, bd.binding, 0, APPEND }); break;
+                    case BindingType::StorageBuffer:
+                    case BindingType::StorageTexture: res.push_back({ D3D12_DESCRIPTOR_RANGE_TYPE_UAV, bd.count, bd.binding, 0, APPEND }); break;
+                    case BindingType::SampledTexture: res.push_back({ D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bd.count, bd.binding, 0, APPEND }); break;
+                    case BindingType::CombinedImageSampler:
+                        res.push_back({ D3D12_DESCRIPTOR_RANGE_TYPE_SRV, bd.count, bd.binding, 0, APPEND });
+                        samp.push_back({ D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, bd.count, bd.binding, 0, APPEND }); break;
+                    case BindingType::Sampler:        samp.push_back({ D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, bd.count, bd.binding, 0, APPEND }); break;
+                }
+            }
+            if (!res.empty())  set_params[i].srv_param  = push_table(std::move(res));
+            if (!samp.empty()) set_params[i].samp_param = push_table(std::move(samp));
         }
         for (int i = 0; i < d.push_constant_count; ++i) { D3D12_ROOT_PARAMETER p = {}; p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; p.Constants.Num32BitValues = d.push_constants[i].size / 4; p.Constants.ShaderRegister = 0; params.push_back(p); }
         D3D12_ROOT_SIGNATURE_DESC rsd = {}; rsd.NumParameters = (UINT)params.size(); rsd.pParameters = params.data(); rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         ID3DBlob* blob = nullptr; ID3DBlob* err = nullptr; D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err);
-        D12PipelineLayout pl; pl.desc = d;
+        D12PipelineLayout pl; pl.desc = d; pl.set_params = std::move(set_params);
         if (blob) { dev->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&pl.root)); blob->Release(); }
         if (err) err->Release();
         return { plls_.alloc(pl) };
@@ -269,7 +304,7 @@ public:
     void destroy_descriptor_set(DescriptorSetHandle h) override { dsets_.release(h.id); }
 
     PipelineHandle create_pipeline(const PipelineDesc& d) override {
-        D12Pipeline p; p.vl = d.vertex_layout; auto* pl = plls_.get(d.layout.id); if (pl) { p.root = pl->root; if (p.root) p.root->AddRef(); }
+        D12Pipeline p; p.vl = d.vertex_layout; auto* pl = plls_.get(d.layout.id); if (pl) { p.root = pl->root; if (p.root) p.root->AddRef(); p.set_params = pl->set_params; }
         if (!p.root) { p.root = default_root(); if (p.root) p.root->AddRef(); }   // PSOs require a root signature
         auto blob = [&](ShaderHandle h) -> D3D12_SHADER_BYTECODE { auto* s = shaders_.get(h.id); return s ? D3D12_SHADER_BYTECODE{ s->bytecode.data(), s->bytecode.size() } : D3D12_SHADER_BYTECODE{ nullptr, 0 }; };
         if (d.compute_shader.valid()) {
@@ -385,6 +420,8 @@ public:
     D12Pipeline* pipeline(int id) { return pipelines_.get(id); }
     D12RenderTarget* rt(int id) { return rts_.get(id); }
     D12Query* query(int id) { return queries_.get(id); }
+    D12DescriptorSet* descriptor_set(int id) { return dsets_.get(id); }
+    D12Sampler* sampler(int id) { return samplers_.get(id); }
     D12Fence* fence(int id) { return fences_.get(id); }
     D12Fence* timeline(int id) { return timelines_.get(id); }
 
@@ -404,7 +441,12 @@ public:
     D12Device* device() const { return dev_; }
     ID3D12GraphicsCommandList* list() const { return cl_; }
 
-    void begin() override { alloc_->Reset(); cl_->Reset(alloc_, nullptr); }
+    void begin() override {
+        alloc_->Reset(); cl_->Reset(alloc_, nullptr);
+        ID3D12DescriptorHeap* heaps[] = { dev_->gpu_heap, dev_->samp_heap };
+        cl_->SetDescriptorHeaps(2, heaps);
+        cur_ = nullptr; has_rtv_ = has_dsv_ = false;
+    }
     void end() override { cl_->Close(); }
     void set_render_target_backbuffer() override { d12_unsupported("backbuffer target (swapchain present path TODO)"); }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
@@ -433,7 +475,55 @@ public:
     void push_constants(uint32_t, const void* data, uint32_t size) override { cl_->SetGraphicsRoot32BitConstants(0, size / 4, data, 0); }
     void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t) override { auto* b = dev_->buffer(h.id); if (b) cl_->SetGraphicsRootUnorderedAccessView(slot, b->res->GetGPUVirtualAddress() + offset); }
     void bind_storage_texture(uint32_t, TextureHandle, int, StorageAccess) override { d12_unsupported("bind_storage_texture (descriptor table)"); }
-    void bind_descriptor_set(uint32_t, DescriptorSetHandle, const uint32_t*, int) override { d12_unsupported("bind_descriptor_set (GPU-visible descriptor heap TODO)"); }
+    void bind_descriptor_set(uint32_t set_index, DescriptorSetHandle h, const uint32_t*, int) override {
+        auto* s = dev_->descriptor_set(h.id); if (!s || !cur_ || set_index >= cur_->set_params.size()) return;
+        const SetParams sp = cur_->set_params[set_index];
+        const bool compute = cur_->compute;
+        auto set_table = [&](int param, D3D12_GPU_DESCRIPTOR_HANDLE gpu) {
+            if (param < 0) return;
+            if (compute) cl_->SetComputeRootDescriptorTable(param, gpu); else cl_->SetGraphicsRootDescriptorTable(param, gpu);
+        };
+        // CBV/SRV/UAV table: one descriptor per non-sampler write, in append (binding) order.
+        int n = 0; for (auto& w : s->writes) if (w.type != BindingType::Sampler) ++n;
+        if (n > 0 && sp.srv_param >= 0) {
+            D3D12_CPU_DESCRIPTOR_HANDLE cpu; D3D12_GPU_DESCRIPTOR_HANDLE gpu; dev_->alloc_gpu((UINT)n, cpu, gpu);
+            int i = 0;
+            for (auto& w : s->writes) {
+                if (w.type == BindingType::Sampler) continue;
+                D3D12_CPU_DESCRIPTOR_HANDLE dst = cpu; dst.ptr += SIZE_T(i++) * dev_->gpu_size;
+                if (w.type == BindingType::UniformBuffer) {
+                    if (auto* b = dev_->buffer(w.buffer.id)) {
+                        D3D12_CONSTANT_BUFFER_VIEW_DESC cv{}; cv.BufferLocation = b->res->GetGPUVirtualAddress() + w.buffer_offset;
+                        cv.SizeInBytes = (UINT)((b->size + 255) & ~255ull); dev_->dev->CreateConstantBufferView(&cv, dst);
+                    }
+                } else if (w.type == BindingType::StorageBuffer) {
+                    if (auto* b = dev_->buffer(w.buffer.id)) {
+                        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{}; uv.Format = DXGI_FORMAT_R32_TYPELESS; uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                        uv.Buffer.FirstElement = w.buffer_offset / 4; uv.Buffer.NumElements = (UINT)((w.buffer_size ? w.buffer_size : b->size) / 4); uv.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                        dev_->dev->CreateUnorderedAccessView(b->res, nullptr, &uv, dst);
+                    }
+                } else { // SampledTexture / CombinedImageSampler -> SRV (sampled in the shader stages)
+                    if (auto* t = dev_->texture(w.texture.id)) {
+                        dev_->transition(cl_, t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                        dev_->dev->CreateShaderResourceView(t->res, nullptr, dst);
+                    }
+                }
+            }
+            set_table(sp.srv_param, gpu);
+        }
+        // SAMPLER table: one descriptor per sampler / combined-image-sampler write.
+        int ns = 0; for (auto& w : s->writes) if (w.type == BindingType::Sampler || w.type == BindingType::CombinedImageSampler) ++ns;
+        if (ns > 0 && sp.samp_param >= 0) {
+            D3D12_CPU_DESCRIPTOR_HANDLE cpu; D3D12_GPU_DESCRIPTOR_HANDLE gpu; dev_->alloc_samp((UINT)ns, cpu, gpu);
+            int i = 0;
+            for (auto& w : s->writes) {
+                if (w.type != BindingType::Sampler && w.type != BindingType::CombinedImageSampler) continue;
+                D3D12_CPU_DESCRIPTOR_HANDLE dst = cpu; dst.ptr += SIZE_T(i++) * dev_->samp_size;
+                if (auto* smp = dev_->sampler(w.sampler.id)) dev_->dev->CreateSampler(&smp->desc, dst);
+            }
+            set_table(sp.samp_param, gpu);
+        }
+    }
     void draw(uint32_t vc, uint32_t first, uint32_t inst, uint32_t first_inst) override { cl_->DrawInstanced(vc, inst ? inst : 1, first, first_inst); }
     void draw_indexed(uint32_t ic, uint32_t first, int32_t base_v, uint32_t inst, uint32_t first_inst) override { cl_->DrawIndexedInstanced(ic, inst ? inst : 1, first, base_v, first_inst); }
     void dispatch(uint32_t x, uint32_t y, uint32_t z) override { cl_->Dispatch(x, y, z); }
