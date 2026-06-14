@@ -885,9 +885,8 @@ static bool run_backend(Backend backend, const char* name) {
         test_scissor(c);
         test_blit(c);
         test_msaa_resolve(c);  // auto-skips: D3D11 backend doesn't wire MSAA sample counts (caps=0)
+        test_compute(c);       // UAV (RWByteAddressBuffer) via CSSetUnorderedAccessViews
         test_timestamp(c);     // auto-skips: timestamp_query caps = 0 on this backend
-        // Compute needs a storage-buffer UAV bind, which is a no-op in api_render_d3d11.cpp.
-        skip("compute.ssbo", "D3D11 bind_storage_buffer is a no-op (buffer UAV not wired)");
     } else if (backend == Backend::D3D12) {
         // Direct3D 12: descriptor-free raster pipeline via DXBC (PSO + empty root signature).
         test_triangle(c);

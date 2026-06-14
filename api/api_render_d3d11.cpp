@@ -132,7 +132,7 @@ D3D11_COMPARISON_FUNC d11_compare(CompareFunc f) {
     return D3D11_COMPARISON_LESS;
 }
 
-struct D11Buffer  { ID3D11Buffer* buf = nullptr; UINT size = 0; BufferType type = BufferType::Vertex; };
+struct D11Buffer  { ID3D11Buffer* buf = nullptr; UINT size = 0; BufferType type = BufferType::Vertex; ID3D11UnorderedAccessView* uav = nullptr; };
 struct D11Texture { ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; ID3D11RenderTargetView* rtv = nullptr;
                     ID3D11DepthStencilView* dsv = nullptr; ID3D11UnorderedAccessView* uav = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; int w = 0, h = 0; };
 struct D11Sampler { ID3D11SamplerState* s = nullptr; };
@@ -176,9 +176,16 @@ public:
         D3D11_BUFFER_DESC bd = {};
         bd.ByteWidth = (b.size + 15) & ~15u;   // CBs need 16-byte multiples
         bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = bind_flags(d.type);
-        if (d.type == BufferType::Storage) { bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; bd.StructureByteStride = d.stride ? d.stride : 4; }
+        // Storage buffers are raw (ByteAddressBuffer) so one compute shader serves both
+        // D3D11 and D3D12 (raw UAV); a raw view needs a 4-byte-multiple width.
+        if (d.type == BufferType::Storage) { bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS; bd.ByteWidth = (b.size + 3) & ~3u; }
         D3D11_SUBRESOURCE_DATA srd = {}; srd.pSysMem = d.initial_data;
         dev->CreateBuffer(&bd, d.initial_data ? &srd : nullptr, &b.buf);
+        if (d.type == BufferType::Storage && b.buf) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {}; ud.Format = DXGI_FORMAT_R32_TYPELESS; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            ud.Buffer.NumElements = bd.ByteWidth / 4; ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+            dev->CreateUnorderedAccessView(b.buf, &ud, &b.uav);
+        }
         return { buffers_.alloc(b) };
     }
     void update_buffer(BufferHandle h, const void* data, uint32_t size, uint32_t offset) override {
@@ -186,7 +193,7 @@ public:
         D3D11_BOX box{ offset, 0, 0, offset + size, 1, 1 };
         ctx->UpdateSubresource(b->buf, 0, b->type == BufferType::Uniform ? nullptr : &box, data, 0, 0);
     }
-    void destroy_buffer(BufferHandle h) override { auto* b = buffers_.get(h.id); if (b && b->buf) b->buf->Release(); buffers_.release(h.id); }
+    void destroy_buffer(BufferHandle h) override { auto* b = buffers_.get(h.id); if (b) { if (b->uav) b->uav->Release(); if (b->buf) b->buf->Release(); } buffers_.release(h.id); }
 
     // ---- textures -----------------------------------------------------------
     TextureHandle create_texture(const TextureDesc& d) override {
@@ -414,7 +421,7 @@ public:
     void bind_sampler(uint32_t slot, SamplerHandle h) override { auto* s = dev_->sampler(h.id); if (s) ctx_->PSSetSamplers(slot, 1, &s->s); }
     void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t, uint32_t) override { auto* b = dev_->buffer(h.id); if (b) { ctx_->VSSetConstantBuffers(slot, 1, &b->buf); ctx_->PSSetConstantBuffers(slot, 1, &b->buf); } }
     void push_constants(uint32_t, const void*, uint32_t) override { d11_unsupported("push_constants (use a constant buffer)"); }
-    void bind_storage_buffer(uint32_t slot, BufferHandle, uint32_t, uint32_t) override { (void)slot; d11_unsupported("bind_storage_buffer (bind a UAV/SRV)"); }
+    void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t, uint32_t) override { auto* b = dev_->buffer(h.id); if (b && b->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &b->uav, nullptr); }
     void bind_storage_texture(uint32_t slot, TextureHandle h, int, StorageAccess) override { auto* t = dev_->texture(h.id); if (t && t->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &t->uav, nullptr); }
     void bind_descriptor_set(uint32_t, DescriptorSetHandle h, const uint32_t*, int) override {
         auto* s = dev_->descriptor_set(h.id); if (!s) return;
