@@ -31,6 +31,57 @@ void vk_unsupported(const char* what) {
     static std::unordered_map<const char*, bool> seen;
     if (!seen[what]) { seen[what] = true; std::fprintf(stderr, "[UGW/Vulkan] %s not supported (no-op)\n", what); }
 }
+
+// ---- State mapping (honour the requested PipelineDesc, not a hardcode) -------
+VkBlendFactor vk_blend_factor(BlendFactor f) {
+    switch (f) {
+        case BlendFactor::Zero:          return VK_BLEND_FACTOR_ZERO;
+        case BlendFactor::One:           return VK_BLEND_FACTOR_ONE;
+        case BlendFactor::SrcColor:      return VK_BLEND_FACTOR_SRC_COLOR;
+        case BlendFactor::InvSrcColor:   return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+        case BlendFactor::SrcAlpha:      return VK_BLEND_FACTOR_SRC_ALPHA;
+        case BlendFactor::InvSrcAlpha:   return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        case BlendFactor::DstColor:      return VK_BLEND_FACTOR_DST_COLOR;
+        case BlendFactor::InvDstColor:   return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+        case BlendFactor::DstAlpha:      return VK_BLEND_FACTOR_DST_ALPHA;
+        case BlendFactor::InvDstAlpha:   return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+        case BlendFactor::SrcAlphaSat:   return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+        case BlendFactor::BlendFactor:   return VK_BLEND_FACTOR_CONSTANT_COLOR;
+        case BlendFactor::InvBlendFactor:return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+    }
+    return VK_BLEND_FACTOR_ONE;
+}
+VkBlendOp vk_blend_op(BlendOp o) {
+    switch (o) {
+        case BlendOp::Add:        return VK_BLEND_OP_ADD;
+        case BlendOp::Subtract:   return VK_BLEND_OP_SUBTRACT;
+        case BlendOp::RevSubtract:return VK_BLEND_OP_REVERSE_SUBTRACT;
+        case BlendOp::Min:        return VK_BLEND_OP_MIN;
+        case BlendOp::Max:        return VK_BLEND_OP_MAX;
+    }
+    return VK_BLEND_OP_ADD;
+}
+VkSampleCountFlagBits vk_samples(int n) {
+    switch (n) {
+        case 64: return VK_SAMPLE_COUNT_64_BIT; case 32: return VK_SAMPLE_COUNT_32_BIT;
+        case 16: return VK_SAMPLE_COUNT_16_BIT; case 8:  return VK_SAMPLE_COUNT_8_BIT;
+        case 4:  return VK_SAMPLE_COUNT_4_BIT;  case 2:  return VK_SAMPLE_COUNT_2_BIT;
+        default: return VK_SAMPLE_COUNT_1_BIT;
+    }
+}
+VkCompareOp vk_compare(CompareFunc f) {
+    switch (f) {
+        case CompareFunc::Never:        return VK_COMPARE_OP_NEVER;
+        case CompareFunc::Less:         return VK_COMPARE_OP_LESS;
+        case CompareFunc::Equal:        return VK_COMPARE_OP_EQUAL;
+        case CompareFunc::LessEqual:    return VK_COMPARE_OP_LESS_OR_EQUAL;
+        case CompareFunc::Greater:      return VK_COMPARE_OP_GREATER;
+        case CompareFunc::NotEqual:     return VK_COMPARE_OP_NOT_EQUAL;
+        case CompareFunc::GreaterEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+        case CompareFunc::Always:       return VK_COMPARE_OP_ALWAYS;
+    }
+    return VK_COMPARE_OP_LESS;
+}
 #define VK_OK(x) do { VkResult _r = (x); if (_r != VK_SUCCESS) std::fprintf(stderr, "[UGW/Vulkan] %s -> %d\n", #x, int(_r)); } while (0)
 
 // Handle store: stable integer ids with a free list (mirrors the GL backend).
@@ -133,7 +184,8 @@ struct VKTexture { VkImage image = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_
 struct VKSampler { VkSampler sampler = VK_NULL_HANDLE; };
 struct VKShader  { VkShaderModule mod = VK_NULL_HANDLE; ShaderStage stage = ShaderStage::Vertex; std::string entry = "main"; };
 struct VKPipeline{ VkPipeline pipeline = VK_NULL_HANDLE; VkPipelineLayout layout = VK_NULL_HANDLE; bool owns_layout = false;
-                   VkRenderPass render_pass = VK_NULL_HANDLE; VkPipelineBindPoint bind = VK_PIPELINE_BIND_POINT_GRAPHICS; };
+                   VkRenderPass render_pass = VK_NULL_HANDLE; VkPipelineBindPoint bind = VK_PIPELINE_BIND_POINT_GRAPHICS;
+                   bool has_depth = false; };
 struct VKRenderTarget { int color_tex = -1; int depth_tex = -1; };
 struct VKFence   { VkFence fence = VK_NULL_HANDLE; };
 struct VKSem     { VkSemaphore sem = VK_NULL_HANDLE; };
@@ -189,6 +241,13 @@ public:
         out->max_texture_size = int(l.maxImageDimension2D);
         out->max_texture_array_layers = int(l.maxImageArrayLayers);
         out->max_color_attachments = int(l.maxColorAttachments);
+        // Highest MSAA sample count usable for both colour and depth framebuffers.
+        {
+            VkSampleCountFlags s = l.framebufferColorSampleCounts & l.framebufferDepthSampleCounts;
+            int ms = 1;
+            for (int n : { 64, 32, 16, 8, 4, 2 }) if (s & VkSampleCountFlags(n)) { ms = n; break; }
+            out->max_samples = ms;
+        }
         out->max_viewports = int(l.maxViewports);
         out->max_vertex_attributes = int(l.maxVertexInputAttributes);
         out->max_uniform_buffer_range = int(l.maxUniformBufferRange);
@@ -282,7 +341,7 @@ public:
         VkImageCreateInfo ii{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         ii.imageType = VK_IMAGE_TYPE_2D; ii.format = t.format;
         ii.extent = { (uint32_t)d.width, (uint32_t)d.height, 1 };
-        ii.mipLevels = t.levels; ii.arrayLayers = t.layers; ii.samples = VK_SAMPLE_COUNT_1_BIT;
+        ii.mipLevels = t.levels; ii.arrayLayers = t.layers; ii.samples = vk_samples(d.samples);
         ii.tiling = VK_IMAGE_TILING_OPTIMAL; ii.usage = usage; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (d.cube) { ii.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT; ii.arrayLayers = 6; t.layers = 6; }
         VK_OK(vkCreateImage(dev, &ii, nullptr, &t.image));
@@ -440,14 +499,26 @@ public:
 
     // ---- pipelines ----------------------------------------------------------
     VkRenderPass make_render_pass(const PipelineDesc& d) {
-        VkAttachmentDescription color{}; color.format = tex_format(d.color_formats[0]); color.samples = VK_SAMPLE_COUNT_1_BIT;
-        color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        VkAttachmentReference ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-        VkSubpassDescription sub{}; sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sub.colorAttachmentCount = 1; sub.pColorAttachments = &ref;
+        VkAttachmentDescription atts[2]{};
+        atts[0].format = tex_format(d.color_formats[0]); atts[0].samples = vk_samples(d.samples);
+        atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; atts[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference cref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{}; sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sub.colorAttachmentCount = 1; sub.pColorAttachments = &cref;
+        // Optional depth attachment (loadOp=LOAD: we clear via vkCmdClearDepthStencilImage
+        // before the pass, like colour). initial/final layout is the attachment-optimal one.
+        VkAttachmentReference dref{ 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        uint32_t count = 1;
+        if (d.depth_stencil.depth_enable) {
+            atts[1].format = tex_format(d.depth_format); atts[1].samples = vk_samples(d.samples);
+            atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            sub.pDepthStencilAttachment = &dref; count = 2;
+        }
         VkRenderPassCreateInfo ci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
-        ci.attachmentCount = 1; ci.pAttachments = &color; ci.subpassCount = 1; ci.pSubpasses = &sub;
+        ci.attachmentCount = count; ci.pAttachments = atts; ci.subpassCount = 1; ci.pSubpasses = &sub;
         VkRenderPass rp = VK_NULL_HANDLE; VK_OK(vkCreateRenderPass(dev, &ci, nullptr, &rp)); return rp;
     }
     PipelineHandle create_pipeline(const PipelineDesc& d) override {
@@ -492,16 +563,18 @@ public:
         rs.cullMode = d.rasterizer.cull_mode == CullMode::None ? VK_CULL_MODE_NONE : (d.rasterizer.cull_mode == CullMode::Front ? VK_CULL_MODE_FRONT_BIT : VK_CULL_MODE_BACK_BIT);
         rs.frontFace = d.rasterizer.front_face == FrontFace::Clockwise ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rs.lineWidth = 1.0f;
-        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO }; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        VkPipelineColorBlendAttachmentState cba{}; cba.colorWriteMask = 0xF; cba.blendEnable = d.blend.enabled ? VK_TRUE : VK_FALSE;
-        cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; cba.colorBlendOp = VK_BLEND_OP_ADD;
-        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO }; ms.rasterizationSamples = vk_samples(d.samples);
+        // Honour the requested BlendState (factors / ops / write mask), not a hardcode.
+        VkPipelineColorBlendAttachmentState cba{}; cba.colorWriteMask = d.blend.write_mask & 0xF; cba.blendEnable = d.blend.enabled ? VK_TRUE : VK_FALSE;
+        cba.srcColorBlendFactor = vk_blend_factor(d.blend.src_color); cba.dstColorBlendFactor = vk_blend_factor(d.blend.dst_color); cba.colorBlendOp = vk_blend_op(d.blend.color_op);
+        cba.srcAlphaBlendFactor = vk_blend_factor(d.blend.src_alpha); cba.dstAlphaBlendFactor = vk_blend_factor(d.blend.dst_alpha); cba.alphaBlendOp = vk_blend_op(d.blend.alpha_op);
         VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO }; cb.attachmentCount = 1; cb.pAttachments = &cba;
         VkPipelineDepthStencilStateCreateInfo dss{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-        dss.depthTestEnable = d.depth_stencil.depth_enable; dss.depthWriteEnable = d.depth_stencil.depth_write; dss.depthCompareOp = VK_COMPARE_OP_LESS;
+        dss.depthTestEnable = d.depth_stencil.depth_enable; dss.depthWriteEnable = d.depth_stencil.depth_write; dss.depthCompareOp = vk_compare(d.depth_stencil.depth_func);
         VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
         VkPipelineDynamicStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
         p.render_pass = make_render_pass(d);
+        p.has_depth = d.depth_stencil.depth_enable;
         VkGraphicsPipelineCreateInfo ci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
         ci.stageCount = (uint32_t)stages.size(); ci.pStages = stages.data();
         ci.pVertexInputState = &vi; ci.pInputAssemblyState = &ia; ci.pViewportState = &vp; ci.pRasterizationState = &rs;
@@ -520,7 +593,7 @@ public:
 
     // ---- render targets -----------------------------------------------------
     RenderTargetHandle create_render_target(const RenderTargetDesc& d) override {
-        TextureDesc td; td.width = d.width; td.height = d.height; td.format = d.format;
+        TextureDesc td; td.width = d.width; td.height = d.height; td.format = d.format; td.samples = d.samples;
         td.usage = TEXTURE_USAGE_SAMPLED | TEXTURE_USAGE_RENDER_TARGET;
         TextureHandle tex = create_texture(td);
         VKRenderTarget rt; rt.color_tex = tex.id;
@@ -689,10 +762,11 @@ public:
     void begin() override { vkResetCommandBuffer(cb_, 0); VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }; bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; vkBeginCommandBuffer(cb_, &bi); in_pass_ = false; }
     void end() override { end_pass(); vkEndCommandBuffer(cb_); }
 
-    void set_render_target_backbuffer() override { end_pass(); color_tex_ = -1; }   // present path TODO
-    void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle) override {
-        end_pass(); color_tex_ = -1;
+    void set_render_target_backbuffer() override { end_pass(); color_tex_ = -1; depth_tex_ = -1; }   // present path TODO
+    void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
+        end_pass(); color_tex_ = -1; depth_tex_ = -1;
         if (count > 0 && colors) if (auto* rt = dev_->rt(colors[0].id)) color_tex_ = rt->color_tex;
+        if (depth.valid()) if (auto* rt = dev_->rt(depth.id)) depth_tex_ = rt->depth_tex;
     }
     void set_viewport(const Viewport& v) override { VkViewport vp{ v.x, v.y, v.width, v.height, v.min_depth, v.max_depth }; vkCmdSetViewport(cb_, 0, 1, &vp); }
     void set_scissor(const ScissorRect& r) override { VkRect2D s{ { r.x, r.y }, { (uint32_t)r.width, (uint32_t)r.height } }; vkCmdSetScissor(cb_, 0, 1, &s); }
@@ -703,7 +777,14 @@ public:
         VkImageSubresourceRange rng{ color->aspect, 0, (uint32_t)color->levels, 0, (uint32_t)color->layers };
         vkCmdClearColorImage(cb_, color->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cc, 1, &rng);
     }
-    void clear_depth_stencil(const ClearDepthStencil&) override { vk_unsupported("clear_depth_stencil (no bound depth path yet)"); }
+    void clear_depth_stencil(const ClearDepthStencil& ds) override {
+        end_pass();
+        auto* depth = dev_->texture(depth_tex_); if (!depth) { vk_unsupported("clear_depth_stencil (no depth target bound)"); return; }
+        VKDevice::barrier(cb_, depth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkClearDepthStencilValue dsv{ ds.depth, ds.stencil };
+        VkImageSubresourceRange rng{ depth->aspect, 0, (uint32_t)depth->levels, 0, (uint32_t)depth->layers };
+        vkCmdClearDepthStencilImage(cb_, depth->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dsv, 1, &rng);
+    }
     void set_pipeline(PipelineHandle h) override { auto* p = dev_->pipeline(h.id); if (!p) return; cur_pipeline_ = p; vkCmdBindPipeline(cb_, p->bind, p->pipeline); }
     void bind_vertex_buffer(uint32_t slot, BufferHandle h, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (!b) return; VkDeviceSize off = offset; vkCmdBindVertexBuffers(cb_, slot, 1, &b->buf, &off); }
     void bind_index_buffer(BufferHandle h, IndexFormat fmt, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (!b) return; vkCmdBindIndexBuffer(cb_, b->buf, offset, fmt == IndexFormat::UInt16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32); }
@@ -742,6 +823,7 @@ public:
         vkCmdCopyImage(cb_, s->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     }
     void blit_render_target(RenderTargetHandle dh, RenderTargetHandle sh, int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1, bool linear) override {
+        end_pass();   // a transfer (blit) cannot be recorded inside a render pass
         auto* srt = dev_->rt(sh.id); auto* drt = dev_->rt(dh.id); if (!srt || !drt) return;
         auto* s = dev_->texture(srt->color_tex); auto* d = dev_->texture(drt->color_tex); if (!s || !d) return;
         VKDevice::barrier(cb_, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL); VKDevice::barrier(cb_, d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -751,6 +833,7 @@ public:
         vkCmdBlitImage(cb_, s->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
     void resolve_render_target(RenderTargetHandle dh, RenderTargetHandle sh) override {
+        end_pass();   // a resolve (transfer) cannot be recorded inside a render pass
         auto* srt = dev_->rt(sh.id); auto* drt = dev_->rt(dh.id); if (!srt || !drt) return;
         auto* s = dev_->texture(srt->color_tex); auto* d = dev_->texture(drt->color_tex); if (!s || !d) return;
         VkImageResolve rr{}; rr.srcSubresource = { s->aspect, 0, 0, 1 }; rr.dstSubresource = { d->aspect, 0, 0, 1 }; rr.extent = { (uint32_t)d->w, (uint32_t)d->h, 1 };
@@ -777,10 +860,20 @@ private:
     void ensure_pass() {
         if (in_pass_ || !cur_pipeline_ || cur_pipeline_->bind != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
         auto* color = dev_->texture(color_tex_); if (!color) return;   // look up fresh: the Pool may have reallocated
-        // Begin a transient framebuffer + render pass matching the bound target.
+        // Begin a transient framebuffer + render pass matching the bound target. When the
+        // pipeline has a depth attachment, include the bound depth target as attachment 1
+        // (its render pass was built with the matching depth attachment).
         VKDevice::barrier(cb_, color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkImageView views[2] = { color->view, VK_NULL_HANDLE };
+        uint32_t att = 1;
+        if (cur_pipeline_->has_depth) {
+            if (auto* depth = dev_->texture(depth_tex_)) {
+                VKDevice::barrier(cb_, depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                views[1] = depth->view; att = 2;
+            }
+        }
         VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-        fci.renderPass = cur_pipeline_->render_pass; fci.attachmentCount = 1; fci.pAttachments = &color->view;
+        fci.renderPass = cur_pipeline_->render_pass; fci.attachmentCount = att; fci.pAttachments = views;
         fci.width = color->w; fci.height = color->h; fci.layers = 1;
         vkCreateFramebuffer(dev_->dev, &fci, nullptr, &fb_);
         VkRenderPassBeginInfo rbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
@@ -795,6 +888,7 @@ private:
     VkCommandBuffer cb_ = VK_NULL_HANDLE;
     VkFramebuffer fb_ = VK_NULL_HANDLE;
     int color_tex_ = -1;   // bound colour target's texture id (looked up per use; Pool may move)
+    int depth_tex_ = -1;   // bound depth target's texture id (-1 = none)
     VKPipeline* cur_pipeline_ = nullptr;
     bool in_pass_ = false;
 };

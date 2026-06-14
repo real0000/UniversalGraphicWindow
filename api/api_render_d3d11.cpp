@@ -79,6 +79,59 @@ UINT bind_flags(BufferType t) {
     }
 }
 
+// State mapping (honour the requested PipelineDesc, not a hardcode).
+D3D11_BLEND d11_blend_factor(BlendFactor f) {
+    switch (f) {
+        case BlendFactor::Zero:           return D3D11_BLEND_ZERO;
+        case BlendFactor::One:            return D3D11_BLEND_ONE;
+        case BlendFactor::SrcColor:       return D3D11_BLEND_SRC_COLOR;
+        case BlendFactor::InvSrcColor:    return D3D11_BLEND_INV_SRC_COLOR;
+        case BlendFactor::SrcAlpha:       return D3D11_BLEND_SRC_ALPHA;
+        case BlendFactor::InvSrcAlpha:    return D3D11_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::DstColor:       return D3D11_BLEND_DEST_COLOR;
+        case BlendFactor::InvDstColor:    return D3D11_BLEND_INV_DEST_COLOR;
+        case BlendFactor::DstAlpha:       return D3D11_BLEND_DEST_ALPHA;
+        case BlendFactor::InvDstAlpha:    return D3D11_BLEND_INV_DEST_ALPHA;
+        case BlendFactor::SrcAlphaSat:    return D3D11_BLEND_SRC_ALPHA_SAT;
+        case BlendFactor::BlendFactor:    return D3D11_BLEND_BLEND_FACTOR;
+        case BlendFactor::InvBlendFactor: return D3D11_BLEND_INV_BLEND_FACTOR;
+    }
+    return D3D11_BLEND_ONE;
+}
+// D3D11 forbids colour-channel factors on the alpha blend; fold them to the alpha form.
+D3D11_BLEND d11_blend_factor_alpha(BlendFactor f) {
+    switch (f) {
+        case BlendFactor::SrcColor:    return D3D11_BLEND_SRC_ALPHA;
+        case BlendFactor::InvSrcColor: return D3D11_BLEND_INV_SRC_ALPHA;
+        case BlendFactor::DstColor:    return D3D11_BLEND_DEST_ALPHA;
+        case BlendFactor::InvDstColor: return D3D11_BLEND_INV_DEST_ALPHA;
+        default:                       return d11_blend_factor(f);
+    }
+}
+D3D11_BLEND_OP d11_blend_op(BlendOp o) {
+    switch (o) {
+        case BlendOp::Add:         return D3D11_BLEND_OP_ADD;
+        case BlendOp::Subtract:    return D3D11_BLEND_OP_SUBTRACT;
+        case BlendOp::RevSubtract: return D3D11_BLEND_OP_REV_SUBTRACT;
+        case BlendOp::Min:         return D3D11_BLEND_OP_MIN;
+        case BlendOp::Max:         return D3D11_BLEND_OP_MAX;
+    }
+    return D3D11_BLEND_OP_ADD;
+}
+D3D11_COMPARISON_FUNC d11_compare(CompareFunc f) {
+    switch (f) {
+        case CompareFunc::Never:        return D3D11_COMPARISON_NEVER;
+        case CompareFunc::Less:         return D3D11_COMPARISON_LESS;
+        case CompareFunc::Equal:        return D3D11_COMPARISON_EQUAL;
+        case CompareFunc::LessEqual:    return D3D11_COMPARISON_LESS_EQUAL;
+        case CompareFunc::Greater:      return D3D11_COMPARISON_GREATER;
+        case CompareFunc::NotEqual:     return D3D11_COMPARISON_NOT_EQUAL;
+        case CompareFunc::GreaterEqual: return D3D11_COMPARISON_GREATER_EQUAL;
+        case CompareFunc::Always:       return D3D11_COMPARISON_ALWAYS;
+    }
+    return D3D11_COMPARISON_LESS;
+}
+
 struct D11Buffer  { ID3D11Buffer* buf = nullptr; UINT size = 0; BufferType type = BufferType::Vertex; };
 struct D11Texture { ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; ID3D11RenderTargetView* rtv = nullptr;
                     ID3D11DepthStencilView* dsv = nullptr; ID3D11UnorderedAccessView* uav = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; int w = 0, h = 0; };
@@ -215,11 +268,13 @@ public:
         rd.CullMode = d.rasterizer.cull_mode == CullMode::None ? D3D11_CULL_NONE : (d.rasterizer.cull_mode == CullMode::Front ? D3D11_CULL_FRONT : D3D11_CULL_BACK);
         rd.FrontCounterClockwise = d.rasterizer.front_face == FrontFace::CounterClockwise; rd.ScissorEnable = d.rasterizer.scissor_enable; rd.DepthClipEnable = TRUE;
         dev->CreateRasterizerState(&rd, &p.raster);
-        D3D11_BLEND_DESC bd = {}; bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        bd.RenderTarget[0].BlendEnable = d.blend.enabled; bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA; bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD; bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO; bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        // Honour the requested BlendState (factors / ops / write mask), not a hardcode.
+        D3D11_BLEND_DESC bd = {}; bd.RenderTarget[0].RenderTargetWriteMask = d.blend.write_mask & 0xF;
+        bd.RenderTarget[0].BlendEnable = d.blend.enabled;
+        bd.RenderTarget[0].SrcBlend  = d11_blend_factor(d.blend.src_color);  bd.RenderTarget[0].DestBlend  = d11_blend_factor(d.blend.dst_color);  bd.RenderTarget[0].BlendOp      = d11_blend_op(d.blend.color_op);
+        bd.RenderTarget[0].SrcBlendAlpha = d11_blend_factor_alpha(d.blend.src_alpha); bd.RenderTarget[0].DestBlendAlpha = d11_blend_factor_alpha(d.blend.dst_alpha); bd.RenderTarget[0].BlendOpAlpha = d11_blend_op(d.blend.alpha_op);
         dev->CreateBlendState(&bd, &p.blend);
-        D3D11_DEPTH_STENCIL_DESC dd = {}; dd.DepthEnable = d.depth_stencil.depth_enable; dd.DepthWriteMask = d.depth_stencil.depth_write ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO; dd.DepthFunc = D3D11_COMPARISON_LESS;
+        D3D11_DEPTH_STENCIL_DESC dd = {}; dd.DepthEnable = d.depth_stencil.depth_enable; dd.DepthWriteMask = d.depth_stencil.depth_write ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO; dd.DepthFunc = d11_compare(d.depth_stencil.depth_func);
         dev->CreateDepthStencilState(&dd, &p.depth);
         return { pipelines_.alloc(p) };
     }
@@ -337,15 +392,15 @@ public:
     void end() override {}
     void set_render_target_backbuffer() override { /* present path: bind swapchain RTV (TODO) */ }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
-        ID3D11RenderTargetView* rtvs[8] = {}; int n = 0; color0_ = nullptr;
+        ID3D11RenderTargetView* rtvs[8] = {}; int n = 0; color0_ = nullptr; depth0_ = nullptr;
         for (int i = 0; i < count && i < 8 && colors; ++i) if (auto* rt = dev_->rt(colors[i].id)) if (auto* t = dev_->texture(rt->color_tex)) { rtvs[n++] = t->rtv; if (!color0_) color0_ = t; }
-        ID3D11DepthStencilView* dsv = nullptr; if (depth.valid()) if (auto* rt = dev_->rt(depth.id)) if (auto* t = dev_->texture(rt->depth_tex)) dsv = t->dsv;
-        ctx_->OMSetRenderTargets(n, rtvs, dsv);
+        if (depth.valid()) if (auto* rt = dev_->rt(depth.id)) if (auto* t = dev_->texture(rt->depth_tex)) depth0_ = t;
+        ctx_->OMSetRenderTargets(n, rtvs, depth0_ ? depth0_->dsv : nullptr);
     }
     void set_viewport(const Viewport& v) override { D3D11_VIEWPORT vp{ v.x, v.y, v.width, v.height, v.min_depth, v.max_depth }; ctx_->RSSetViewports(1, &vp); }
     void set_scissor(const ScissorRect& r) override { D3D11_RECT rc{ r.x, r.y, r.x + r.width, r.y + r.height }; ctx_->RSSetScissorRects(1, &rc); }
     void clear_color(const ClearColor& c) override { if (color0_ && color0_->rtv) { float col[4]{ c.r, c.g, c.b, c.a }; ctx_->ClearRenderTargetView(color0_->rtv, col); } }
-    void clear_depth_stencil(const ClearDepthStencil& ds) override { if (color0_ && color0_->dsv) ctx_->ClearDepthStencilView(color0_->dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, ds.depth, ds.stencil); }
+    void clear_depth_stencil(const ClearDepthStencil& ds) override { if (depth0_ && depth0_->dsv) ctx_->ClearDepthStencilView(depth0_->dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, ds.depth, ds.stencil); }
     void set_pipeline(PipelineHandle h) override {
         auto* p = dev_->pipeline(h.id); if (!p) return; cur_ = p;
         if (p->cs) { ctx_->CSSetShader(p->cs, nullptr, 0); return; }
@@ -384,7 +439,17 @@ public:
         D3D11_BOX box{ soff, 0, 0, soff + size, 1, 1 }; ctx_->CopySubresourceRegion(d->buf, 0, doff, 0, 0, s->buf, 0, &box);
     }
     void copy_texture(TextureHandle dst, const TextureRegion&, TextureHandle src, const TextureRegion&) override { auto* s = dev_->texture(src.id); auto* d = dev_->texture(dst.id); if (s && d) ctx_->CopyResource(d->tex, s->tex); }
-    void blit_render_target(RenderTargetHandle, RenderTargetHandle, int,int,int,int,int,int,int,int, bool) override { d11_unsupported("blit_render_target (draw a fullscreen quad)"); }
+    void blit_render_target(RenderTargetHandle dh, RenderTargetHandle sh,
+                            int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1, bool) override {
+        auto* d = dev_->rt(dh.id); auto* s = dev_->rt(sh.id); if (!d || !s) return;
+        auto* dt = dev_->texture(d->color_tex); auto* st = dev_->texture(s->color_tex); if (!dt || !st) return;
+        // 1:1, same-extent, same-origin blit == a resource copy; scaled/flipped blits
+        // would need a fullscreen-quad pass (not wired here).
+        if (sx0 == dx0 && sy0 == dy0 && (sx1 - sx0) == (dx1 - dx0) && (sy1 - sy0) == (dy1 - dy0))
+            ctx_->CopyResource(dt->tex, st->tex);
+        else
+            d11_unsupported("blit_render_target scaling (draw a fullscreen quad)");
+    }
     void resolve_render_target(RenderTargetHandle dh, RenderTargetHandle sh) override { auto* d = dev_->rt(dh.id); auto* s = dev_->rt(sh.id); if (d && s) { auto* dt = dev_->texture(d->color_tex); auto* st = dev_->texture(s->color_tex); if (dt && st) ctx_->ResolveSubresource(dt->tex, 0, st->tex, 0, dt->fmt); } }
     void write_timestamp(QueryHandle h) override { if (auto* q = dev_->query(h.id)) ctx_->End(q->q); }
     void begin_query(QueryHandle h) override { if (auto* q = dev_->query(h.id)) ctx_->Begin(q->q); }
@@ -405,7 +470,7 @@ public:
 
 private:
     D11Device* dev_ = nullptr; ID3D11DeviceContext* ctx_ = nullptr;
-    D11Pipeline* cur_ = nullptr; D11Texture* color0_ = nullptr;
+    D11Pipeline* cur_ = nullptr; D11Texture* color0_ = nullptr; D11Texture* depth0_ = nullptr;
 };
 
 } // namespace

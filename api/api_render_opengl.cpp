@@ -748,8 +748,18 @@ public:
         glDepthRangef(v.min_depth, v.max_depth);
     }
     void set_scissor(const ScissorRect& s) override { glScissor(s.x, s.y, s.width, s.height); }
-    void clear_color(const ClearColor& c) override { glClearColor(c.r, c.g, c.b, c.a); glClear(GL_COLOR_BUFFER_BIT); }
+    void clear_color(const ClearColor& c) override {
+        // glClear is gated by the colour write mask; a prior pipeline may have left
+        // it partially disabled. Other APIs clear unconditionally, so force it on for
+        // the clear and let the next set_pipeline re-establish the pipeline's mask.
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(c.r, c.g, c.b, c.a); glClear(GL_COLOR_BUFFER_BIT);
+    }
     void clear_depth_stencil(const ClearDepthStencil& ds) override {
+        // glClear of depth/stencil is gated by glDepthMask / glStencilMask; a prior
+        // pipeline with depth-write disabled (e.g. DepthStencilState::disabled()) would
+        // otherwise silently suppress the clear. Force the masks on for the clear.
+        glDepthMask(GL_TRUE); glStencilMask(0xFF);
         glClearDepthf(ds.depth); glClearStencil(ds.stencil);
         glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     }

@@ -1166,6 +1166,10 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
     add_executable(example_basic examples/basic.cpp)
     target_link_libraries(example_basic PRIVATE window)
 
+    # Graphics pipeline conformance test (offscreen render + pixel readback over the RHI)
+    add_executable(example_render_pipeline examples/render_pipeline.cpp)
+    target_link_libraries(example_render_pipeline PRIVATE window)
+
     # OpenGL example
     if(WINDOW_ENABLE_OPENGL AND "WINDOW_SUPPORT_OPENGL" IN_LIST WINDOW_DEFINES)
         add_executable(example_opengl examples/opengl.cpp)
