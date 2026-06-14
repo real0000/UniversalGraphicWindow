@@ -100,7 +100,7 @@ D3D12_COMPARISON_FUNC d12_compare(CompareFunc f) {
     return D3D12_COMPARISON_FUNC_LESS;
 }
 
-struct D12Buffer  { ID3D12Resource* res = nullptr; UINT64 size = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; };
+struct D12Buffer  { ID3D12Resource* res = nullptr; UINT64 size = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; ID3D12Resource* map_upload = nullptr; };
 struct D12Texture { ID3D12Resource* res = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; int w = 0, h = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; };
 struct D12Sampler { D3D12_SAMPLER_DESC desc{}; };
 struct D12Shader  { std::vector<uint8_t> bytecode; ShaderStage stage = ShaderStage::Vertex; };
@@ -216,7 +216,7 @@ public:
         immediate([&](ID3D12GraphicsCommandList* cl) { cl->CopyBufferRegion(b->res, offset, up, 0, size); });
         up->Release();
     }
-    void destroy_buffer(BufferHandle h) override { auto* b = buffers_.get(h.id); if (b && b->res) b->res->Release(); buffers_.release(h.id); }
+    void destroy_buffer(BufferHandle h) override { auto* b = buffers_.get(h.id); if (b) { if (b->map_upload) b->map_upload->Release(); if (b->res) b->res->Release(); } buffers_.release(h.id); }
 
     TextureHandle create_texture(const TextureDesc& d) override {
         D12Texture t; t.fmt = tex_format(d.format); t.w = d.width; t.h = d.height;
@@ -374,8 +374,23 @@ public:
     void destroy_query(QueryHandle h) override { auto* q = queries_.get(h.id); if (q) { if (q->heap) q->heap->Release(); if (q->readback) q->readback->Release(); } queries_.release(h.id); }
     bool get_query_result(QueryHandle h, uint64_t* out, bool) override { auto* q = queries_.get(h.id); if (!q) return false; UINT64* p = nullptr; D3D12_RANGE rng{ 0, 8 }; if (q->readback->Map(0, &rng, (void**)&p) != S_OK) return false; if (out) *out = *p; q->readback->Unmap(0, nullptr); return true; }
 
-    void* map_buffer(BufferHandle, uint32_t, uint32_t) override { d12_unsupported("map_buffer (use upload/readback heaps)"); return nullptr; }
-    void unmap_buffer(BufferHandle) override {}
+    void* map_buffer(BufferHandle h, uint32_t offset, uint32_t) override {
+        // DEFAULT-heap buffers aren't CPU-visible; back the map with an UPLOAD buffer and
+        // copy it into the resource on unmap. (Write-back: the caller is expected to fill
+        // the mapped range, matching the test and the common upload pattern.)
+        auto* b = buffers_.get(h.id); if (!b) return nullptr;
+        if (b->map_upload) { b->map_upload->Release(); b->map_upload = nullptr; }
+        D3D12_RESOURCE_DESC rd = {}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = (b->size + 255) & ~255ull; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        b->map_upload = commit(rd, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        void* p = nullptr; D3D12_RANGE rng{ 0, 0 }; if (!b->map_upload || b->map_upload->Map(0, &rng, &p) != S_OK) return nullptr;
+        return (uint8_t*)p + offset;
+    }
+    void unmap_buffer(BufferHandle h) override {
+        auto* b = buffers_.get(h.id); if (!b || !b->map_upload) return;
+        b->map_upload->Unmap(0, nullptr);
+        immediate([&](ID3D12GraphicsCommandList* cl) { transition(cl, b, D3D12_RESOURCE_STATE_COPY_DEST); cl->CopyBufferRegion(b->res, 0, b->map_upload, 0, b->size); });
+        b->map_upload->Release(); b->map_upload = nullptr;
+    }
     void read_buffer(BufferHandle h, void* dst, uint32_t size, uint32_t offset) override {
         auto* b = buffers_.get(h.id); if (!b || !dst) return;
         D3D12_RESOURCE_DESC rd = {}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = size; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
