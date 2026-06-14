@@ -168,6 +168,8 @@ public:
         out->min_uniform_buffer_offset_alignment = 256;   // CB offset granularity (D3D11.1 VSSetConstantBuffers1)
         out->max_push_constant_size = 256;
         out->compute_shaders = true; out->instancing = true; out->indirect_draw = true;
+        // Highest MSAA sample count the default colour format supports.
+        for (UINT n = 8; n >= 2; n >>= 1) { UINT q = 0; if (SUCCEEDED(dev->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, n, &q)) && q > 0) { out->max_samples = int(n); break; } }
     }
 
     // ---- buffers ------------------------------------------------------------
@@ -202,7 +204,7 @@ public:
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = d.width; td.Height = d.height; td.MipLevels = d.mip_levels ? d.mip_levels : 1;
         td.ArraySize = d.array_layers > 1 ? d.array_layers : 1; td.Format = t.fmt;
-        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.SampleDesc.Count = d.samples > 1 ? d.samples : 1; td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = 0;
         if (d.usage & TEXTURE_USAGE_SAMPLED)       td.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
         if (d.usage & TEXTURE_USAGE_RENDER_TARGET) td.BindFlags |= D3D11_BIND_RENDER_TARGET;
@@ -274,6 +276,7 @@ public:
         D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = d.rasterizer.fill_mode == FillMode::Wireframe ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
         rd.CullMode = d.rasterizer.cull_mode == CullMode::None ? D3D11_CULL_NONE : (d.rasterizer.cull_mode == CullMode::Front ? D3D11_CULL_FRONT : D3D11_CULL_BACK);
         rd.FrontCounterClockwise = d.rasterizer.front_face == FrontFace::CounterClockwise; rd.ScissorEnable = d.rasterizer.scissor_enable; rd.DepthClipEnable = TRUE;
+        rd.MultisampleEnable = d.rasterizer.multisample_enable || d.samples > 1;
         dev->CreateRasterizerState(&rd, &p.raster);
         // Honour the requested BlendState (factors / ops / write mask), not a hardcode.
         D3D11_BLEND_DESC bd = {}; bd.RenderTarget[0].RenderTargetWriteMask = d.blend.write_mask & 0xF;
@@ -293,7 +296,7 @@ public:
     }
 
     RenderTargetHandle create_render_target(const RenderTargetDesc& d) override {
-        TextureDesc td; td.width = d.width; td.height = d.height; td.format = d.format; td.usage = TEXTURE_USAGE_SAMPLED | TEXTURE_USAGE_RENDER_TARGET;
+        TextureDesc td; td.width = d.width; td.height = d.height; td.format = d.format; td.samples = d.samples; td.usage = TEXTURE_USAGE_SAMPLED | TEXTURE_USAGE_RENDER_TARGET;
         D11RenderTarget rt; rt.color_tex = create_texture(td).id; return { rts_.alloc(rt) };
     }
     RenderTargetHandle create_depth_target(const DepthStencilDesc& d) override {

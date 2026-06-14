@@ -187,6 +187,9 @@ public:
         out->max_color_attachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT;
         out->max_bound_descriptor_sets = 8; out->min_uniform_buffer_offset_alignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
         out->max_push_constant_size = 256; out->compute_shaders = true; out->indirect_draw = true; out->mesh_shaders = true;
+        // Highest MSAA sample count the default colour format supports.
+        for (UINT n = 8; n >= 2; n >>= 1) { D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q{ DXGI_FORMAT_R8G8B8A8_UNORM, n, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0 };
+            if (SUCCEEDED(dev->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q, sizeof q)) && q.NumQualityLevels > 0) { out->max_samples = int(n); break; } }
     }
 
     // committed resource helper
@@ -218,7 +221,7 @@ public:
     TextureHandle create_texture(const TextureDesc& d) override {
         D12Texture t; t.fmt = tex_format(d.format); t.w = d.width; t.h = d.height;
         D3D12_RESOURCE_DESC rd = {}; rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; rd.Width = d.width; rd.Height = d.height;
-        rd.DepthOrArraySize = d.array_layers > 1 ? d.array_layers : 1; rd.MipLevels = d.mip_levels ? d.mip_levels : 1; rd.Format = t.fmt; rd.SampleDesc.Count = 1;
+        rd.DepthOrArraySize = d.array_layers > 1 ? d.array_layers : 1; rd.MipLevels = d.mip_levels ? d.mip_levels : 1; rd.Format = t.fmt; rd.SampleDesc.Count = d.samples > 1 ? d.samples : 1;
         if (d.usage & TEXTURE_USAGE_RENDER_TARGET) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
         if (d.usage & TEXTURE_USAGE_DEPTH_STENCIL) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
         if (d.usage & TEXTURE_USAGE_STORAGE) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -329,7 +332,7 @@ public:
         gd.DepthStencilState.DepthWriteMask = d.depth_stencil.depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         gd.DepthStencilState.DepthFunc = d12_compare(d.depth_stencil.depth_func);
         gd.DSVFormat = d.depth_stencil.depth_enable ? tex_format(d.depth_format) : DXGI_FORMAT_UNKNOWN;
-        gd.SampleMask = UINT_MAX; gd.SampleDesc.Count = 1;
+        gd.SampleMask = UINT_MAX; gd.SampleDesc.Count = d.samples > 1 ? d.samples : 1;
         gd.NumRenderTargets = d.color_format_count; for (int i = 0; i < d.color_format_count; ++i) gd.RTVFormats[i] = tex_format(d.color_formats[i]);
         dev->CreateGraphicsPipelineState(&gd, IID_PPV_ARGS(&p.pso));
         return { pipelines_.alloc(p) };
@@ -337,7 +340,7 @@ public:
     void destroy_pipeline(PipelineHandle h) override { auto* p = pipelines_.get(h.id); if (!p) return; if (p->pso) p->pso->Release(); if (p->root) p->root->Release(); pipelines_.release(h.id); }
 
     RenderTargetHandle create_render_target(const RenderTargetDesc& d) override {
-        TextureDesc td; td.width = d.width; td.height = d.height; td.format = d.format; td.usage = TEXTURE_USAGE_SAMPLED | TEXTURE_USAGE_RENDER_TARGET;
+        TextureDesc td; td.width = d.width; td.height = d.height; td.format = d.format; td.samples = d.samples; td.usage = TEXTURE_USAGE_SAMPLED | TEXTURE_USAGE_RENDER_TARGET;
         D12RenderTarget rt; rt.color_tex = create_texture(td).id;
         if (auto* t = textures_.get(rt.color_tex)) { rt.rtv = alloc_rtv(); dev->CreateRenderTargetView(t->res, nullptr, rt.rtv); }
         return { rts_.alloc(rt) };
@@ -554,7 +557,13 @@ public:
             cl_->CopyResource(dt->res, st->res);
         } else d12_unsupported("blit_render_target scaling (draw a fullscreen quad)");
     }
-    void resolve_render_target(RenderTargetHandle dh, RenderTargetHandle sh) override { auto* d = dev_->rt(dh.id); auto* s = dev_->rt(sh.id); if (d && s) { auto* dt = dev_->texture(d->color_tex); auto* st = dev_->texture(s->color_tex); if (dt && st) cl_->ResolveSubresource(dt->res, 0, st->res, 0, dt->fmt); } }
+    void resolve_render_target(RenderTargetHandle dh, RenderTargetHandle sh) override {
+        auto* d = dev_->rt(dh.id); auto* s = dev_->rt(sh.id); if (!d || !s) return;
+        auto* dt = dev_->texture(d->color_tex); auto* st = dev_->texture(s->color_tex); if (!dt || !st) return;
+        dev_->transition(cl_, st, D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+        dev_->transition(cl_, dt, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+        cl_->ResolveSubresource(dt->res, 0, st->res, 0, dt->fmt);
+    }
     void write_timestamp(QueryHandle h) override { if (auto* q = dev_->query(h.id)) { cl_->EndQuery(q->heap, D3D12_QUERY_TYPE_TIMESTAMP, 0); cl_->ResolveQueryData(q->heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, 1, q->readback, 0); } }
     void begin_query(QueryHandle h) override { if (auto* q = dev_->query(h.id)) cl_->BeginQuery(q->heap, D3D12_QUERY_TYPE_OCCLUSION, 0); }
     void end_query(QueryHandle h) override { if (auto* q = dev_->query(h.id)) { cl_->EndQuery(q->heap, D3D12_QUERY_TYPE_OCCLUSION, 0); cl_->ResolveQueryData(q->heap, D3D12_QUERY_TYPE_OCCLUSION, 0, 1, q->readback, 0); } }
