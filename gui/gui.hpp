@@ -379,6 +379,48 @@ struct SliceBorder {
     static SliceBorder uniform(float size);
 };
 
+// ── Edge-reserving (border) layout ──────────────────────────────────────────
+// Peel fixed-size strips off the edges of a rectangle (toolbar, status bar, a
+// bottom dock, side panels …); whatever is left is the content area. Centralises
+// the "content = bounds − reserved edges" arithmetic so call sites stop each
+// re-deriving e.g. "height − toolbar − status − dock" by hand — which is how one
+// copy ends up subtly out of sync (e.g. forgetting the dock).
+class EdgeLayout {
+public:
+    explicit EdgeLayout(const math::Box& bounds) : b_(bounds) {}
+    math::Box reserve_top(float h) {
+        const float x = math::x(math::box_min(b_)), y = math::y(math::box_min(b_));
+        const float w = math::box_width(b_), bh = math::box_height(b_);
+        h = h < 0 ? 0 : (h > bh ? bh : h);
+        b_ = math::make_box(x, y + h, w, bh - h);
+        return math::make_box(x, y, w, h);
+    }
+    math::Box reserve_bottom(float h) {
+        const float x = math::x(math::box_min(b_)), y = math::y(math::box_min(b_));
+        const float w = math::box_width(b_), bh = math::box_height(b_);
+        h = h < 0 ? 0 : (h > bh ? bh : h);
+        b_ = math::make_box(x, y, w, bh - h);
+        return math::make_box(x, y + bh - h, w, h);
+    }
+    math::Box reserve_left(float w) {
+        const float x = math::x(math::box_min(b_)), y = math::y(math::box_min(b_));
+        const float bw = math::box_width(b_), bh = math::box_height(b_);
+        w = w < 0 ? 0 : (w > bw ? bw : w);
+        b_ = math::make_box(x + w, y, bw - w, bh);
+        return math::make_box(x, y, w, bh);
+    }
+    math::Box reserve_right(float w) {
+        const float x = math::x(math::box_min(b_)), y = math::y(math::box_min(b_));
+        const float bw = math::box_width(b_), bh = math::box_height(b_);
+        w = w < 0 ? 0 : (w > bw ? bw : w);
+        b_ = math::make_box(x, y, bw - w, bh);
+        return math::make_box(x + bw - w, y, w, bh);
+    }
+    const math::Box& remaining() const { return b_; }   // the content area left over
+private:
+    math::Box b_;
+};
+
 // ============================================================================
 
 struct WidgetRenderInfo {
