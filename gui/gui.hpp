@@ -421,6 +421,45 @@ private:
     math::Box b_;
 };
 
+// ── Immediate-mode text edit state ──────────────────────────────────────────
+// A text buffer + caret + selection anchor (byte indices into `text`), with the
+// usual editing operations. Rendering and mouse hit-testing stay with the caller
+// (which owns the font/rasterizer); this owns the buffer mutations so every
+// immediate-mode field gets consistent caret + selection behaviour instead of a
+// caret-at-end-only input. Selection spans [sel_lo(), sel_hi()).
+struct TextEditState {
+    std::string text;
+    int caret = 0;     // byte offset of the caret
+    int anchor = 0;    // selection anchor; == caret when there is no selection
+
+    void reset(std::string s) { text = std::move(s); caret = anchor = static_cast<int>(text.size()); }
+    void clear() { text.clear(); caret = anchor = 0; }
+    bool has_sel() const { return caret != anchor; }
+    int  sel_lo() const { return caret < anchor ? caret : anchor; }
+    int  sel_hi() const { return caret < anchor ? anchor : caret; }
+    std::string selected() const { return text.substr(sel_lo(), sel_hi() - sel_lo()); }
+
+    int clamp_i(int i) const { const int n = static_cast<int>(text.size()); return i < 0 ? 0 : (i > n ? n : i); }
+    // Codepoint-boundary navigation (skips UTF-8 continuation bytes 0b10xxxxxx).
+    int prev_i(int i) const { i = clamp_i(i); if (i > 0) { --i; while (i > 0 && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) --i; } return i; }
+    int next_i(int i) const { const int n = static_cast<int>(text.size()); i = clamp_i(i); if (i < n) { ++i; while (i < n && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) ++i; } return i; }
+
+    void set_caret(int i, bool extend) { caret = clamp_i(i); if (!extend) anchor = caret; }
+    void replace_sel(const std::string& s) {
+        const int a = sel_lo(), b = sel_hi();
+        text.erase(static_cast<std::size_t>(a), static_cast<std::size_t>(b - a));
+        text.insert(static_cast<std::size_t>(a), s);
+        caret = anchor = a + static_cast<int>(s.size());
+    }
+    void backspace() { if (has_sel()) { replace_sel(""); return; } if (caret > 0) { const int p = prev_i(caret); text.erase(static_cast<std::size_t>(p), static_cast<std::size_t>(caret - p)); caret = anchor = p; } }
+    void del()       { if (has_sel()) { replace_sel(""); return; } if (caret < static_cast<int>(text.size())) { const int q = next_i(caret); text.erase(static_cast<std::size_t>(caret), static_cast<std::size_t>(q - caret)); anchor = caret; } }
+    void move_left(bool extend)  { set_caret(!extend && has_sel() ? sel_lo() : prev_i(caret), extend); }
+    void move_right(bool extend) { set_caret(!extend && has_sel() ? sel_hi() : next_i(caret), extend); }
+    void to_home(bool extend) { set_caret(0, extend); }
+    void to_end(bool extend)  { set_caret(static_cast<int>(text.size()), extend); }
+    void select_all() { anchor = 0; caret = static_cast<int>(text.size()); }
+};
+
 // ============================================================================
 
 struct WidgetRenderInfo {
