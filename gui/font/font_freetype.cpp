@@ -599,13 +599,39 @@ bool family_matches(const std::string& filename, const std::string& family) {
 namespace font {
 
 #if defined(__linux__) && !defined(__ANDROID__)
-// Recursively walk `dir`, collecting any font file whose stem matches `family`.
-// Stops at the first match and writes its absolute path to `out_path`.
-static bool walk_dir_for_font(const std::string& dir, const std::string& family,
-                              std::string& out_path, int depth = 0) {
-    if (depth > 6) return false;  // safety cap
+// How badly a font FILE's name mismatches the requested style/weight/stretch.
+// 0 = perfect (e.g. "DejaVuSans.ttf" for a Regular/Normal/Normal request). Used to
+// pick the right face among many family matches — without this, "DejaVu Sans"
+// could resolve to "DejaVuSansCondensed-BoldOblique.ttf" (first readdir hit),
+// making every glyph bold-condensed-oblique.
+static int font_style_penalty(const std::string& filename, const FontDescriptor& d) {
+    std::string l; l.reserve(filename.size());
+    for (char c : filename) l += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const auto has = [&](const char* t) { return l.find(t) != std::string::npos; };
+    const bool wantBold   = (d.weight >= FontWeight::Bold);
+    const bool wantItalic = (d.style == FontStyle::Italic || d.style == FontStyle::Oblique);
+    const bool wantCond   = (d.stretch < FontStretch::Normal);
+    int pen = 0;
+    if (has("bold") != wantBold)                                          pen += 8;
+    if ((has("italic") || has("oblique")) != wantItalic)                  pen += 8;
+    if ((has("condensed") || has("narrow") || has("semicond")) != wantCond) pen += 4;
+    // weight variants never requested here → mild penalty so the plain face wins.
+    if (!wantBold && (has("light") || has("thin") || has("black") || has("medium") ||
+                      has("semibold") || has("extralight") || has("demibold") ||
+                      has("heavy") || has("extrabold")))                   pen += 2;
+    return pen;
+}
+
+struct FontMatch { std::string path; int pen = (1 << 30); std::size_t len = ~std::size_t(0); };
+
+// Recursively walk `dir`, keeping the family-matching font file whose name best
+// matches the requested style/weight/stretch (lowest penalty; tie-break shorter
+// name). Scans the whole subtree rather than stopping at the first hit.
+static void walk_dir_for_font(const std::string& dir, const std::string& family,
+                              const FontDescriptor& desc, FontMatch& best, int depth = 0) {
+    if (depth > 6) return;  // safety cap
     DIR* d = opendir(dir.c_str());
-    if (!d) return false;
+    if (!d) return;
     struct dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         if (ent->d_name[0] == '.') continue;
@@ -613,22 +639,19 @@ static bool walk_dir_for_font(const std::string& dir, const std::string& family,
         struct stat st;
         if (stat(full.c_str(), &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) {
-            if (walk_dir_for_font(full, family, out_path, depth + 1)) {
-                closedir(d);
-                return true;
-            }
+            walk_dir_for_font(full, family, desc, best, depth + 1);
         } else if (S_ISREG(st.st_mode)) {
             std::string name = ent->d_name;
             if ((ends_with_icase(name, ".ttf") || ends_with_icase(name, ".otf") ||
                  ends_with_icase(name, ".ttc")) && family_matches(name, family)) {
-                out_path = std::move(full);
-                closedir(d);
-                return true;
+                const int pen = font_style_penalty(name, desc);
+                if (pen < best.pen || (pen == best.pen && name.size() < best.len)) {
+                    best.path = std::move(full); best.pen = pen; best.len = name.size();
+                }
             }
         }
     }
     closedir(d);
-    return false;
 }
 #endif
 
@@ -668,10 +691,13 @@ bool FreeTypeFontLibrary::find_system_font(const FontDescriptor& descriptor,
     // Linux distributes fonts under nested directories (e.g.
     // /usr/share/fonts/truetype/liberation/), so flat lookup is useless.
     // Walk the search roots looking for a stem-matching font file.
+    FontMatch best;
     for (int p = 0; search_paths[p]; ++p) {
-        if (walk_dir_for_font(search_paths[p], descriptor.family, out_path)) {
-            return true;
-        }
+        walk_dir_for_font(search_paths[p], descriptor.family, descriptor, best);
+    }
+    if (!best.path.empty()) {
+        out_path = std::move(best.path);
+        return true;
     }
 #else
     for (int p = 0; search_paths[p]; ++p) {

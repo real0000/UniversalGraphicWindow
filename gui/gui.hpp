@@ -361,7 +361,8 @@ enum class TextureSourceType : uint8_t {
 enum class DrawShape : uint8_t {
     Rect = 0,   // Filled rectangle (default)
     Circle,     // Filled circle inscribed in dest
-    Line        // Thick line from dest.min to (line_x1,line_y1), width line_w (rotated quad)
+    Line,       // Thick line from dest.min to (line_x1,line_y1), width line_w (rotated quad)
+    RoundRect   // Filled rectangle with rounded corners (radius = corner_radius)
 };
 
 // 9-slice (9-patch) center behaviour
@@ -396,6 +397,8 @@ struct WidgetRenderInfo {
         math::Box  clip;
         // Line shape only: second endpoint + stroke width (dest.min is the first).
         float      line_x1 = 0.0f, line_y1 = 0.0f, line_w = 0.0f;
+        // RoundRect shape only: corner radius (clamped to half the smaller side).
+        float      corner_radius = 0.0f;
     };
 
     // Component: textured quad (atlas layer or file path)
@@ -498,6 +501,14 @@ struct WidgetRenderInfo {
                      const math::Vec4& col, int32_t depth, const math::Box& clip) {
         float d2 = radius * 2.0f;
         colors.push_back({math::make_box(cx-radius,cy-radius,d2,d2), col, DrawShape::Circle, depth, clip});
+    }
+    // Filled rect with rounded corners (radius clamped to half the smaller side).
+    void push_round_rect(float x, float y, float w, float h, float radius,
+                         const math::Vec4& col, int32_t depth, const math::Box& clip) {
+        ColorCmd c;
+        c.dest = math::make_box(x, y, w, h); c.color = col; c.shape = DrawShape::RoundRect;
+        c.depth = depth; c.clip = clip; c.corner_radius = radius;
+        colors.push_back(c);
     }
     // Thick line segment (p0→p1, stroke width w) rendered as a rotated quad.
     void push_line(float x0, float y0, float x1, float y1, float w,

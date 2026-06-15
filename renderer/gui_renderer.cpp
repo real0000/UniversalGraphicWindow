@@ -166,6 +166,34 @@ void GpuGuiRenderer::emit_circle(float cx, float cy, float radius, const math::V
     }
 }
 
+// Filled rounded rectangle: 3 cross bands + 4 quarter-circle corner fans. Always
+// emits kRoundRectVerts vertices (degenerate corners when radius≈0) so the draw
+// bookkeeping stays a fixed count. Solid colour (layer = -1).
+void GpuGuiRenderer::emit_round_rect(float x, float y, float w, float h, float radius, const math::Vec4& c) {
+    const float r = std::max(0.0f, std::min(radius, std::min(w, h) * 0.5f));
+    // 3 bands covering the rect minus the 4 corner squares (18 verts).
+    emit_quad(x,     y + r, w,         h - 2 * r, 0,0,0,0, -1.0f, c);   // middle (full width)
+    emit_quad(x + r, y,     w - 2 * r, r,         0,0,0,0, -1.0f, c);   // top
+    emit_quad(x + r, y + h - r, w - 2 * r, r,     0,0,0,0, -1.0f, c);   // bottom
+    auto v = [&](float px, float py) {
+        verts_.push_back(px); verts_.push_back(py);
+        verts_.push_back(0);  verts_.push_back(0); verts_.push_back(-1.0f);
+        verts_.push_back(c.x); verts_.push_back(c.y); verts_.push_back(c.z); verts_.push_back(c.w);
+    };
+    const float cx[4] = { x + r,     x + w - r, x + w - r, x + r     };  // TL, TR, BR, BL
+    const float cy[4] = { y + r,     y + r,     y + h - r, y + h - r };
+    const float a0[4] = { 3.14159265f, 4.71238898f, 0.0f,        1.57079633f };  // start angles
+    for (int k = 0; k < 4; ++k) {
+        for (int i = 0; i < kRoundRectCornerSegs; ++i) {
+            const float t0 = a0[k] + (float(i)     / kRoundRectCornerSegs) * 1.57079633f;
+            const float t1 = a0[k] + (float(i + 1) / kRoundRectCornerSegs) * 1.57079633f;
+            v(cx[k], cy[k]);
+            v(cx[k] + std::cos(t0) * r, cy[k] + std::sin(t0) * r);
+            v(cx[k] + std::cos(t1) * r, cy[k] + std::sin(t1) * r);
+        }
+    }
+}
+
 // Thick line p0→p1 as a rotated quad (two triangles), solid colour (layer = -1).
 void GpuGuiRenderer::emit_line(float x0, float y0, float x1, float y1, float width, const math::Vec4& c) {
     auto v = [&](float px, float py) {
@@ -261,9 +289,10 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
             const auto& c = info.colors[ref.index];
             const float px = math::x(math::box_min(c.dest)), py = math::y(math::box_min(c.dest));
             const float pw = math::box_width(c.dest),        ph = math::box_height(c.dest);
-            if      (c.shape == DrawShape::Circle) { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vc += 24 * 3; cur.count += 24 * 3; }
-            else if (c.shape == DrawShape::Line)   { emit_line(px, py, c.line_x1, c.line_y1, c.line_w, c.color);     vc += 6;      cur.count += 6; }
-            else                                   { emit_quad(px, py, pw, ph, 0,0,0,0, -1.0f, c.color);             vc += 6;      cur.count += 6; }
+            if      (c.shape == DrawShape::Circle)    { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vc += 24 * 3; cur.count += 24 * 3; }
+            else if (c.shape == DrawShape::Line)      { emit_line(px, py, c.line_x1, c.line_y1, c.line_w, c.color);     vc += 6;      cur.count += 6; }
+            else if (c.shape == DrawShape::RoundRect) { emit_round_rect(px, py, pw, ph, c.corner_radius, c.color);      vc += kRoundRectVerts; cur.count += kRoundRectVerts; }
+            else                                      { emit_quad(px, py, pw, ph, 0,0,0,0, -1.0f, c.color);             vc += 6;      cur.count += 6; }
         } else if (ref.pool == Pool::Texture) {
             const auto& t = info.textures[ref.index];
             const float px = math::x(math::box_min(t.dest)), py = math::y(math::box_min(t.dest));

@@ -57,6 +57,9 @@ private:
                    float u0, float v0, float u1, float v1,
                    float layer, const math::Vec4& c);
     void emit_circle(float cx, float cy, float radius, const math::Vec4& c);
+    static constexpr int kRoundRectCornerSegs = 4;                  // arc segments per corner
+    static constexpr int kRoundRectVerts = 18 + 4 * kRoundRectCornerSegs * 3;  // 3 bands + 4 arcs
+    void emit_round_rect(float x, float y, float w, float h, float radius, const math::Vec4& c);
     void emit_line(float x0, float y0, float x1, float y1, float width, const math::Vec4& c);
     TextureHandle resolve_texture(const WidgetRenderInfo::TextureCmd& t);
 
