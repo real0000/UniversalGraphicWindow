@@ -311,21 +311,28 @@ void WidgetRenderInfo::flatten(IGuiTextRasterizer* rasterizer) {
                 float tw = 0, th = 0;
                 if (rasterizer->rasterize_glyphs(t.text.c_str(), t.font_size, nullptr,
                                                  quads, &tw, &th) && !quads.empty()) {
-                    float tx = px, ty = py;
-                    // Alignment of the whole text block within dest.
+                    // Alignment of the whole text block within dest: pick the x by
+                    // the horizontal third (Left/Center/Right) and y by the vertical
+                    // third (Top/Center/Bottom). Previously only Center/CenterRight
+                    // were handled and everything else fell back to left+vcenter, so
+                    // e.g. right-aligned (TopRight) output-pin labels were drawn left,
+                    // overlapping the left-aligned (TopLeft) input-pin labels.
+                    float tx, ty;
                     switch (t.alignment) {
-                        case Alignment::Center:
-                            tx = px + (pw - tw) * 0.5f;
-                            ty = py + (ph - th) * 0.5f;
-                            break;
-                        case Alignment::CenterRight:
-                            tx = px + pw - tw;
-                            ty = py + (ph - th) * 0.5f;
-                            break;
-                        default: // CenterLeft and others
-                            tx = px + 2;
-                            ty = py + (ph - th) * 0.5f;
-                            break;
+                        case Alignment::TopRight: case Alignment::CenterRight: case Alignment::BottomRight:
+                            tx = px + pw - tw; break;
+                        case Alignment::TopCenter: case Alignment::Center: case Alignment::BottomCenter:
+                            tx = px + (pw - tw) * 0.5f; break;
+                        default: // *Left
+                            tx = px + 2; break;
+                    }
+                    switch (t.alignment) {
+                        case Alignment::BottomLeft: case Alignment::BottomCenter: case Alignment::BottomRight:
+                            ty = py + ph - th; break;
+                        case Alignment::TopLeft: case Alignment::TopCenter: case Alignment::TopRight:
+                            ty = py; break;
+                        default: // Center*
+                            ty = py + (ph - th) * 0.5f; break;
                     }
                     for (const auto& gq : quads) {
                         if (gq.atlas_layer < 0 || gq.w <= 0 || gq.h <= 0) continue;
