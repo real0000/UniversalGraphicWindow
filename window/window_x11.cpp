@@ -13,6 +13,7 @@
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
 #include <X11/Xresource.h>
+#include <clocale>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
 
@@ -417,7 +418,13 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     window->impl->keyboard_device.set_dispatcher(&window->impl->keyboard_dispatcher);
     window->impl->keyboard_device.set_window(window);
 
-    // Initialize XIM for text input
+    // Initialize XIM for text input. XIM only talks to the platform input method
+    // (ibus / fcitx) once the C locale and the X locale modifiers are set from the
+    // environment; without this it stays in the "C" locale and composed CJK / other
+    // non-Latin characters never arrive — input silently falls back to ASCII-only
+    // XLookupString. Safe + idempotent to set here (honours $LC_*, $XMODIFIERS).
+    if (std::setlocale(LC_CTYPE, "") && XSupportsLocale())
+        XSetLocaleModifiers("");
     window->impl->xim = XOpenIM(display, nullptr, nullptr, nullptr);
     if (window->impl->xim) {
         window->impl->xic = XCreateIC(window->impl->xim,
