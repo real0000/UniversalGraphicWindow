@@ -432,6 +432,7 @@ Window* create_window_impl(const Config& config, Result* out_result) {
                                        XNClientWindow, xwindow,
                                        XNFocusWindow, xwindow,
                                        nullptr);
+        if (window->impl->xic) XSetICFocus(window->impl->xic);   // window starts focused
     }
 
     // Set window title
@@ -845,6 +846,7 @@ void Window::poll_events() {
 
             case FocusIn:
                 impl->focused = true;
+                if (impl->xic) XSetICFocus(impl->xic);   // route IME composition to this IC
                 if (impl->callbacks.focus_callback) {
                     WindowFocusEvent focus_event;
                     focus_event.type = EventType::WindowFocus;
@@ -857,6 +859,7 @@ void Window::poll_events() {
 
             case FocusOut:
                 impl->focused = false;
+                if (impl->xic) XUnsetICFocus(impl->xic);
                 // Reset input state on focus loss to avoid stuck keys
                 impl->keyboard_device.reset();
                 impl->mouse_device.reset();
@@ -871,15 +874,24 @@ void Window::poll_events() {
                 break;
 
             case KeyPress: {
-                KeySym keysym;
-                char text[32];
+                KeySym keysym = 0;
+                Status status = 0;
+                char stackbuf[64];
+                char* text = stackbuf;
+                std::string heap;          // only used if the IME commit overflows stackbuf
                 int len = 0;
 
                 if (impl->xic) {
-                    Status status;
-                    len = Xutf8LookupString(impl->xic, &event.xkey, text, sizeof(text) - 1, &keysym, &status);
+                    // Xutf8LookupString honours the IC, so an IME commit arrives here as a
+                    // (possibly multi-character) UTF-8 string rather than a single keysym.
+                    len = Xutf8LookupString(impl->xic, &event.xkey, text, sizeof(stackbuf) - 1, &keysym, &status);
+                    if (status == XBufferOverflow && len > 0) {     // commit longer than stackbuf
+                        heap.resize(static_cast<size_t>(len) + 1);
+                        text = heap.data();
+                        len = Xutf8LookupString(impl->xic, &event.xkey, text, len, &keysym, &status);
+                    }
                 } else {
-                    len = XLookupString(&event.xkey, text, sizeof(text) - 1, &keysym, nullptr);
+                    len = XLookupString(&event.xkey, text, sizeof(stackbuf) - 1, &keysym, nullptr);
                 }
 
                 Key key = translate_keysym(keysym);
@@ -888,24 +900,26 @@ void Window::poll_events() {
 
                 impl->keyboard_device.inject_key_down(key, mods, event.xkey.keycode, false, ts);
 
-                // Character input — decode UTF-8 to codepoint
-                if (len > 0) {
-                    text[len] = '\0';
-                    unsigned char* p = reinterpret_cast<unsigned char*>(text);
-                    uint32_t codepoint = 0;
-                    if (p[0] < 0x80) {
-                        codepoint = p[0];
-                    } else if ((p[0] & 0xE0) == 0xC0 && len >= 2) {
-                        codepoint = ((p[0] & 0x1F) << 6) | (p[1] & 0x3F);
-                    } else if ((p[0] & 0xF0) == 0xE0 && len >= 3) {
-                        codepoint = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
-                    } else if ((p[0] & 0xF8) == 0xF0 && len >= 4) {
-                        codepoint = ((p[0] & 0x07) << 18) | ((p[1] & 0x3F) << 12) |
-                                    ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
-                    }
-
-                    if (codepoint >= 32 || codepoint == '\t' || codepoint == '\n' || codepoint == '\r') {
-                        impl->keyboard_device.inject_char(codepoint, mods, ts);
+                // Character input — an IME commit may carry several codepoints in one
+                // event (e.g. a whole CJK word); walk the UTF-8 buffer and inject each.
+                if (len > 0 && status != XLookupKeySym) {
+                    const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
+                    for (int i = 0; i < len; ) {
+                        unsigned char c = p[i];
+                        uint32_t cp = 0; int adv = 1;
+                        if (c < 0x80) {
+                            cp = c; adv = 1;
+                        } else if ((c & 0xE0) == 0xC0 && i + 1 < len) {
+                            cp = ((c & 0x1Fu) << 6) | (p[i + 1] & 0x3Fu); adv = 2;
+                        } else if ((c & 0xF0) == 0xE0 && i + 2 < len) {
+                            cp = ((c & 0x0Fu) << 12) | ((p[i + 1] & 0x3Fu) << 6) | (p[i + 2] & 0x3Fu); adv = 3;
+                        } else if ((c & 0xF8) == 0xF0 && i + 3 < len) {
+                            cp = ((c & 0x07u) << 18) | ((p[i + 1] & 0x3Fu) << 12) |
+                                 ((p[i + 2] & 0x3Fu) << 6) | (p[i + 3] & 0x3Fu); adv = 4;
+                        }
+                        if (cp >= 32 || cp == '\t' || cp == '\n' || cp == '\r')
+                            impl->keyboard_device.inject_char(cp, mods, ts);
+                        i += adv;
                     }
                 }
                 break;
