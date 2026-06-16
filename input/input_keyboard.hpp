@@ -16,6 +16,7 @@
 #define INPUT_KEYBOARD_HPP
 
 #include "../window.hpp"
+#include <string>
 
 namespace window {
 namespace input {
@@ -129,6 +130,11 @@ public:
     // Character input handler (for text input)
     // Return true to consume the event
     virtual bool on_char(const CharEvent& event) { (void)event; return false; }
+
+    // IME preedit (composing) text; empty string means nothing is composing.
+    // The handler renders this inline — the IME does not draw it when its panel
+    // is disabled. Default: ignore (handlers that don't show composition).
+    virtual void on_preedit(const std::string& text) { (void)text; }
 };
 
 //=============================================================================
@@ -165,6 +171,7 @@ public:
     // Returns true if event was consumed by any handler
     bool dispatch_key(const KeyEvent& event);
     bool dispatch_char(const CharEvent& event);
+    void dispatch_preedit(const std::string& text);   // IME composing text → all handlers
 
 private:
     void sort_handlers();
@@ -203,6 +210,7 @@ public:
     void inject_key_down(Key key, KeyMod modifiers, int scancode, bool repeat, double timestamp);
     void inject_key_up(Key key, KeyMod modifiers, int scancode, double timestamp);
     void inject_char(uint32_t codepoint, KeyMod modifiers, double timestamp);
+    void inject_preedit(const std::string& text);   // IME composing text (not committed)
 
     // State queries
     bool is_key_down(Key key) const;

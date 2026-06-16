@@ -479,6 +479,9 @@ Window* create_window_impl(const Config& config, Result* out_result) {
             if (keyval >= 0x20 && keyval < 0x7f)        // a key ibus handed back
                 w->impl->keyboard_device.inject_char(keyval, get_x11_modifiers(0), get_event_timestamp());
         };
+        w->impl->ibus.on_preedit = [w](const std::string& text) {  // composing text → inline display
+            w->impl->keyboard_device.inject_preedit(text);
+        };
         window->impl->use_ibus = window->impl->ibus.connect("aiwrapper");
     }
     // Fall back to the legacy XIM bridge only if ibus D-Bus was unavailable.
