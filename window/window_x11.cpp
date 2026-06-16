@@ -28,6 +28,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <cstdint>
 #include <ctime>
 #include <string>
@@ -323,6 +324,13 @@ static void send_wm_state_event(Display* display, ::Window window, bool add, Ato
 static void ensure_x_threads() {
     static const int initialized = XInitThreads();   // non-zero on success
     (void)initialized;
+}
+
+// Opt-in keyboard tracing (set AIW_KEY_DEBUG=1): logs every key/focus event and
+// what each KeyPress decoded to, so input drops can be localised to the X layer.
+static bool key_debug() {
+    static const bool on = std::getenv("AIW_KEY_DEBUG") != nullptr;
+    return on;
 }
 
 Window* create_window_impl(const Config& config, Result* out_result) {
@@ -791,14 +799,71 @@ void Window::set_should_close(bool close) {
 void Window::poll_events() {
     if (!impl || !impl->display) return;
 
+    // Decode a key event (IME-aware) and feed the key-down + any character(s) to
+    // the input devices. Shared by the normal KeyPress path and the auto-repeat
+    // collapse below, so a held/repeated key still emits repeated characters.
+    auto handle_key_input = [&](XKeyEvent& ke, bool repeat) {
+        KeySym keysym = 0;
+        Status status = 0;
+        char stackbuf[64];
+        char* text = stackbuf;
+        std::string heap;          // only used if an IME commit overflows stackbuf
+        int len = 0;
+        if (impl->xic) {
+            len = Xutf8LookupString(impl->xic, &ke, text, sizeof(stackbuf) - 1, &keysym, &status);
+            if (status == XBufferOverflow && len > 0) {
+                heap.resize(static_cast<size_t>(len) + 1);
+                text = heap.data();
+                len = Xutf8LookupString(impl->xic, &ke, text, len, &keysym, &status);
+            }
+        } else {
+            len = XLookupString(&ke, text, sizeof(stackbuf) - 1, &keysym, nullptr);
+        }
+        const Key    key  = translate_keysym(keysym);
+        const KeyMod mods = get_x11_modifiers(ke.state);
+        const double ts   = get_event_timestamp();
+        impl->keyboard_device.inject_key_down(key, mods, ke.keycode, repeat, ts);
+        if (key_debug())
+            std::fprintf(stderr, "[key] %s keysym=0x%lx len=%d status=%d\n",
+                         repeat ? "repeat" : "down", (unsigned long)keysym, len, (int)status);
+        // An IME commit may carry several codepoints in one event (a whole CJK
+        // word); walk the UTF-8 buffer and inject each.
+        if (len > 0 && status != XLookupKeySym) {
+            const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
+            for (int i = 0; i < len; ) {
+                unsigned char c = p[i];
+                uint32_t cp = 0; int adv = 1;
+                if (c < 0x80) {
+                    cp = c; adv = 1;
+                } else if ((c & 0xE0) == 0xC0 && i + 1 < len) {
+                    cp = ((c & 0x1Fu) << 6) | (p[i + 1] & 0x3Fu); adv = 2;
+                } else if ((c & 0xF0) == 0xE0 && i + 2 < len) {
+                    cp = ((c & 0x0Fu) << 12) | ((p[i + 1] & 0x3Fu) << 6) | (p[i + 2] & 0x3Fu); adv = 3;
+                } else if ((c & 0xF8) == 0xF0 && i + 3 < len) {
+                    cp = ((c & 0x07u) << 18) | ((p[i + 1] & 0x3Fu) << 12) |
+                         ((p[i + 2] & 0x3Fu) << 6) | (p[i + 3] & 0x3Fu); adv = 4;
+                }
+                if (cp >= 32 || cp == '\t' || cp == '\n' || cp == '\r')
+                    impl->keyboard_device.inject_char(cp, mods, ts);
+                i += adv;
+            }
+        }
+    };
+
     while (XPending(impl->display)) {
         XEvent event;
         XNextEvent(impl->display, &event);
 
         // Filter events for XIM
         if (impl->xic && XFilterEvent(&event, impl->xwindow)) {
+            if (key_debug() && (event.type == KeyPress || event.type == KeyRelease))
+                std::fprintf(stderr, "[key] FILTERED type=%d keycode=%u\n",
+                             event.type, event.xkey.keycode);
             continue;
         }
+        if (key_debug() && (event.type == KeyPress || event.type == FocusIn || event.type == FocusOut))
+            std::fprintf(stderr, "[xev] type=%d focus_mode=%d\n", event.type,
+                         (event.type == FocusIn || event.type == FocusOut) ? event.xfocus.mode : -1);
 
         switch (event.type) {
             case ClientMessage:
@@ -898,54 +963,7 @@ void Window::poll_events() {
                 break;
 
             case KeyPress: {
-                KeySym keysym = 0;
-                Status status = 0;
-                char stackbuf[64];
-                char* text = stackbuf;
-                std::string heap;          // only used if the IME commit overflows stackbuf
-                int len = 0;
-
-                if (impl->xic) {
-                    // Xutf8LookupString honours the IC, so an IME commit arrives here as a
-                    // (possibly multi-character) UTF-8 string rather than a single keysym.
-                    len = Xutf8LookupString(impl->xic, &event.xkey, text, sizeof(stackbuf) - 1, &keysym, &status);
-                    if (status == XBufferOverflow && len > 0) {     // commit longer than stackbuf
-                        heap.resize(static_cast<size_t>(len) + 1);
-                        text = heap.data();
-                        len = Xutf8LookupString(impl->xic, &event.xkey, text, len, &keysym, &status);
-                    }
-                } else {
-                    len = XLookupString(&event.xkey, text, sizeof(stackbuf) - 1, &keysym, nullptr);
-                }
-
-                Key key = translate_keysym(keysym);
-                KeyMod mods = get_x11_modifiers(event.xkey.state);
-                double ts = get_event_timestamp();
-
-                impl->keyboard_device.inject_key_down(key, mods, event.xkey.keycode, false, ts);
-
-                // Character input — an IME commit may carry several codepoints in one
-                // event (e.g. a whole CJK word); walk the UTF-8 buffer and inject each.
-                if (len > 0 && status != XLookupKeySym) {
-                    const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
-                    for (int i = 0; i < len; ) {
-                        unsigned char c = p[i];
-                        uint32_t cp = 0; int adv = 1;
-                        if (c < 0x80) {
-                            cp = c; adv = 1;
-                        } else if ((c & 0xE0) == 0xC0 && i + 1 < len) {
-                            cp = ((c & 0x1Fu) << 6) | (p[i + 1] & 0x3Fu); adv = 2;
-                        } else if ((c & 0xF0) == 0xE0 && i + 2 < len) {
-                            cp = ((c & 0x0Fu) << 12) | ((p[i + 1] & 0x3Fu) << 6) | (p[i + 2] & 0x3Fu); adv = 3;
-                        } else if ((c & 0xF8) == 0xF0 && i + 3 < len) {
-                            cp = ((c & 0x07u) << 18) | ((p[i + 1] & 0x3Fu) << 12) |
-                                 ((p[i + 2] & 0x3Fu) << 6) | (p[i + 3] & 0x3Fu); adv = 4;
-                        }
-                        if (cp >= 32 || cp == '\t' || cp == '\n' || cp == '\r')
-                            impl->keyboard_device.inject_char(cp, mods, ts);
-                        i += adv;
-                    }
-                }
+                handle_key_input(event.xkey, false);
                 break;
             }
 
@@ -958,12 +976,10 @@ void Window::poll_events() {
                     if (next.type == KeyPress && next.xkey.time == event.xkey.time &&
                         next.xkey.keycode == event.xkey.keycode) {
                         XNextEvent(impl->display, &next);  // Consume the paired KeyPress
-
-                        KeySym keysym = XkbKeycodeToKeysym(impl->display, event.xkey.keycode, 0, 0);
-                        Key key = translate_keysym(keysym);
-                        KeyMod mods = get_x11_modifiers(event.xkey.state);
-                        // inject_key_down with repeat=true produces a KeyRepeat event
-                        impl->keyboard_device.inject_key_down(key, mods, event.xkey.keycode, true, get_event_timestamp());
+                        // Auto-repeat: emit the KeyRepeat *and* the character(s), so
+                        // holding/repeating a key keeps inserting text (decode the
+                        // consumed KeyPress, which carries the right state for lookup).
+                        handle_key_input(next.xkey, true);
                         break;
                     }
                 }
