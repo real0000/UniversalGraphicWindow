@@ -421,6 +421,43 @@ private:
     math::Box b_;
 };
 
+// ── Scrollable-panel state (vertical) ───────────────────────────────────────
+// Brackets an immediate-mode layout pass over a clipped panel: begin() hands
+// back the y at which to start drawing (already shifted by the current scroll);
+// the caller lays out downward accumulating a y cursor; end() then measures the
+// content, derives the scroll limit, and re-clamps the offset. Centralises the
+// "content_h − (view − 2·pad)" / max-scroll / clamp arithmetic so call sites
+// never re-derive it by hand — the same motivation as EdgeLayout. Content is
+// taken to start at view-top + pad and to want the same pad at the bottom.
+class ScrollView {
+public:
+    // Begin a pass over a viewport (top y + height) with uniform inner padding.
+    // Returns the top y for content (= view_y + pad − offset).
+    float begin(float view_y, float view_h, float pad) {
+        view_top_ = view_y; view_h_ = view_h; pad_ = pad;
+        return view_top_ + pad_ - offset_;
+    }
+    float begin(const math::Box& view, float pad) {
+        return begin(math::y(math::box_min(view)), math::box_height(view), pad);
+    }
+    // End the pass: end_y is the cursor just past the last laid-out item. Updates
+    // the max offset and clamps the current offset for the next frame.
+    void end(float end_y) {
+        const float content_h = (end_y + offset_) - (view_top_ + pad_);
+        const float visible   = view_h_ - 2.0f * pad_;
+        max_ = content_h > visible ? content_h - visible : 0.0f;
+        clamp();
+    }
+    void  scroll_by(float dy) { offset_ += dy; clamp(); }
+    void  reset()             { offset_ = 0.0f; max_ = 0.0f; }
+    float offset()     const  { return offset_; }
+    float max_offset() const  { return max_; }
+private:
+    void clamp() { if (offset_ < 0.0f) offset_ = 0.0f; else if (offset_ > max_) offset_ = max_; }
+    float offset_ = 0.0f, max_ = 0.0f;
+    float view_top_ = 0.0f, view_h_ = 0.0f, pad_ = 0.0f;
+};
+
 // ── Immediate-mode text edit state ──────────────────────────────────────────
 // A text buffer + caret + selection anchor (byte indices into `text`), with the
 // usual editing operations. Rendering and mouse hit-testing stay with the caller
