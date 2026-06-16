@@ -859,6 +859,11 @@ void Window::poll_events() {
                 break;
 
             case FocusIn:
+                // Grab/ungrab pseudo-focus (e.g. the IME's candidate window taking
+                // a keyboard grab) must not re-focus the IC — doing so resets the
+                // in-progress composition, so the next keystroke is lost.
+                if (event.xfocus.mode == NotifyGrab || event.xfocus.mode == NotifyUngrab)
+                    break;
                 impl->focused = true;
                 if (impl->xic) XSetICFocus(impl->xic);   // route IME composition to this IC
                 if (impl->callbacks.focus_callback) {
@@ -872,6 +877,11 @@ void Window::poll_events() {
                 break;
 
             case FocusOut:
+                // Ignore grab/ungrab pseudo-focus: the IME candidate window grabs
+                // the keyboard mid-composition, and tearing down the IC + resetting
+                // input here is exactly what drops the second composition key.
+                if (event.xfocus.mode == NotifyGrab || event.xfocus.mode == NotifyUngrab)
+                    break;
                 impl->focused = false;
                 if (impl->xic) XUnsetICFocus(impl->xic);
                 // Reset input state on focus loss to avoid stuck keys
