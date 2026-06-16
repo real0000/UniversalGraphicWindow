@@ -447,7 +447,11 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     // XLookupString. Safe + idempotent to set here (honours $LC_*, $XMODIFIERS).
     if (std::setlocale(LC_CTYPE, "") && XSupportsLocale())
         XSetLocaleModifiers("");
-    window->impl->xim = XOpenIM(display, nullptr, nullptr, nullptr);
+    // Escape hatch: AIW_NO_IME=1 skips the IME entirely, so keys go straight
+    // through XLookupString (ASCII-only, but always delivered). Useful as a
+    // fallback and to isolate IME-induced input problems.
+    if (std::getenv("AIW_NO_IME") == nullptr)
+        window->impl->xim = XOpenIM(display, nullptr, nullptr, nullptr);
     if (window->impl->xim) {
         window->impl->xic = XCreateIC(window->impl->xim,
                                        XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
@@ -843,8 +847,10 @@ void Window::poll_events() {
                     cp = ((c & 0x07u) << 18) | ((p[i + 1] & 0x3Fu) << 12) |
                          ((p[i + 2] & 0x3Fu) << 6) | (p[i + 3] & 0x3Fu); adv = 4;
                 }
-                if (cp >= 32 || cp == '\t' || cp == '\n' || cp == '\r')
+                if (cp >= 32 || cp == '\t' || cp == '\n' || cp == '\r') {
                     impl->keyboard_device.inject_char(cp, mods, ts);
+                    if (key_debug()) std::fprintf(stderr, "[key]   inject_char U+%04X\n", cp);
+                }
                 i += adv;
             }
         }
@@ -948,7 +954,11 @@ void Window::poll_events() {
                 if (event.xfocus.mode == NotifyGrab || event.xfocus.mode == NotifyUngrab)
                     break;
                 impl->focused = false;
-                if (impl->xic) XUnsetICFocus(impl->xic);
+                // NOTE: deliberately do NOT XUnsetICFocus here. Transient FocusOut
+                // events (the IME's own preedit/candidate window, the compositor)
+                // would otherwise reset the in-progress composition. ibus routes by
+                // whichever IC last took focus, so leaving ours focused is safe; the
+                // next FocusIn re-asserts XSetICFocus anyway.
                 // Reset input state on focus loss to avoid stuck keys
                 impl->keyboard_device.reset();
                 impl->mouse_device.reset();
