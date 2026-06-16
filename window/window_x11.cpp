@@ -6,6 +6,7 @@
 #include "window.hpp"
 #include "input/input_mouse.hpp"
 #include "input/input_keyboard.hpp"
+#include "ibus_client.hpp"
 
 #if defined(WINDOW_PLATFORM_X11)
 
@@ -244,9 +245,14 @@ struct Window::Impl {
     input::KeyboardEventDispatcher keyboard_dispatcher;
     input::DefaultKeyboardDevice keyboard_device;
 
-    // XIM for text input
+    // XIM for text input (legacy fallback)
     XIM xim = nullptr;
     XIC xic = nullptr;
+    // Preferred path: talk to ibus directly over D-Bus (channel A) — see
+    // ibus_client.hpp. When connected, the XIM xic is NOT created and keys are
+    // routed here instead.
+    IBusClient ibus;
+    bool       use_ibus = false;
 
 #ifdef WINDOW_HAS_OPENGL
     void* fb_config = nullptr;
@@ -447,10 +453,36 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     // XLookupString. Safe + idempotent to set here (honours $LC_*, $XMODIFIERS).
     if (std::setlocale(LC_CTYPE, "") && XSupportsLocale())
         XSetLocaleModifiers("");
-    // Escape hatch: AIW_NO_IME=1 skips the IME entirely, so keys go straight
-    // through XLookupString (ASCII-only, but always delivered). Useful as a
-    // fallback and to isolate IME-induced input problems.
-    if (std::getenv("AIW_NO_IME") == nullptr)
+    // Escape hatch: AIW_NO_IME=1 skips all input methods, so keys go straight
+    // through XLookupString (ASCII-only, but always delivered).
+    if (std::getenv("AIW_NO_IME") == nullptr) {
+        // Preferred: talk to ibus directly over D-Bus (channel A) — the same path
+        // Qt/GTK use. Works even when the legacy XIM bridge is disabled/broken.
+        Window* w = window;
+        w->impl->ibus.on_commit = [w](const std::string& utf8) {
+            const unsigned char* p = reinterpret_cast<const unsigned char*>(utf8.data());
+            const size_t len = utf8.size();
+            const KeyMod mods = get_x11_modifiers(0);
+            const double ts = get_event_timestamp();
+            for (size_t i = 0; i < len; ) {
+                unsigned char c = p[i]; uint32_t cp = 0; int adv = 1;
+                if (c < 0x80) { cp = c; adv = 1; }
+                else if ((c & 0xE0) == 0xC0 && i + 1 < len) { cp = ((c & 0x1Fu) << 6) | (p[i+1] & 0x3Fu); adv = 2; }
+                else if ((c & 0xF0) == 0xE0 && i + 2 < len) { cp = ((c & 0x0Fu) << 12) | ((p[i+1] & 0x3Fu) << 6) | (p[i+2] & 0x3Fu); adv = 3; }
+                else if ((c & 0xF8) == 0xF0 && i + 3 < len) { cp = ((c & 0x07u) << 18) | ((p[i+1] & 0x3Fu) << 12) | ((p[i+2] & 0x3Fu) << 6) | (p[i+3] & 0x3Fu); adv = 4; }
+                if (cp >= 32 || cp == '\t' || cp == '\n' || cp == '\r')
+                    w->impl->keyboard_device.inject_char(cp, mods, ts);
+                i += adv;
+            }
+        };
+        w->impl->ibus.on_forward = [w](uint32_t keyval, uint32_t, uint32_t) {
+            if (keyval >= 0x20 && keyval < 0x7f)        // a key ibus handed back
+                w->impl->keyboard_device.inject_char(keyval, get_x11_modifiers(0), get_event_timestamp());
+        };
+        window->impl->use_ibus = window->impl->ibus.connect("aiwrapper");
+    }
+    // Fall back to the legacy XIM bridge only if ibus D-Bus was unavailable.
+    if (!window->impl->use_ibus && std::getenv("AIW_NO_IME") == nullptr)
         window->impl->xim = XOpenIM(display, nullptr, nullptr, nullptr);
     if (window->impl->xim) {
         window->impl->xic = XCreateIC(window->impl->xim,
@@ -936,7 +968,8 @@ void Window::poll_events() {
                 if (event.xfocus.mode == NotifyGrab || event.xfocus.mode == NotifyUngrab)
                     break;
                 impl->focused = true;
-                if (impl->xic) XSetICFocus(impl->xic);   // route IME composition to this IC
+                if (impl->use_ibus) impl->ibus.focus_in();
+                else if (impl->xic) XSetICFocus(impl->xic);   // route IME composition to this IC
                 if (impl->callbacks.focus_callback) {
                     WindowFocusEvent focus_event;
                     focus_event.type = EventType::WindowFocus;
@@ -954,6 +987,7 @@ void Window::poll_events() {
                 if (event.xfocus.mode == NotifyGrab || event.xfocus.mode == NotifyUngrab)
                     break;
                 impl->focused = false;
+                if (impl->use_ibus) impl->ibus.focus_out();
                 // NOTE: deliberately do NOT XUnsetICFocus here. Transient FocusOut
                 // events (the IME's own preedit/candidate window, the compositor)
                 // would otherwise reset the in-progress composition. ibus routes by
@@ -973,11 +1007,31 @@ void Window::poll_events() {
                 break;
 
             case KeyPress: {
+                // ibus (D-Bus) gets first refusal: if it consumes the key for
+                // composition, the resulting text arrives via on_commit; we must
+                // not also decode it locally.
+                if (impl->use_ibus) {
+                    char t8[8]; KeySym ks = 0;
+                    XLookupString(&event.xkey, t8, sizeof t8, &ks, nullptr);
+                    if (impl->ibus.process_key(uint32_t(ks), event.xkey.keycode - 8, event.xkey.state, true)) {
+                        if (key_debug()) std::fprintf(stderr, "[key] ibus handled keysym=0x%lx\n", (unsigned long)ks);
+                        break;
+                    }
+                }
                 handle_key_input(event.xkey, false);
                 break;
             }
 
             case KeyRelease: {
+                // Let ibus see releases too (engines track them); if it consumes
+                // the release, skip local handling. Done before the auto-repeat
+                // collapse so the collapse only governs the non-ibus path.
+                if (impl->use_ibus) {
+                    char t8[8]; KeySym ks = 0;
+                    XLookupString(&event.xkey, t8, sizeof t8, &ks, nullptr);
+                    if (impl->ibus.process_key(uint32_t(ks), event.xkey.keycode - 8, event.xkey.state, false))
+                        break;
+                }
                 // X11 generates KeyRelease+KeyPress pairs for auto-repeat — collapse them
                 // into a single KeyRepeat event.
                 if (XPending(impl->display)) {
@@ -1059,6 +1113,9 @@ void Window::poll_events() {
                 break;
         }
     }
+    // Drain any ibus signals that arrived outside a ProcessKeyEvent round-trip
+    // (late commits / preedit updates).
+    if (impl->use_ibus) impl->ibus.pump();
 }
 
 Graphics* Window::graphics() const {
