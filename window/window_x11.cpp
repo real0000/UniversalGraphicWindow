@@ -312,11 +312,25 @@ static void send_wm_state_event(Display* display, ::Window window, bool add, Ato
 // Window Implementation
 //=============================================================================
 
+// XInitThreads() must precede every other Xlib call in the process. This app
+// renders / pumps events on one thread while AI + network work runs on another
+// (run_interactive), and Xlib's XIM synchronous round-trip — the blocking read
+// XFilterEvent performs while an IME composes — corrupts/deadlocks the shared
+// connection without Xlib's internal locks. (It only bites once an IME is
+// actually focused, which is why plain ASCII never tripped it.) The function-
+// local static runs the init exactly once, and both XOpenDisplay sites call
+// this first so the very first Xlib call is always XInitThreads.
+static void ensure_x_threads() {
+    static const int initialized = XInitThreads();   // non-zero on success
+    (void)initialized;
+}
+
 Window* create_window_impl(const Config& config, Result* out_result) {
     auto set_result = [&](Result r) {
         if (out_result) *out_result = r;
     };
 
+    ensure_x_threads();
     Display* display = XOpenDisplay(nullptr);
     if (!display) {
         set_result(Result::ErrorPlatformInit);
@@ -1532,6 +1546,7 @@ MessageBoxButton Window::show_message_box(
     MessageBoxIcon icon,
     Window* parent)
 {
+    ensure_x_threads();
     Display* display = XOpenDisplay(nullptr);
     if (!display) return MessageBoxButton::None;
 

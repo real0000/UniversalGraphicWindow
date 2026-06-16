@@ -197,6 +197,10 @@ int enumerate_monitors(MonitorEnumeration* out_monitors) {
 
     out_monitors->monitor_count = 0;
 
+    // XInitThreads must precede every Xlib call in the process; monitor
+    // enumeration can be the first X touch (before the window exists), so init
+    // here too. Idempotent — the function-local static fires the call only once.
+    static const int x_threads = XInitThreads(); (void)x_threads;
     Display* display = XOpenDisplay(nullptr);
     if (!display) return 0;
 
