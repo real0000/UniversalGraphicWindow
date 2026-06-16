@@ -152,12 +152,6 @@ bool IBusClient::read_one(int timeout_ms, int& type, std::string& member,
 
 void IBusClient::dispatch(int type, const std::string& member, uint32_t reply_serial,
                           const std::string& body) {
-    if (std::getenv("IBUS_DEBUG")) {
-        std::fprintf(stderr, "[ibus] type=%d member=%-22s rs=%u len=%zu hex=",
-                     type, member.c_str(), reply_serial, body.size());
-        for (size_t k = 0; k < body.size() && k < 56; k++) std::fprintf(stderr, "%02x", (unsigned char)body[k]);
-        std::fprintf(stderr, "\n");
-    }
     if (type == 2 && body.size() >= 4) {                 // METHOD_RETURN (ProcessKeyEvent → b)
         last_handled_ = (rd_u32(body, 0) != 0);
         (void)reply_serial;
