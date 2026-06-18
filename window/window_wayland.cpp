@@ -1547,6 +1547,23 @@ void Window::show_message_box_async(
     }
 }
 
+//=============================================================================
+// Common Dialogs
+//=============================================================================
+// Wayland has no native common dialogs, and (like the message box above) this
+// backend does not yet host a self-drawn shm dialog window. Until that toolkit
+// exists these return a cancelled result so callers behave as if the user
+// dismissed the dialog. The desktop fallback to mirror is window_x11.cpp, which
+// draws its own file/color/font windows with Xlib; the Wayland equivalent would
+// render into a wl_shm buffer and run an xdg-toplevel modal loop.
+// TODO(wayland): port the X11 custom dialogs to wl_shm + xkbcommon input.
+
+FileDialogResult Window::show_open_file_dialog(const FileDialogOptions&) { return FileDialogResult{}; }
+FileDialogResult Window::show_save_file_dialog(const FileDialogOptions&) { return FileDialogResult{}; }
+FileDialogResult Window::show_folder_dialog(const FileDialogOptions&)    { return FileDialogResult{}; }
+ColorDialogResult Window::show_color_dialog(const ColorDialogOptions& o) { ColorDialogResult r; r.color = o.initial; return r; }
+FontDialogResult  Window::show_font_dialog(const FontDialogOptions& o)   { FontDialogResult r; r.font = o.initial; return r; }
+
 } // namespace window
 
 #endif // WINDOW_PLATFORM_WAYLAND

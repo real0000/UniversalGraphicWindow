@@ -1439,4 +1439,264 @@ void Window::show_message_box_async(
 
 } // namespace window
 
+//=============================================================================
+// Common Dialog ObjC Helpers (must live at file scope, outside the namespace)
+//=============================================================================
+
+// Adds OK/Cancel buttons to a panel that is otherwise non-modal (the shared
+// color / font panels). The buttons stop the modal session and record intent.
+@interface UGWPanelAccessory : NSObject
+@property (nonatomic) BOOL accepted;
+@end
+@implementation UGWPanelAccessory
+- (void)ugwOk:(id)sender     { (void)sender; self.accepted = YES; [NSApp stopModal]; }
+- (void)ugwCancel:(id)sender { (void)sender; self.accepted = NO;  [NSApp stopModal]; }
+@end
+
+// Receives changeFont:/changeAttributes: from NSFontManager while the font
+// panel is open so we can read back the user's selection.
+@interface UGWFontReceiver : UGWPanelAccessory
+@property (nonatomic, strong) NSFont* font;
+@property (nonatomic, strong) NSColor* color;
+@property (nonatomic) BOOL underline;
+@property (nonatomic) BOOL strikeout;
+@property (nonatomic) BOOL hasColor;
+@end
+@implementation UGWFontReceiver
+- (void)changeFont:(id)sender {
+    if (self.font) self.font = [sender convertFont:self.font];
+}
+- (void)changeAttributes:(id)sender {
+    NSDictionary* attrs = [sender convertAttributes:@{}];
+    NSColor* c = attrs[NSForegroundColorAttributeName];
+    if (c) { self.color = c; self.hasColor = YES; }
+    id us = attrs[NSUnderlineStyleAttributeName];
+    if (us) self.underline = [us integerValue] != 0;
+    id ss = attrs[NSStrikethroughStyleAttributeName];
+    if (ss) self.strikeout = [ss integerValue] != 0;
+}
+// Validate menu items so the font panel's effects controls stay enabled.
+- (BOOL)validateMenuItem:(NSMenuItem*)item { (void)item; return YES; }
+@end
+
+namespace window {
+
+//=============================================================================
+// Common Dialogs (macOS native: NSOpenPanel / NSSavePanel / NSColorPanel /
+// NSFontPanel). AppKit must be touched on the main thread; the async wrappers
+// call these from a worker thread, so each call hops to the main thread when
+// needed (and runs directly when already there, to avoid a deadlock).
+//=============================================================================
+
+template <typename Fn>
+static auto ugw_run_on_main(Fn&& fn) -> decltype(fn()) {
+    if ([NSThread isMainThread]) return fn();
+    __block decltype(fn()) result;
+    dispatch_sync(dispatch_get_main_queue(), ^{ result = fn(); });
+    return result;
+}
+
+static DialogColor ns_color_to_dialog(NSColor* color, uint8_t fallback_alpha, bool use_alpha) {
+    DialogColor d{0, 0, 0, fallback_alpha};
+    NSColor* c = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!c) return d;
+    d.r = (uint8_t)([c redComponent]   * 255.0 + 0.5);
+    d.g = (uint8_t)([c greenComponent] * 255.0 + 0.5);
+    d.b = (uint8_t)([c blueComponent]  * 255.0 + 0.5);
+    d.a = use_alpha ? (uint8_t)([c alphaComponent] * 255.0 + 0.5) : fallback_alpha;
+    return d;
+}
+
+// Parse the filters into a bare extension list (e.g. {"png","jpg"}). Returns
+// false when any filter matches all files ("*"), in which case no type
+// restriction should be applied.
+static bool collect_extensions(const std::vector<DialogFilter>& filters, NSMutableArray* out) {
+    bool restrict_types = true;
+    for (const auto& f : filters) {
+        std::string spec = f.spec.empty() ? std::string("*") : f.spec;
+        size_t start = 0;
+        while (start <= spec.size()) {
+            size_t sep = spec.find(';', start);
+            std::string e = spec.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+            while (!e.empty() && (e.front() == ' ' || e.front() == '\t')) e.erase(e.begin());
+            while (!e.empty() && (e.back() == ' ' || e.back() == '\t')) e.pop_back();
+            if (e == "*" || e == "*.*") {
+                restrict_types = false;
+            } else if (!e.empty()) {
+                if (e.rfind("*.", 0) == 0) e = e.substr(2);
+                else if (e.front() == '.') e = e.substr(1);
+                [out addObject:[NSString stringWithUTF8String:e.c_str()]];
+            }
+            if (sep == std::string::npos) break;
+            start = sep + 1;
+        }
+    }
+    return restrict_types;
+}
+
+static FileDialogResult macos_file_dialog(const FileDialogOptions& options, bool save, bool folder) {
+    return ugw_run_on_main([&]() -> FileDialogResult {
+        @autoreleasepool {
+            FileDialogResult result;
+            NSSavePanel* panel = save ? [NSSavePanel savePanel] : [NSOpenPanel openPanel];
+
+            if (!options.title.empty())
+                [panel setMessage:[NSString stringWithUTF8String:options.title.c_str()]];
+            if (!options.initial_dir.empty())
+                [panel setDirectoryURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:options.initial_dir.c_str()]
+                                                  isDirectory:YES]];
+            [panel setCanCreateDirectories:(options.can_create_dirs ? YES : NO)];
+
+            if (save) {
+                if (!options.initial_name.empty())
+                    [panel setNameFieldStringValue:[NSString stringWithUTF8String:options.initial_name.c_str()]];
+            } else {
+                NSOpenPanel* op = (NSOpenPanel*)panel;
+                [op setCanChooseFiles:(folder ? NO : YES)];
+                [op setCanChooseDirectories:(folder ? YES : NO)];
+                [op setAllowsMultipleSelection:(options.allow_multiple ? YES : NO)];
+            }
+
+            if (!folder && !options.filters.empty()) {
+                NSMutableArray* exts = [NSMutableArray array];
+                if (collect_extensions(options.filters, exts) && exts.count > 0) {
+                    // allowedFileTypes is deprecated on macOS 11+ in favor of
+                    // UTType, but remains functional across all SDK versions.
+                    [panel setAllowedFileTypes:exts];
+                }
+            }
+
+            if ([panel runModal] != NSModalResponseOK) return result;
+
+            if (!save && options.allow_multiple) {
+                for (NSURL* url in [(NSOpenPanel*)panel URLs])
+                    if (url.path) result.paths.push_back([url.path UTF8String]);
+            } else if (panel.URL && panel.URL.path) {
+                result.paths.push_back([panel.URL.path UTF8String]);
+            }
+            result.ok = !result.paths.empty();
+            return result;
+        }
+    });
+}
+
+FileDialogResult Window::show_open_file_dialog(const FileDialogOptions& options) {
+    return macos_file_dialog(options, /*save*/false, /*folder*/false);
+}
+FileDialogResult Window::show_save_file_dialog(const FileDialogOptions& options) {
+    return macos_file_dialog(options, /*save*/true, /*folder*/false);
+}
+FileDialogResult Window::show_folder_dialog(const FileDialogOptions& options) {
+    return macos_file_dialog(options, /*save*/false, /*folder*/true);
+}
+
+ColorDialogResult Window::show_color_dialog(const ColorDialogOptions& options) {
+    return ugw_run_on_main([&]() -> ColorDialogResult {
+        @autoreleasepool {
+            ColorDialogResult result;
+            result.color = options.initial;
+
+            NSColorPanel* panel = [NSColorPanel sharedColorPanel];
+            [panel setShowsAlpha:(options.allow_alpha ? YES : NO)];
+            [panel setColor:[NSColor colorWithSRGBRed:options.initial.r / 255.0
+                                                green:options.initial.g / 255.0
+                                                 blue:options.initial.b / 255.0
+                                                alpha:options.initial.a / 255.0]];
+
+            UGWPanelAccessory* acc = [[UGWPanelAccessory alloc] init];
+            NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 220, 40)];
+            NSButton* ok = [[NSButton alloc] initWithFrame:NSMakeRect(112, 6, 100, 28)];
+            [ok setTitle:@"OK"];     [ok setBezelStyle:NSBezelStyleRounded];
+            [ok setTarget:acc];      [ok setAction:@selector(ugwOk:)];      [ok setKeyEquivalent:@"\r"];
+            NSButton* cancel = [[NSButton alloc] initWithFrame:NSMakeRect(8, 6, 100, 28)];
+            [cancel setTitle:@"Cancel"]; [cancel setBezelStyle:NSBezelStyleRounded];
+            [cancel setTarget:acc];      [cancel setAction:@selector(ugwCancel:)]; [cancel setKeyEquivalent:@"\033"];
+            [view addSubview:ok];        [view addSubview:cancel];
+            [panel setAccessoryView:view];
+
+            [panel makeKeyAndOrderFront:nil];
+            [NSApp runModalForWindow:panel];
+            [panel setAccessoryView:nil];
+            [panel orderOut:nil];
+
+            if (acc.accepted) {
+                result.color = ns_color_to_dialog([panel color], options.initial.a, options.allow_alpha);
+                result.ok = true;
+            }
+            return result;
+        }
+    });
+}
+
+FontDialogResult Window::show_font_dialog(const FontDialogOptions& options) {
+    return ugw_run_on_main([&]() -> FontDialogResult {
+        @autoreleasepool {
+            FontDialogResult result;
+            result.font = options.initial;
+
+            NSFontManager* fm = [NSFontManager sharedFontManager];
+            NSFontPanel* panel = [fm fontPanel:YES];
+
+            // Build the initial font from the request.
+            NSFontTraitMask traits = 0;
+            if (options.initial.bold)   traits |= NSBoldFontMask;
+            if (options.initial.italic) traits |= NSItalicFontMask;
+            NSFont* base = nil;
+            if (!options.initial.family.empty()) {
+                base = [fm fontWithFamily:[NSString stringWithUTF8String:options.initial.family.c_str()]
+                                   traits:traits
+                                   weight:(options.initial.bold ? 9 : 5)
+                                     size:options.initial.size_pt];
+            }
+            if (!base) base = [NSFont systemFontOfSize:options.initial.size_pt];
+
+            UGWFontReceiver* recv = [[UGWFontReceiver alloc] init];
+            recv.font = base;
+            recv.color = [NSColor colorWithSRGBRed:options.initial.color.r / 255.0
+                                             green:options.initial.color.g / 255.0
+                                              blue:options.initial.color.b / 255.0
+                                             alpha:1.0];
+            recv.underline = options.initial.underline;
+            recv.strikeout = options.initial.strikeout;
+
+            [fm setTarget:recv];
+            [fm setAction:@selector(changeFont:)];
+            [fm setSelectedFont:base isMultiple:NO];
+
+            NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 220, 40)];
+            NSButton* ok = [[NSButton alloc] initWithFrame:NSMakeRect(112, 6, 100, 28)];
+            [ok setTitle:@"OK"];     [ok setBezelStyle:NSBezelStyleRounded];
+            [ok setTarget:recv];     [ok setAction:@selector(ugwOk:)];      [ok setKeyEquivalent:@"\r"];
+            NSButton* cancel = [[NSButton alloc] initWithFrame:NSMakeRect(8, 6, 100, 28)];
+            [cancel setTitle:@"Cancel"]; [cancel setBezelStyle:NSBezelStyleRounded];
+            [cancel setTarget:recv];     [cancel setAction:@selector(ugwCancel:)]; [cancel setKeyEquivalent:@"\033"];
+            [view addSubview:ok];        [view addSubview:cancel];
+            [panel setAccessoryView:view];
+
+            [panel makeKeyAndOrderFront:nil];
+            [NSApp runModalForWindow:panel];
+            [panel setAccessoryView:nil];
+            [panel orderOut:nil];
+            [fm setTarget:nil];
+
+            if (recv.accepted && recv.font) {
+                NSFont* f = recv.font;
+                result.font.family    = [[f familyName] UTF8String];
+                result.font.size_pt   = (float)[f pointSize];
+                NSFontTraitMask t = [fm traitsOfFont:f];
+                result.font.bold      = (t & NSBoldFontMask) != 0;
+                result.font.italic    = (t & NSItalicFontMask) != 0;
+                result.font.underline = recv.underline;
+                result.font.strikeout = recv.strikeout;
+                if (options.allow_color && recv.hasColor && recv.color)
+                    result.font.color = ns_color_to_dialog(recv.color, 255, false);
+                result.ok = true;
+            }
+            return result;
+        }
+    });
+}
+
+} // namespace window
+
 #endif // WINDOW_PLATFORM_MACOS

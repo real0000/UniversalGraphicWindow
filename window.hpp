@@ -438,6 +438,97 @@ enum class MessageBoxButton : uint8_t {
 using MessageBoxCallback = std::function<void(MessageBoxButton result)>;
 
 //-----------------------------------------------------------------------------
+// Common Dialogs (file open/save, folder picker, color picker, font picker)
+//-----------------------------------------------------------------------------
+// A native OS dialog is used where one exists (Win32 IFileDialog/ChooseColor/
+// ChooseFont, macOS NSOpenPanel/NSColorPanel/NSFontPanel, mobile/web pickers).
+// On platforms without a native dialog the library falls back to a plain
+// window it draws itself (see the X11 implementation), so the same API works
+// everywhere. All blocking calls run their own modal loop and return when the
+// user confirms or cancels; the *_async variants return immediately and invoke
+// the callback with the result.
+
+// A single file-type filter, e.g. {"Image Files", "png;jpg;jpeg;bmp"}.
+// 'spec' is a semicolon-separated list of extensions WITHOUT a leading dot;
+// the platform layer formats them into the OS-native pattern. Use "*" to match
+// every file (an empty 'spec' is treated the same way).
+struct DialogFilter {
+    std::string name;   // Human-readable label shown in the type dropdown
+    std::string spec;   // "png;jpg;jpeg"  or  "*"
+};
+
+// Options shared by the open / save / folder dialogs.
+struct FileDialogOptions {
+    std::string title;                  // Dialog title (empty = platform default)
+    std::string initial_dir;            // Starting directory (empty = system default)
+    std::string initial_name;           // Suggested file name (save dialog)
+    std::vector<DialogFilter> filters;  // File-type filters (open/save dialogs)
+    int default_filter = 0;             // Index into 'filters' to select initially
+    bool allow_multiple = false;        // Open dialog: allow selecting several files
+    bool can_create_dirs = true;        // Allow creating new folders from the dialog
+    bool overwrite_prompt = true;       // Save dialog: confirm before overwriting
+    Window* parent = nullptr;           // Owner window (nullptr = application-modal)
+};
+
+// Result of an open / save / folder dialog.
+struct FileDialogResult {
+    bool ok = false;                    // True only if the user confirmed a choice
+    std::vector<std::string> paths;     // Selected absolute path(s), UTF-8
+    int filter_index = 0;               // Filter active when the user confirmed
+
+    // Convenience accessor for the first (often only) selected path.
+    const std::string& path() const {
+        static const std::string empty_path;
+        return paths.empty() ? empty_path : paths.front();
+    }
+};
+
+// 8-bit-per-channel RGBA color used by the color dialog.
+struct DialogColor {
+    uint8_t r = 0, g = 0, b = 0, a = 255;
+};
+
+struct ColorDialogOptions {
+    std::string title;
+    DialogColor initial{0, 0, 0, 255};  // Pre-selected color
+    bool allow_alpha = false;           // Expose an alpha/opacity control
+    Window* parent = nullptr;
+};
+
+struct ColorDialogResult {
+    bool ok = false;
+    DialogColor color{0, 0, 0, 255};
+};
+
+// Font description used by the font dialog.
+struct DialogFont {
+    std::string family = "";            // Family name, e.g. "Segoe UI" / "Helvetica"
+    float size_pt = 12.0f;              // Size in points
+    bool bold = false;
+    bool italic = false;
+    bool underline = false;
+    bool strikeout = false;
+    DialogColor color{0, 0, 0, 255};    // Text color (only where the OS supports it)
+};
+
+struct FontDialogOptions {
+    std::string title;
+    DialogFont initial;                 // Pre-selected font
+    bool allow_color = false;           // Expose a text-color control (where supported)
+    Window* parent = nullptr;
+};
+
+struct FontDialogResult {
+    bool ok = false;
+    DialogFont font;
+};
+
+// Callbacks for the asynchronous dialog variants.
+using FileDialogCallback  = std::function<void(const FileDialogResult& result)>;
+using ColorDialogCallback = std::function<void(const ColorDialogResult& result)>;
+using FontDialogCallback  = std::function<void(const FontDialogResult& result)>;
+
+//-----------------------------------------------------------------------------
 // Forward Declarations
 //-----------------------------------------------------------------------------
 
@@ -622,6 +713,29 @@ public:
         MessageBoxIcon icon,
         Window* parent,
         MessageBoxCallback callback);
+
+    //-------------------------------------------------------------------------
+    // Common Dialogs (file / folder / color / font)
+    //-------------------------------------------------------------------------
+    // Blocking calls run a modal loop and return when the user confirms or
+    // cancels (result.ok == false on cancel). The *_async variants return
+    // immediately and invoke the callback with the result.
+
+    // File selection
+    static FileDialogResult show_open_file_dialog(const FileDialogOptions& options = FileDialogOptions{});
+    static FileDialogResult show_save_file_dialog(const FileDialogOptions& options = FileDialogOptions{});
+    static FileDialogResult show_folder_dialog(const FileDialogOptions& options = FileDialogOptions{});
+
+    // Color / font selection
+    static ColorDialogResult show_color_dialog(const ColorDialogOptions& options = ColorDialogOptions{});
+    static FontDialogResult  show_font_dialog(const FontDialogOptions& options = FontDialogOptions{});
+
+    // Async variants
+    static void show_open_file_dialog_async(const FileDialogOptions& options, FileDialogCallback callback);
+    static void show_save_file_dialog_async(const FileDialogOptions& options, FileDialogCallback callback);
+    static void show_folder_dialog_async(const FileDialogOptions& options, FileDialogCallback callback);
+    static void show_color_dialog_async(const ColorDialogOptions& options, ColorDialogCallback callback);
+    static void show_font_dialog_async(const FontDialogOptions& options, FontDialogCallback callback);
 
     //-------------------------------------------------------------------------
     // Event Callbacks

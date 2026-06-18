@@ -812,6 +812,23 @@ void Window::show_message_box_async(
     }
 }
 
+//=============================================================================
+// Common Dialogs
+//=============================================================================
+// iOS presents file/color selection through view controllers
+// (UIDocumentPickerViewController, UIColorPickerViewController) that report
+// their result asynchronously via a delegate on the UI thread, so they cannot
+// back a blocking call. These return a cancelled result for now; a full
+// implementation would present the controller and complete the *_async
+// callbacks from the delegate. There is no system font picker.
+// TODO(ios): present UIDocumentPicker/UIColorPicker via show_*_async.
+
+FileDialogResult Window::show_open_file_dialog(const FileDialogOptions&) { return FileDialogResult{}; }
+FileDialogResult Window::show_save_file_dialog(const FileDialogOptions&) { return FileDialogResult{}; }
+FileDialogResult Window::show_folder_dialog(const FileDialogOptions&)    { return FileDialogResult{}; }
+ColorDialogResult Window::show_color_dialog(const ColorDialogOptions& o) { ColorDialogResult r; r.color = o.initial; return r; }
+FontDialogResult  Window::show_font_dialog(const FontDialogOptions& o)   { FontDialogResult r; r.font = o.initial; return r; }
+
 } // namespace window
 
 #endif // WINDOW_PLATFORM_IOS

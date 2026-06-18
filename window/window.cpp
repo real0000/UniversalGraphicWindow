@@ -5,6 +5,7 @@
 #include "window.hpp"
 #include <cstring>
 #include <cctype>
+#include <thread>
 
 namespace window {
 
@@ -230,6 +231,55 @@ const char* message_box_button_to_string(MessageBoxButton button) {
         case MessageBoxButton::Ignore: return "Ignore";
         default:                       return "Unknown";
     }
+}
+
+//=============================================================================
+// Common Dialog Async Wrappers (platform-independent)
+//=============================================================================
+// Each blocking dialog has a native, platform-specific implementation. The
+// async variants are common to every platform: they copy the options and run
+// the blocking call on a detached worker thread, then deliver the result via
+// the callback. This mirrors show_message_box_async() and avoids duplicating
+// the threading boilerplate in every platform file.
+
+void Window::show_open_file_dialog_async(const FileDialogOptions& options, FileDialogCallback callback) {
+    if (!callback) return;
+    FileDialogOptions opts = options;
+    std::thread([opts, callback]() {
+        callback(Window::show_open_file_dialog(opts));
+    }).detach();
+}
+
+void Window::show_save_file_dialog_async(const FileDialogOptions& options, FileDialogCallback callback) {
+    if (!callback) return;
+    FileDialogOptions opts = options;
+    std::thread([opts, callback]() {
+        callback(Window::show_save_file_dialog(opts));
+    }).detach();
+}
+
+void Window::show_folder_dialog_async(const FileDialogOptions& options, FileDialogCallback callback) {
+    if (!callback) return;
+    FileDialogOptions opts = options;
+    std::thread([opts, callback]() {
+        callback(Window::show_folder_dialog(opts));
+    }).detach();
+}
+
+void Window::show_color_dialog_async(const ColorDialogOptions& options, ColorDialogCallback callback) {
+    if (!callback) return;
+    ColorDialogOptions opts = options;
+    std::thread([opts, callback]() {
+        callback(Window::show_color_dialog(opts));
+    }).detach();
+}
+
+void Window::show_font_dialog_async(const FontDialogOptions& options, FontDialogCallback callback) {
+    if (!callback) return;
+    FontDialogOptions opts = options;
+    std::thread([opts, callback]() {
+        callback(Window::show_font_dialog(opts));
+    }).detach();
 }
 
 } // namespace window

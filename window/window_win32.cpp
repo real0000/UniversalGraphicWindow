@@ -20,11 +20,15 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
+#include <shobjidl.h>      // IFileDialog (open/save/folder)
+#include <commdlg.h>       // ChooseColor / ChooseFont
 #include <cstring>
 #include <string>
 #include <vector>
 #include <thread>
 #include "../internal/utf8_util.hpp"
+
+#pragma comment(lib, "comdlg32.lib")
 
 //=============================================================================
 // Backend Configuration (use CMake-defined macros)
@@ -1347,6 +1351,280 @@ void Window::show_message_box_async(
             title_copy.c_str(), message_copy.c_str(), type, icon, parent);
         callback(result);
     }).detach();
+}
+
+//=============================================================================
+// Common Dialogs (Win32 native: IFileDialog, ChooseColor, ChooseFont)
+//=============================================================================
+
+namespace {
+
+// RAII COM apartment for the calling thread. The shell file dialogs require an
+// initialized COM apartment; the async wrappers call us on a worker thread that
+// has none. We initialize one and uninitialize only when we were the one that
+// did so (S_FALSE = already initialized, RPC_E_CHANGED_MODE = different model
+// already active -> leave it untouched).
+struct ScopedCom {
+    bool owns = false;
+    ScopedCom() {
+        HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        owns = (hr == S_OK || hr == S_FALSE);
+    }
+    ~ScopedCom() { if (owns) CoUninitialize(); }
+};
+
+HWND dialog_owner(Window* parent) {
+    Window::Impl* im = internal_get_impl(parent);
+    return im ? im->hwnd : nullptr;
+}
+
+// Holds wide-string storage for a set of COMDLG_FILTERSPEC entries. The spec
+// array points into 'storage', so both must outlive the dialog call.
+struct Win32FilterSpecs {
+    std::vector<COMDLG_FILTERSPEC> specs;
+    std::vector<std::wstring>      storage;  // [name0, pattern0, name1, pattern1, ...]
+};
+
+void build_filter_specs(const std::vector<DialogFilter>& filters, Win32FilterSpecs& out) {
+    std::vector<std::pair<std::wstring, std::wstring>> pairs;  // (display name, pattern)
+
+    if (filters.empty()) {
+        pairs.emplace_back(L"All Files", L"*.*");
+    } else {
+        for (const auto& f : filters) {
+            std::wstring name = internal::utf8_to_wide(!f.name.empty() ? f.name : std::string("Files"));
+            std::wstring pattern;
+
+            std::string spec = f.spec.empty() ? std::string("*") : f.spec;
+            size_t start = 0;
+            while (start <= spec.size()) {
+                size_t sep = spec.find(';', start);
+                std::string ext = spec.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+                // Trim surrounding whitespace.
+                while (!ext.empty() && (ext.front() == ' ' || ext.front() == '\t')) ext.erase(ext.begin());
+                while (!ext.empty() && (ext.back() == ' ' || ext.back() == '\t')) ext.pop_back();
+
+                if (!ext.empty()) {
+                    std::wstring piece;
+                    if (ext == "*" || ext == "*.*") {
+                        piece = L"*.*";
+                    } else {
+                        if (ext.rfind("*.", 0) == 0) ext = ext.substr(2);
+                        else if (ext.front() == '.') ext = ext.substr(1);
+                        piece = L"*." + internal::utf8_to_wide(ext);
+                    }
+                    if (!pattern.empty()) pattern += L";";
+                    pattern += piece;
+                }
+                if (sep == std::string::npos) break;
+                start = sep + 1;
+            }
+            if (pattern.empty()) pattern = L"*.*";
+            pairs.emplace_back(name, pattern);
+        }
+    }
+
+    out.storage.reserve(pairs.size() * 2);
+    for (auto& p : pairs) {
+        out.storage.push_back(p.first);
+        out.storage.push_back(p.second);
+    }
+    out.specs.reserve(pairs.size());
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        COMDLG_FILTERSPEC s;
+        s.pszName = out.storage[i * 2].c_str();
+        s.pszSpec = out.storage[i * 2 + 1].c_str();
+        out.specs.push_back(s);
+    }
+}
+
+FileDialogResult win32_file_dialog(const FileDialogOptions& options, bool save, bool folder) {
+    FileDialogResult result;
+    ScopedCom com;
+
+    IFileDialog* dialog = nullptr;
+    HRESULT hr = CoCreateInstance(
+        save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog,
+        nullptr, CLSCTX_INPROC_SERVER,
+        save ? IID_IFileSaveDialog : IID_IFileOpenDialog,
+        reinterpret_cast<void**>(&dialog));
+    if (FAILED(hr) || !dialog) return result;
+
+    DWORD flags = 0;
+    dialog->GetOptions(&flags);
+    flags |= FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR;
+    if (folder)                              flags |= FOS_PICKFOLDERS;
+    if (!save && options.allow_multiple)     flags |= FOS_ALLOWMULTISELECT;
+    if (save && options.overwrite_prompt)    flags |= FOS_OVERWRITEPROMPT;
+    dialog->SetOptions(flags);
+
+    if (!options.title.empty()) {
+        dialog->SetTitle(internal::utf8_to_wide(options.title).c_str());
+    }
+
+    // File-type filters (open/save only; ignored for folder picking).
+    Win32FilterSpecs fs;
+    if (!folder) {
+        build_filter_specs(options.filters, fs);
+        if (!fs.specs.empty()) {
+            dialog->SetFileTypes(static_cast<UINT>(fs.specs.size()), fs.specs.data());
+            int di = options.default_filter;
+            if (di < 0 || di >= static_cast<int>(fs.specs.size())) di = 0;
+            dialog->SetFileTypeIndex(static_cast<UINT>(di) + 1);  // 1-based
+        }
+    }
+
+    if (!options.initial_dir.empty()) {
+        IShellItem* folder_item = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(
+                internal::utf8_to_wide(options.initial_dir).c_str(), nullptr,
+                IID_IShellItem, reinterpret_cast<void**>(&folder_item))) && folder_item) {
+            dialog->SetFolder(folder_item);
+            folder_item->Release();
+        }
+    }
+
+    if (save && !options.initial_name.empty()) {
+        dialog->SetFileName(internal::utf8_to_wide(options.initial_name).c_str());
+    }
+
+    hr = dialog->Show(dialog_owner(options.parent));
+    if (FAILED(hr)) {  // includes HRESULT_FROM_WIN32(ERROR_CANCELLED) on cancel
+        dialog->Release();
+        return result;
+    }
+
+    UINT type_index = 0;
+    if (SUCCEEDED(dialog->GetFileTypeIndex(&type_index)) && type_index > 0) {
+        result.filter_index = static_cast<int>(type_index) - 1;
+    }
+
+    auto append_item = [&](IShellItem* item) {
+        PWSTR psz = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &psz)) && psz) {
+            result.paths.push_back(internal::wide_to_utf8(psz));
+            CoTaskMemFree(psz);
+        }
+    };
+
+    if (!save && options.allow_multiple) {
+        IFileOpenDialog* open = nullptr;
+        if (SUCCEEDED(dialog->QueryInterface(IID_IFileOpenDialog, reinterpret_cast<void**>(&open))) && open) {
+            IShellItemArray* items = nullptr;
+            if (SUCCEEDED(open->GetResults(&items)) && items) {
+                DWORD count = 0;
+                items->GetCount(&count);
+                for (DWORD i = 0; i < count; ++i) {
+                    IShellItem* it = nullptr;
+                    if (SUCCEEDED(items->GetItemAt(i, &it)) && it) {
+                        append_item(it);
+                        it->Release();
+                    }
+                }
+                items->Release();
+            }
+            open->Release();
+        }
+    } else {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dialog->GetResult(&item)) && item) {
+            append_item(item);
+            item->Release();
+        }
+    }
+
+    dialog->Release();
+    result.ok = !result.paths.empty();
+    return result;
+}
+
+} // anonymous namespace
+
+FileDialogResult Window::show_open_file_dialog(const FileDialogOptions& options) {
+    return win32_file_dialog(options, /*save*/false, /*folder*/false);
+}
+
+FileDialogResult Window::show_save_file_dialog(const FileDialogOptions& options) {
+    return win32_file_dialog(options, /*save*/true, /*folder*/false);
+}
+
+FileDialogResult Window::show_folder_dialog(const FileDialogOptions& options) {
+    return win32_file_dialog(options, /*save*/false, /*folder*/true);
+}
+
+ColorDialogResult Window::show_color_dialog(const ColorDialogOptions& options) {
+    ColorDialogResult result;
+    result.color = options.initial;
+
+    // 16 custom-color slots required by ChooseColor; initialized to white.
+    COLORREF custom[16];
+    for (int i = 0; i < 16; ++i) custom[i] = RGB(255, 255, 255);
+
+    CHOOSECOLORW cc = {};
+    cc.lStructSize  = sizeof(cc);
+    cc.hwndOwner    = dialog_owner(options.parent);
+    cc.rgbResult    = RGB(options.initial.r, options.initial.g, options.initial.b);
+    cc.lpCustColors = custom;
+    cc.Flags        = CC_FULLOPEN | CC_RGBINIT | CC_ANYCOLOR;
+
+    if (ChooseColorW(&cc)) {
+        result.color.r = GetRValue(cc.rgbResult);
+        result.color.g = GetGValue(cc.rgbResult);
+        result.color.b = GetBValue(cc.rgbResult);
+        // The Win32 color dialog has no alpha control; preserve the caller's
+        // alpha so round-tripping an RGBA value doesn't clobber it.
+        result.color.a = options.initial.a;
+        result.ok = true;
+    }
+    return result;
+}
+
+FontDialogResult Window::show_font_dialog(const FontDialogOptions& options) {
+    FontDialogResult result;
+    result.font = options.initial;
+
+    HDC hdc = GetDC(nullptr);
+    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+
+    LOGFONTW lf = {};
+    lf.lfHeight    = -MulDiv(static_cast<int>(options.initial.size_pt + 0.5f), dpi, 72);
+    lf.lfWeight    = options.initial.bold ? FW_BOLD : FW_NORMAL;
+    lf.lfItalic    = options.initial.italic ? TRUE : FALSE;
+    lf.lfUnderline = options.initial.underline ? TRUE : FALSE;
+    lf.lfStrikeOut = options.initial.strikeout ? TRUE : FALSE;
+    lf.lfCharSet   = DEFAULT_CHARSET;
+    if (!options.initial.family.empty()) {
+        std::wstring fam = internal::utf8_to_wide(options.initial.family);
+        wcsncpy(lf.lfFaceName, fam.c_str(), LF_FACESIZE - 1);
+        lf.lfFaceName[LF_FACESIZE - 1] = L'\0';
+    }
+
+    CHOOSEFONTW cf = {};
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner   = dialog_owner(options.parent);
+    cf.lpLogFont   = &lf;
+    cf.Flags       = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOVERTFONTS;
+    cf.rgbColors   = RGB(options.initial.color.r, options.initial.color.g, options.initial.color.b);
+    if (options.allow_color) cf.Flags |= CF_EFFECTS;  // exposes color + underline/strikeout
+
+    BOOL ok = ChooseFontW(&cf);
+    ReleaseDC(nullptr, hdc);
+    if (!ok) return result;
+
+    result.font.family    = internal::wide_to_utf8(lf.lfFaceName);
+    result.font.size_pt   = cf.iPointSize / 10.0f;   // iPointSize is in 1/10 point
+    result.font.bold      = (lf.lfWeight >= FW_SEMIBOLD);
+    result.font.italic    = lf.lfItalic != 0;
+    result.font.underline = lf.lfUnderline != 0;
+    result.font.strikeout = lf.lfStrikeOut != 0;
+    if (options.allow_color) {
+        result.font.color.r = GetRValue(cf.rgbColors);
+        result.font.color.g = GetGValue(cf.rgbColors);
+        result.font.color.b = GetBValue(cf.rgbColors);
+        result.font.color.a = 255;
+    }
+    result.ok = true;
+    return result;
 }
 
 } // namespace window

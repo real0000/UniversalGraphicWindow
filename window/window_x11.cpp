@@ -31,10 +31,16 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
+#include <cctype>
 #include <ctime>
 #include <string>
+#include <vector>
 #include <thread>
 #include <algorithm>
+#include <dirent.h>     // directory listing for the file dialog
+#include <sys/stat.h>   // stat() to tell files from directories
+#include <unistd.h>
+#include <pwd.h>        // home directory fallback
 
 //=============================================================================
 // Backend Configuration (use CMake-defined macros)
@@ -1872,6 +1878,858 @@ void Window::show_message_box_async(
             title_copy.c_str(), message_copy.c_str(), type, icon, parent);
         callback(result);
     }).detach();
+}
+
+//=============================================================================
+// Common Dialogs (X11 has no native dialogs, so we draw our own windows)
+//=============================================================================
+// X11 ships no standard file/color/font chooser. Following the same approach
+// as the message box above, each dialog is a fixed-size top-level window we
+// draw ourselves with Xlib, double-buffered to avoid flicker, running its own
+// modal event loop until the user confirms or cancels. No external toolkit
+// (GTK/Qt) or desktop-portal dependency is required.
+
+namespace {
+
+//-------------------------------------------------------------------------
+// Small reusable chrome shared by the file/color/font dialogs.
+//-------------------------------------------------------------------------
+
+struct X11Button {
+    std::string label;
+    int x = 0, y = 0, w = 0, h = 0;
+    bool hovered = false;
+    bool primary = false;   // drawn highlighted (default action)
+    bool contains(int px, int py) const {
+        return px >= x && px < x + w && py >= y && py < y + h;
+    }
+};
+
+struct X11Dialog {
+    Display* display = nullptr;
+    int screen = 0;
+    ::Window window = 0;
+    GC gc = nullptr;
+    XFontStruct* font = nullptr;
+    Pixmap back = 0;        // double-buffer
+    Atom wm_delete = 0;
+    Atom wm_protocols = 0;
+    int width = 0, height = 0;
+    bool done = false;
+
+    int line_h() const { return font->ascent + font->descent; }
+    int text_w(const std::string& s) const { return XTextWidth(font, s.c_str(), (int)s.size()); }
+
+    bool create(const char* title, int w, int h, Window* parent);
+    void destroy();
+
+    // Drawing into the back-buffer.
+    void fill(int x, int y, int w, int h, unsigned long color) {
+        XSetForeground(display, gc, color);
+        XFillRectangle(display, back, gc, x, y, w, h);
+    }
+    void frame(int x, int y, int w, int h, unsigned long color) {
+        XSetForeground(display, gc, color);
+        XDrawRectangle(display, back, gc, x, y, w - 1, h - 1);
+    }
+    void text(int x, int baseline, const std::string& s, unsigned long color) {
+        XSetForeground(display, gc, color);
+        XDrawString(display, back, gc, x, baseline, s.c_str(), (int)s.size());
+    }
+    void text_clipped(int x, int baseline, const std::string& s, unsigned long color,
+                      int cx, int cy, int cw, int ch) {
+        XRectangle clip{(short)cx, (short)cy, (unsigned short)cw, (unsigned short)ch};
+        XSetClipRectangles(display, gc, 0, 0, &clip, 1, Unsorted);
+        text(x, baseline, s, color);
+        XSetClipMask(display, gc, 0);   // None (the X11 macro is #undef'd in this file)
+    }
+    void button(const X11Button& b) {
+        unsigned long bg = b.hovered ? (b.primary ? 0x5599DD : 0xD8D8D8)
+                                     : (b.primary ? 0x4488CC : 0xE0E0E0);
+        fill(b.x, b.y, b.w, b.h, bg);
+        frame(b.x, b.y, b.w, b.h, 0x888888);
+        unsigned long fg = b.primary ? 0xFFFFFF : 0x000000;
+        int tw = text_w(b.label);
+        text(b.x + (b.w - tw) / 2, b.y + (b.h + font->ascent - font->descent) / 2, b.label, fg);
+    }
+    void present() {
+        XCopyArea(display, back, window, gc, 0, 0, width, height, 0, 0);
+        XFlush(display);
+    }
+};
+
+static XFontStruct* load_ui_font(Display* display) {
+    XFontStruct* f = XLoadQueryFont(display, "-*-helvetica-medium-r-*-*-14-*-*-*-*-*-*-*");
+    if (!f) f = XLoadQueryFont(display, "-*-fixed-medium-r-*-*-14-*-*-*-*-*-*-*");
+    if (!f) f = XLoadQueryFont(display, "fixed");
+    return f;
+}
+
+bool X11Dialog::create(const char* title, int w, int h, Window* parent) {
+    ensure_x_threads();
+    display = XOpenDisplay(nullptr);
+    if (!display) return false;
+    screen = DefaultScreen(display);
+    width = w; height = h;
+
+    font = load_ui_font(display);
+    if (!font) { XCloseDisplay(display); display = nullptr; return false; }
+
+    // Center on the parent window if given, else on the screen.
+    int pos_x, pos_y;
+    ::Window parent_xwin = 0;
+    Window::Impl* pim = internal_get_impl(parent);
+    if (pim) parent_xwin = pim->xwindow;
+    if (parent_xwin) {
+        XWindowAttributes pa;
+        XGetWindowAttributes(display, parent_xwin, &pa);
+        int ax, ay; ::Window child;
+        XTranslateCoordinates(display, parent_xwin, RootWindow(display, screen), 0, 0, &ax, &ay, &child);
+        pos_x = ax + (pa.width - w) / 2;
+        pos_y = ay + (pa.height - h) / 2;
+    } else {
+        pos_x = (DisplayWidth(display, screen) - w) / 2;
+        pos_y = (DisplayHeight(display, screen) - h) / 2;
+    }
+    if (pos_x < 0) pos_x = 0;
+    if (pos_y < 0) pos_y = 0;
+
+    XSetWindowAttributes attrs = {};
+    attrs.event_mask = ExposureMask | KeyPressMask | ButtonPressMask |
+                       ButtonReleaseMask | PointerMotionMask | StructureNotifyMask;
+    attrs.background_pixel = 0xF0F0F0;
+    window = XCreateWindow(display, RootWindow(display, screen),
+                           pos_x, pos_y, w, h, 0, DefaultDepth(display, screen),
+                           InputOutput, DefaultVisual(display, screen),
+                           CWBackPixel | CWEventMask, &attrs);
+
+    XStoreName(display, window, title ? title : "");
+    Atom net_name = XInternAtom(display, "_NET_WM_NAME", False);
+    Atom utf8 = XInternAtom(display, "UTF8_STRING", False);
+    if (title)
+        XChangeProperty(display, window, net_name, utf8, 8, PropModeReplace,
+                        (unsigned char*)title, (int)strlen(title));
+
+    Atom wtype = XInternAtom(display, "_NET_WM_WINDOW_TYPE", False);
+    Atom dlg = XInternAtom(display, "_NET_WM_WINDOW_TYPE_DIALOG", False);
+    XChangeProperty(display, window, wtype, XA_ATOM, 32, PropModeReplace, (unsigned char*)&dlg, 1);
+    if (parent_xwin) XSetTransientForHint(display, window, parent_xwin);
+
+    XSizeHints* sh = XAllocSizeHints();
+    sh->flags = PMinSize | PMaxSize | PPosition;
+    sh->min_width = sh->max_width = w;
+    sh->min_height = sh->max_height = h;
+    sh->x = pos_x; sh->y = pos_y;
+    XSetWMNormalHints(display, window, sh);
+    XFree(sh);
+
+    wm_protocols = XInternAtom(display, "WM_PROTOCOLS", False);
+    wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(display, window, &wm_delete, 1);
+
+    gc = XCreateGC(display, window, 0, nullptr);
+    XSetFont(display, gc, font->fid);
+    back = XCreatePixmap(display, window, w, h, DefaultDepth(display, screen));
+
+    XMapRaised(display, window);
+    XFlush(display);
+    return true;
+}
+
+void X11Dialog::destroy() {
+    if (!display) return;
+    if (back) XFreePixmap(display, back);
+    if (gc) XFreeGC(display, gc);
+    if (font) XFreeFont(display, font);
+    if (window) XDestroyWindow(display, window);
+    XCloseDisplay(display);
+    display = nullptr;
+}
+
+// True when this ClientMessage is the window-manager close request.
+static bool is_close_event(const X11Dialog& d, const XEvent& e) {
+    return e.type == ClientMessage &&
+           (Atom)e.xclient.message_type == d.wm_protocols &&
+           (Atom)e.xclient.data.l[0] == d.wm_delete;
+}
+
+//-------------------------------------------------------------------------
+// Filesystem helpers
+//-------------------------------------------------------------------------
+
+static std::string to_lower(std::string s) {
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+static std::vector<std::string> parse_extensions(const std::string& spec) {
+    std::vector<std::string> exts;
+    std::string s = spec.empty() ? std::string("*") : spec;
+    size_t start = 0;
+    while (start <= s.size()) {
+        size_t sep = s.find(';', start);
+        std::string e = s.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+        while (!e.empty() && (e.front() == ' ' || e.front() == '\t')) e.erase(e.begin());
+        while (!e.empty() && (e.back() == ' ' || e.back() == '\t')) e.pop_back();
+        if (e == "*" || e == "*.*") { exts.clear(); return exts; }  // match everything
+        if (!e.empty()) {
+            if (e.rfind("*.", 0) == 0) e = e.substr(2);
+            else if (e.front() == '.') e = e.substr(1);
+            exts.push_back(to_lower(e));
+        }
+        if (sep == std::string::npos) break;
+        start = sep + 1;
+    }
+    return exts;
+}
+
+static bool ext_matches(const std::string& name, const std::vector<std::string>& exts) {
+    if (exts.empty()) return true;
+    size_t dot = name.rfind('.');
+    std::string e = (dot == std::string::npos) ? std::string() : to_lower(name.substr(dot + 1));
+    for (const auto& x : exts) if (e == x) return true;
+    return false;
+}
+
+static std::string path_home() {
+    const char* h = getenv("HOME");
+    if (h && *h) return h;
+    struct passwd* pw = getpwuid(getuid());
+    if (pw && pw->pw_dir) return pw->pw_dir;
+    return "/";
+}
+
+static std::string path_parent(const std::string& base) {
+    if (base == "/" || base.empty()) return "/";
+    std::string b = base;
+    if (b.size() > 1 && b.back() == '/') b.pop_back();
+    size_t slash = b.rfind('/');
+    if (slash == std::string::npos || slash == 0) return "/";
+    return b.substr(0, slash);
+}
+
+static std::string path_join(const std::string& base, const std::string& name) {
+    if (name == "..") return path_parent(base);
+    if (base == "/") return "/" + name;
+    return base + "/" + name;
+}
+
+struct X11FileEntry { std::string name; bool is_dir; };
+
+static void list_dir(const std::string& path, const std::vector<std::string>& exts,
+                     bool folder_mode, std::vector<X11FileEntry>& out) {
+    out.clear();
+    if (DIR* d = opendir(path.c_str())) {
+        while (struct dirent* de = readdir(d)) {
+            std::string nm = de->d_name;
+            if (nm == "." || nm == "..") continue;
+            if (!nm.empty() && nm[0] == '.') continue;  // hide dotfiles
+            struct stat st;
+            bool is_dir = false;
+            if (stat(path_join(path, nm).c_str(), &st) == 0) is_dir = S_ISDIR(st.st_mode);
+            if (is_dir) out.push_back({nm, true});
+            else if (!folder_mode && ext_matches(nm, exts)) out.push_back({nm, false});
+        }
+        closedir(d);
+    }
+    std::sort(out.begin(), out.end(), [](const X11FileEntry& a, const X11FileEntry& b) {
+        if (a.is_dir != b.is_dir) return a.is_dir;            // directories first
+        return to_lower(a.name) < to_lower(b.name);
+    });
+    if (path != "/") out.insert(out.begin(), {"..", true});
+}
+
+//-------------------------------------------------------------------------
+// File / folder dialog
+//-------------------------------------------------------------------------
+
+struct X11FileDialog {
+    X11Dialog dlg;
+    bool save_mode = false;
+    bool folder_mode = false;
+    std::vector<std::string> exts;
+
+    std::string cwd;
+    std::vector<X11FileEntry> entries;
+    int selected = -1;
+    int scroll = 0;
+    std::string name_field;
+
+    // layout (computed once; window is fixed size)
+    int pad = 12;
+    int list_x = 0, list_y = 0, list_w = 0, list_h = 0, row_h = 0, visible_rows = 0;
+    int field_y = 0;
+    X11Button ok, cancel, up;
+
+    FileDialogResult result;
+
+    void layout() {
+        row_h = dlg.line_h() + 8;
+        list_x = pad;
+        list_y = pad + dlg.line_h() + 10;                 // below the path label
+        list_w = dlg.width - pad * 2;
+        int bottom_area = pad + 32 + 8 + 32 + pad;        // field row + button row
+        list_h = dlg.height - list_y - bottom_area;
+        if (list_h < row_h) list_h = row_h;
+        visible_rows = list_h / row_h;
+        field_y = list_y + list_h + 8;
+
+        int by = field_y + 32 + 8;
+        cancel = {"Cancel", dlg.width - pad - 90, by, 90, 30, false, false};
+        ok     = {save_mode ? "Save" : (folder_mode ? "Choose" : "Open"),
+                  dlg.width - pad - 90 - 10 - 90, by, 90, 30, false, true};
+        up     = {"Up", pad, by, 60, 30, false, false};
+    }
+
+    void refresh() {
+        list_dir(cwd, exts, folder_mode, entries);
+        selected = -1;
+        scroll = 0;
+    }
+
+    void clamp_scroll() {
+        int max_scroll = (int)entries.size() - visible_rows;
+        if (max_scroll < 0) max_scroll = 0;
+        if (scroll > max_scroll) scroll = max_scroll;
+        if (scroll < 0) scroll = 0;
+    }
+
+    void redraw() {
+        dlg.fill(0, 0, dlg.width, dlg.height, 0xF0F0F0);
+
+        // Current path (clipped to width).
+        std::string path_label = cwd;
+        dlg.text_clipped(pad, pad + dlg.font->ascent, path_label, 0x000000,
+                         pad, pad, dlg.width - pad * 2, dlg.line_h());
+
+        // List box.
+        dlg.fill(list_x, list_y, list_w, list_h, 0xFFFFFF);
+        dlg.frame(list_x, list_y, list_w, list_h, 0x888888);
+        for (int i = 0; i < visible_rows; ++i) {
+            int idx = scroll + i;
+            if (idx >= (int)entries.size()) break;
+            int ry = list_y + i * row_h;
+            if (idx == selected) dlg.fill(list_x + 1, ry + 1, list_w - 2, row_h, 0x4488CC);
+            unsigned long fg = (idx == selected) ? 0xFFFFFF : 0x000000;
+            const X11FileEntry& e = entries[idx];
+            std::string label = (e.is_dir ? "[" + e.name + "]" : e.name);
+            dlg.text_clipped(list_x + 8, ry + dlg.font->ascent + 4, label, fg,
+                             list_x + 1, ry + 1, list_w - 2, row_h);
+        }
+
+        // Filename field (hidden for folder picker).
+        if (!folder_mode) {
+            dlg.fill(pad, field_y, dlg.width - pad * 2, 30, 0xFFFFFF);
+            dlg.frame(pad, field_y, dlg.width - pad * 2, 30, 0x888888);
+            std::string shown = name_field + "_";
+            dlg.text_clipped(pad + 6, field_y + dlg.font->ascent + 7, shown, 0x000000,
+                             pad + 2, field_y, dlg.width - pad * 2 - 4, 30);
+        }
+
+        dlg.button(up);
+        dlg.button(ok);
+        dlg.button(cancel);
+        dlg.present();
+    }
+
+    void enter_entry(int idx) {
+        if (idx < 0 || idx >= (int)entries.size()) return;
+        const X11FileEntry& e = entries[idx];
+        if (e.is_dir) {
+            cwd = path_join(cwd, e.name);
+            refresh();
+        } else {
+            name_field = e.name;
+        }
+    }
+
+    void confirm() {
+        if (folder_mode) {
+            std::string chosen = cwd;
+            if (selected >= 0 && selected < (int)entries.size() && entries[selected].is_dir &&
+                entries[selected].name != "..")
+                chosen = path_join(cwd, entries[selected].name);
+            result.paths.push_back(chosen);
+            result.ok = true;
+            dlg.done = true;
+            return;
+        }
+        if (name_field.empty()) return;            // nothing to confirm yet
+        result.paths.push_back(path_join(cwd, name_field));
+        result.ok = true;
+        dlg.done = true;
+    }
+
+    // Handles wheel scrolling and the buttons outside the list area. Clicks
+    // inside the list (incl. double-click navigation) are handled in run().
+    void on_button_press(int mx, int my, unsigned int button) {
+        if (button == Button4) { scroll -= 1; clamp_scroll(); redraw(); return; }  // wheel up
+        if (button == Button5) { scroll += 1; clamp_scroll(); redraw(); return; }  // wheel down
+        if (button != Button1) return;
+
+        if (cancel.contains(mx, my)) { dlg.done = true; return; }
+        if (ok.contains(mx, my))     { confirm(); return; }
+        if (up.contains(mx, my))     { cwd = path_parent(cwd); refresh(); redraw(); return; }
+    }
+
+    void on_key(KeySym ks, const char* buf, int n) {
+        if (ks == XK_Escape) { dlg.done = true; return; }
+        if (ks == XK_Return || ks == XK_KP_Enter) {
+            if (selected >= 0 && selected < (int)entries.size() && entries[selected].is_dir)
+                enter_entry(selected);
+            else
+                confirm();
+            redraw();
+            return;
+        }
+        if (ks == XK_Up)   { if (selected > 0) { selected--; if (selected < scroll) scroll = selected; } redraw(); return; }
+        if (ks == XK_Down) { if (selected + 1 < (int)entries.size()) { selected++; if (selected >= scroll + visible_rows) scroll = selected - visible_rows + 1; } redraw(); return; }
+        if (folder_mode) return;  // no text field
+        if (ks == XK_BackSpace) { if (!name_field.empty()) name_field.pop_back(); redraw(); return; }
+        if (n > 0 && (unsigned char)buf[0] >= 0x20) { name_field.append(buf, n); redraw(); }
+    }
+
+    FileDialogResult run(const FileDialogOptions& options, bool save, bool folder, Window* parent) {
+        save_mode = save; folder_mode = folder;
+        if (!folder && !options.filters.empty()) {
+            int fi = options.default_filter;
+            if (fi < 0 || fi >= (int)options.filters.size()) fi = 0;
+            exts = parse_extensions(options.filters[fi].spec);
+        }
+        cwd = options.initial_dir;
+        struct stat st;
+        if (cwd.empty() || stat(cwd.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) cwd = path_home();
+        if (save) name_field = options.initial_name;
+
+        const char* title = !options.title.empty() ? options.title.c_str()
+                          : (folder ? "Select Folder" : (save ? "Save File" : "Open File"));
+        if (!dlg.create(title, 580, 440, parent)) return result;
+        layout();
+        refresh();
+        redraw();
+
+        Time last_click = 0; int last_click_idx = -1;
+        while (!dlg.done) {
+            XEvent ev;
+            XNextEvent(dlg.display, &ev);
+            if (ev.xany.window != dlg.window && ev.type != ClientMessage) continue;
+            switch (ev.type) {
+                case Expose:
+                    if (ev.xexpose.count == 0) dlg.present();
+                    break;
+                case ButtonPress: {
+                    // Double-click detection on the list.
+                    int mx = ev.xbutton.x, my = ev.xbutton.y;
+                    if (ev.xbutton.button == Button1 &&
+                        mx >= list_x && mx < list_x + list_w && my >= list_y && my < list_y + list_h) {
+                        int idx = scroll + (my - list_y) / row_h;
+                        bool dbl = (idx == last_click_idx) && (ev.xbutton.time - last_click < 400);
+                        last_click = ev.xbutton.time; last_click_idx = idx;
+                        if (idx >= 0 && idx < (int)entries.size()) {
+                            selected = idx;
+                            if (!entries[idx].is_dir) name_field = entries[idx].name;
+                            if (dbl) { enter_entry(idx); last_click_idx = -1; }
+                            redraw();
+                        }
+                        break;
+                    }
+                    on_button_press(mx, my, ev.xbutton.button);
+                    break;
+                }
+                case MotionNotify: {
+                    int mx = ev.xmotion.x, my = ev.xmotion.y;
+                    bool oh = ok.hovered, ch = cancel.hovered, uh = up.hovered;
+                    ok.hovered = ok.contains(mx, my);
+                    cancel.hovered = cancel.contains(mx, my);
+                    up.hovered = up.contains(mx, my);
+                    if (oh != ok.hovered || ch != cancel.hovered || uh != up.hovered) redraw();
+                    break;
+                }
+                case KeyPress: {
+                    char buf[16]; KeySym ks;
+                    int n = XLookupString(&ev.xkey, buf, sizeof(buf), &ks, nullptr);
+                    on_key(ks, buf, n);
+                    break;
+                }
+                case ClientMessage:
+                    if (is_close_event(dlg, ev)) dlg.done = true;
+                    break;
+            }
+        }
+        dlg.destroy();
+        return result;
+    }
+};
+
+//-------------------------------------------------------------------------
+// Color dialog (RGBA sliders + preview)
+//-------------------------------------------------------------------------
+
+struct X11ColorDialog {
+    X11Dialog dlg;
+    bool allow_alpha = false;
+    int ch[4] = {0, 0, 0, 255};   // r, g, b, a
+    int n_ch = 3;
+    int dragging = -1;
+
+    int pad = 16;
+    int sw_x = 0, sw_y = 0, sw_w = 100, sw_h = 100;   // preview swatch
+    int bar_x = 0, bar_w = 0, bar_h = 18, bar_gap = 0, bars_y = 0;
+    X11Button ok, cancel;
+    ColorDialogResult result;
+
+    int bar_y(int i) const { return bars_y + i * bar_gap; }
+
+    void layout() {
+        sw_x = pad; sw_y = pad; sw_w = 96; sw_h = 96;
+        bar_x = sw_x + sw_w + 24;
+        bar_w = dlg.width - bar_x - pad - 48;     // leave room for value text
+        bar_gap = 30;
+        bars_y = pad + 6;
+        int by = pad + sw_h + 30;
+        if (by < bars_y + n_ch * bar_gap + 10) by = bars_y + n_ch * bar_gap + 10;
+        cancel = {"Cancel", dlg.width - pad - 90, by, 90, 30, false, false};
+        ok     = {"OK", dlg.width - pad - 90 - 10 - 90, by, 90, 30, false, true};
+    }
+
+    unsigned long preview_pixel() const {
+        // Approximate the swatch over the dialog background to convey alpha.
+        if (!allow_alpha) return ((unsigned long)ch[0] << 16) | (ch[1] << 8) | ch[2];
+        float a = ch[3] / 255.0f;
+        int r = (int)(ch[0] * a + 0xF0 * (1 - a));
+        int g = (int)(ch[1] * a + 0xF0 * (1 - a));
+        int b = (int)(ch[2] * a + 0xF0 * (1 - a));
+        return ((unsigned long)r << 16) | (g << 8) | b;
+    }
+
+    void redraw() {
+        dlg.fill(0, 0, dlg.width, dlg.height, 0xF0F0F0);
+
+        // Preview swatch.
+        dlg.fill(sw_x, sw_y, sw_w, sw_h, preview_pixel());
+        dlg.frame(sw_x, sw_y, sw_w, sw_h, 0x888888);
+        char hex[16];
+        snprintf(hex, sizeof(hex), "#%02X%02X%02X", ch[0], ch[1], ch[2]);
+        dlg.text(sw_x, sw_y + sw_h + dlg.line_h() + 4, hex, 0x000000);
+
+        const char* names[4] = {"R", "G", "B", "A"};
+        for (int i = 0; i < n_ch; ++i) {
+            int y = bar_y(i);
+            dlg.text(bar_x - 16, y + dlg.font->ascent + (bar_h - dlg.line_h()) / 2, names[i], 0x000000);
+            // Gradient bar: step the channel across the width.
+            for (int px = 0; px < bar_w; ++px) {
+                int rgb[3] = {ch[0], ch[1], ch[2]};
+                int v = px * 255 / (bar_w > 1 ? bar_w - 1 : 1);
+                unsigned long color;
+                if (i < 3) { rgb[i] = v; color = ((unsigned long)rgb[0] << 16) | (rgb[1] << 8) | rgb[2]; }
+                else       { color = ((unsigned long)v << 16) | (v << 8) | v; }   // alpha: grayscale
+                XSetForeground(dlg.display, dlg.gc, color);
+                XDrawLine(dlg.display, dlg.back, dlg.gc, bar_x + px, y, bar_x + px, y + bar_h);
+            }
+            dlg.frame(bar_x, y, bar_w, bar_h, 0x888888);
+            // Knob.
+            int kx = bar_x + ch[i] * (bar_w - 1) / 255;
+            dlg.fill(kx - 2, y - 3, 5, bar_h + 6, 0x202020);
+            char val[8]; snprintf(val, sizeof(val), "%d", ch[i]);
+            dlg.text(bar_x + bar_w + 8, y + dlg.font->ascent + (bar_h - dlg.line_h()) / 2, val, 0x000000);
+        }
+
+        dlg.button(ok);
+        dlg.button(cancel);
+        dlg.present();
+    }
+
+    int bar_at(int mx, int my) const {
+        for (int i = 0; i < n_ch; ++i) {
+            int y = bar_y(i);
+            if (mx >= bar_x - 4 && mx <= bar_x + bar_w + 4 && my >= y - 4 && my <= y + bar_h + 4)
+                return i;
+        }
+        return -1;
+    }
+
+    void set_from_x(int i, int mx) {
+        int v = (mx - bar_x) * 255 / (bar_w > 1 ? bar_w - 1 : 1);
+        if (v < 0) v = 0; if (v > 255) v = 255;
+        ch[i] = v;
+    }
+
+    ColorDialogResult run(const ColorDialogOptions& options, Window* parent) {
+        allow_alpha = options.allow_alpha;
+        n_ch = allow_alpha ? 4 : 3;
+        ch[0] = options.initial.r; ch[1] = options.initial.g;
+        ch[2] = options.initial.b; ch[3] = options.initial.a;
+
+        const char* title = !options.title.empty() ? options.title.c_str() : "Select Color";
+        if (!dlg.create(title, 420, 260, parent)) return result;
+        layout();
+        redraw();
+
+        while (!dlg.done) {
+            XEvent ev;
+            XNextEvent(dlg.display, &ev);
+            if (ev.xany.window != dlg.window && ev.type != ClientMessage) continue;
+            switch (ev.type) {
+                case Expose: if (ev.xexpose.count == 0) dlg.present(); break;
+                case ButtonPress: {
+                    int mx = ev.xbutton.x, my = ev.xbutton.y;
+                    if (ev.xbutton.button != Button1) break;
+                    if (cancel.contains(mx, my)) { dlg.done = true; break; }
+                    if (ok.contains(mx, my)) {
+                        result.color = {(uint8_t)ch[0], (uint8_t)ch[1], (uint8_t)ch[2],
+                                        allow_alpha ? (uint8_t)ch[3] : options.initial.a};
+                        result.ok = true; dlg.done = true; break;
+                    }
+                    dragging = bar_at(mx, my);
+                    if (dragging >= 0) { set_from_x(dragging, mx); redraw(); }
+                    break;
+                }
+                case ButtonRelease:
+                    if (ev.xbutton.button == Button1) dragging = -1;
+                    break;
+                case MotionNotify: {
+                    int mx = ev.xmotion.x, my = ev.xmotion.y;
+                    if (dragging >= 0 && (ev.xmotion.state & Button1Mask)) { set_from_x(dragging, mx); redraw(); break; }
+                    bool oh = ok.hovered, chh = cancel.hovered;
+                    ok.hovered = ok.contains(mx, my);
+                    cancel.hovered = cancel.contains(mx, my);
+                    if (oh != ok.hovered || chh != cancel.hovered) redraw();
+                    break;
+                }
+                case KeyPress: {
+                    KeySym ks = XLookupKeysym(&ev.xkey, 0);
+                    if (ks == XK_Escape) dlg.done = true;
+                    else if (ks == XK_Return || ks == XK_KP_Enter) {
+                        result.color = {(uint8_t)ch[0], (uint8_t)ch[1], (uint8_t)ch[2],
+                                        allow_alpha ? (uint8_t)ch[3] : options.initial.a};
+                        result.ok = true; dlg.done = true;
+                    }
+                    break;
+                }
+                case ClientMessage: if (is_close_event(dlg, ev)) dlg.done = true; break;
+            }
+        }
+        dlg.destroy();
+        return result;
+    }
+};
+
+//-------------------------------------------------------------------------
+// Font dialog (family list + size + bold/italic + preview)
+//-------------------------------------------------------------------------
+
+static std::vector<std::string> enumerate_font_families(Display* display) {
+    std::vector<std::string> fams;
+    int count = 0;
+    char** names = XListFonts(display, "-*-*-medium-r-normal-*-*-*-*-*-*-*-iso8859-1", 4000, &count);
+    if (names) {
+        for (int i = 0; i < count; ++i) {
+            // XLFD: -foundry-family-weight-slant-...; family is field index 2.
+            const char* p = names[i];
+            int field = 0; const char* fam_start = nullptr; const char* fam_end = nullptr;
+            for (const char* c = p; *c; ++c) {
+                if (*c == '-') {
+                    field++;
+                    if (field == 2) fam_start = c + 1;
+                    else if (field == 3) { fam_end = c; break; }
+                }
+            }
+            if (fam_start && fam_end && fam_end > fam_start)
+                fams.emplace_back(fam_start, fam_end);
+        }
+        XFreeFontNames(names);
+    }
+    std::sort(fams.begin(), fams.end());
+    fams.erase(std::unique(fams.begin(), fams.end()), fams.end());
+    if (fams.empty()) fams.push_back("fixed");
+    return fams;
+}
+
+struct X11FontDialog {
+    X11Dialog dlg;
+    std::vector<std::string> families;
+    int selected = 0;
+    int scroll = 0;
+    int size_pt = 12;
+    bool bold = false, italic = false;
+    XFontStruct* preview = nullptr;
+
+    int pad = 12;
+    int list_x = 0, list_y = 0, list_w = 0, list_h = 0, row_h = 0, visible_rows = 0;
+    X11Button ok, cancel, size_up, size_down, bold_btn, italic_btn;
+    int preview_y = 0;
+    FontDialogResult result;
+
+    void layout() {
+        row_h = dlg.line_h() + 6;
+        list_x = pad; list_y = pad + dlg.line_h() + 6;
+        list_w = 240;
+        list_h = 200;
+        visible_rows = list_h / row_h;
+
+        int rx = list_x + list_w + 20;
+        size_down = {"-", rx, list_y, 30, 28, false, false};
+        size_up   = {"+", rx + 90, list_y, 30, 28, false, false};
+        bold_btn   = {"Bold",   rx, list_y + 44, 80, 28, false, false};
+        italic_btn = {"Italic", rx + 90, list_y + 44, 80, 28, false, false};
+
+        preview_y = list_y + list_h + 16;
+        int by = dlg.height - pad - 30;
+        cancel = {"Cancel", dlg.width - pad - 90, by, 90, 30, false, false};
+        ok     = {"OK", dlg.width - pad - 90 - 10 - 90, by, 90, 30, false, true};
+    }
+
+    void load_preview() {
+        if (preview) { XFreeFont(dlg.display, preview); preview = nullptr; }
+        if (selected < 0 || selected >= (int)families.size()) return;
+        char xlfd[256];
+        snprintf(xlfd, sizeof(xlfd), "-*-%s-%s-%s-normal-*-%d-*-*-*-*-*-iso8859-1",
+                 families[selected].c_str(), bold ? "bold" : "medium",
+                 italic ? "i" : "r", size_pt > 0 ? size_pt : 12);
+        preview = XLoadQueryFont(dlg.display, xlfd);
+        if (!preview) {
+            // Try oblique slant, then any registry, before giving up.
+            snprintf(xlfd, sizeof(xlfd), "-*-%s-%s-%s-normal-*-%d-*-*-*-*-*-*-*",
+                     families[selected].c_str(), bold ? "bold" : "medium",
+                     italic ? "o" : "r", size_pt > 0 ? size_pt : 12);
+            preview = XLoadQueryFont(dlg.display, xlfd);
+        }
+    }
+
+    void clamp_scroll() {
+        int ms = (int)families.size() - visible_rows; if (ms < 0) ms = 0;
+        if (scroll > ms) scroll = ms; if (scroll < 0) scroll = 0;
+    }
+
+    void redraw() {
+        dlg.fill(0, 0, dlg.width, dlg.height, 0xF0F0F0);
+        dlg.text(pad, pad + dlg.font->ascent, "Family", 0x000000);
+
+        dlg.fill(list_x, list_y, list_w, list_h, 0xFFFFFF);
+        dlg.frame(list_x, list_y, list_w, list_h, 0x888888);
+        for (int i = 0; i < visible_rows; ++i) {
+            int idx = scroll + i; if (idx >= (int)families.size()) break;
+            int ry = list_y + i * row_h;
+            if (idx == selected) dlg.fill(list_x + 1, ry + 1, list_w - 2, row_h, 0x4488CC);
+            dlg.text_clipped(list_x + 6, ry + dlg.font->ascent + 3, families[idx],
+                             idx == selected ? 0xFFFFFF : 0x000000,
+                             list_x + 1, ry + 1, list_w - 2, row_h);
+        }
+
+        char sz[32]; snprintf(sz, sizeof(sz), "Size: %d", size_pt);
+        dlg.text(size_down.x + 38, size_down.y + dlg.font->ascent + 6, sz, 0x000000);
+        dlg.button(size_down); dlg.button(size_up);
+        bold_btn.primary = bold; italic_btn.primary = italic;
+        dlg.button(bold_btn); dlg.button(italic_btn);
+
+        // Preview.
+        dlg.fill(pad, preview_y, dlg.width - pad * 2, dlg.height - preview_y - 50, 0xFFFFFF);
+        dlg.frame(pad, preview_y, dlg.width - pad * 2, dlg.height - preview_y - 50, 0x888888);
+        const char* sample = "AaBbYyZz 0123";
+        if (preview) {
+            XSetFont(dlg.display, dlg.gc, preview->fid);
+            XSetForeground(dlg.display, dlg.gc, 0x000000);
+            XDrawString(dlg.display, dlg.back, dlg.gc, pad + 10,
+                        preview_y + 10 + preview->ascent, sample, (int)strlen(sample));
+            XSetFont(dlg.display, dlg.gc, dlg.font->fid);   // restore UI font
+        } else {
+            dlg.text(pad + 10, preview_y + 10 + dlg.font->ascent, sample, 0x000000);
+        }
+
+        dlg.button(ok);
+        dlg.button(cancel);
+        dlg.present();
+    }
+
+    FontDialogResult run(const FontDialogOptions& options, Window* parent) {
+        size_pt = (int)(options.initial.size_pt + 0.5f); if (size_pt < 1) size_pt = 12;
+        bold = options.initial.bold; italic = options.initial.italic;
+
+        const char* title = !options.title.empty() ? options.title.c_str() : "Select Font";
+        if (!dlg.create(title, 520, 420, parent)) return result;
+        families = enumerate_font_families(dlg.display);
+        if (!options.initial.family.empty()) {
+            std::string want = to_lower(options.initial.family);
+            for (int i = 0; i < (int)families.size(); ++i)
+                if (to_lower(families[i]) == want) { selected = i; break; }
+        }
+        layout();   // sets visible_rows
+        scroll = (selected >= visible_rows) ? selected - visible_rows + 1 : 0;
+        clamp_scroll();
+        load_preview();
+        redraw();
+
+        while (!dlg.done) {
+            XEvent ev;
+            XNextEvent(dlg.display, &ev);
+            if (ev.xany.window != dlg.window && ev.type != ClientMessage) continue;
+            switch (ev.type) {
+                case Expose: if (ev.xexpose.count == 0) dlg.present(); break;
+                case ButtonPress: {
+                    int mx = ev.xbutton.x, my = ev.xbutton.y;
+                    if (ev.xbutton.button == Button4) { scroll--; clamp_scroll(); redraw(); break; }
+                    if (ev.xbutton.button == Button5) { scroll++; clamp_scroll(); redraw(); break; }
+                    if (ev.xbutton.button != Button1) break;
+                    if (cancel.contains(mx, my)) { dlg.done = true; break; }
+                    if (ok.contains(mx, my)) {
+                        result.font = options.initial;
+                        if (selected >= 0 && selected < (int)families.size())
+                            result.font.family = families[selected];
+                        result.font.size_pt = (float)size_pt;
+                        result.font.bold = bold; result.font.italic = italic;
+                        result.ok = true; dlg.done = true; break;
+                    }
+                    if (size_down.contains(mx, my)) { if (size_pt > 1) size_pt--; load_preview(); redraw(); break; }
+                    if (size_up.contains(mx, my))   { if (size_pt < 96) size_pt++; load_preview(); redraw(); break; }
+                    if (bold_btn.contains(mx, my))  { bold = !bold; load_preview(); redraw(); break; }
+                    if (italic_btn.contains(mx, my)){ italic = !italic; load_preview(); redraw(); break; }
+                    if (mx >= list_x && mx < list_x + list_w && my >= list_y && my < list_y + list_h) {
+                        int idx = scroll + (my - list_y) / row_h;
+                        if (idx >= 0 && idx < (int)families.size()) { selected = idx; load_preview(); redraw(); }
+                    }
+                    break;
+                }
+                case MotionNotify: {
+                    int mx = ev.xmotion.x, my = ev.xmotion.y;
+                    bool changed = false;
+                    auto upd = [&](X11Button& b){ bool h = b.contains(mx,my); if (h!=b.hovered){b.hovered=h; changed=true;} };
+                    upd(ok); upd(cancel); upd(size_up); upd(size_down); upd(bold_btn); upd(italic_btn);
+                    if (changed) redraw();
+                    break;
+                }
+                case KeyPress: {
+                    KeySym ks = XLookupKeysym(&ev.xkey, 0);
+                    if (ks == XK_Escape) dlg.done = true;
+                    else if (ks == XK_Up && selected > 0) { selected--; if (selected < scroll) scroll = selected; load_preview(); redraw(); }
+                    else if (ks == XK_Down && selected + 1 < (int)families.size()) { selected++; if (selected >= scroll + visible_rows) scroll = selected - visible_rows + 1; load_preview(); redraw(); }
+                    break;
+                }
+                case ClientMessage: if (is_close_event(dlg, ev)) dlg.done = true; break;
+            }
+        }
+        if (preview) XFreeFont(dlg.display, preview);
+        preview = nullptr;
+        dlg.destroy();
+        return result;
+    }
+};
+
+} // anonymous namespace
+
+FileDialogResult Window::show_open_file_dialog(const FileDialogOptions& options) {
+    X11FileDialog d; return d.run(options, /*save*/false, /*folder*/false, options.parent);
+}
+FileDialogResult Window::show_save_file_dialog(const FileDialogOptions& options) {
+    X11FileDialog d; return d.run(options, /*save*/true, /*folder*/false, options.parent);
+}
+FileDialogResult Window::show_folder_dialog(const FileDialogOptions& options) {
+    X11FileDialog d; return d.run(options, /*save*/false, /*folder*/true, options.parent);
+}
+ColorDialogResult Window::show_color_dialog(const ColorDialogOptions& options) {
+    X11ColorDialog d; return d.run(options, options.parent);
+}
+FontDialogResult Window::show_font_dialog(const FontDialogOptions& options) {
+    X11FontDialog d; return d.run(options, options.parent);
 }
 
 } // namespace window

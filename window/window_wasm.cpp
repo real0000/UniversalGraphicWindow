@@ -765,6 +765,22 @@ void Window::show_message_box_async(
     }
 }
 
+//=============================================================================
+// Common Dialogs
+//=============================================================================
+// In the browser, file/color selection happens through DOM elements
+// (<input type="file">, <input type="color">) that report their result via
+// asynchronous events. A blocking call cannot wait for them without ASYNCIFY,
+// so these return a cancelled result; a real implementation would drive the
+// DOM element from JS and complete via the *_async callback variants.
+// TODO(wasm): back show_*_async with <input> elements via Emscripten.
+
+FileDialogResult Window::show_open_file_dialog(const FileDialogOptions&) { return FileDialogResult{}; }
+FileDialogResult Window::show_save_file_dialog(const FileDialogOptions&) { return FileDialogResult{}; }
+FileDialogResult Window::show_folder_dialog(const FileDialogOptions&)    { return FileDialogResult{}; }
+ColorDialogResult Window::show_color_dialog(const ColorDialogOptions& o) { ColorDialogResult r; r.color = o.initial; return r; }
+FontDialogResult  Window::show_font_dialog(const FontDialogOptions& o)   { FontDialogResult r; r.font = o.initial; return r; }
+
 } // namespace window
 
 #endif // WINDOW_PLATFORM_WASM
