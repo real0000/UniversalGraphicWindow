@@ -69,6 +69,7 @@ public:
     HDC hdc = nullptr;
     HGLRC hglrc = nullptr;
     std::string device_name;
+    SwapMode swap_mode = SwapMode::Fifo;  // effective mode (maps to the WGL swap interval)
 
     ~GraphicsOpenGL() override {
         if (hglrc) {
@@ -106,6 +107,11 @@ public:
     void* native_device() const override { return nullptr; }
     void* native_context() const override { return hglrc; }
     void* native_swapchain() const override { return hdc; }
+
+    // A WGL context is double-buffered (front + back); there is no configurable swapchain
+    // length, so the requested Config::back_buffers is not honoured -- always 2.
+    int get_backbuffer_count() const override { return 2; }
+    SwapMode get_swap_mode() const override { return swap_mode; }
 
     void get_capabilities(GraphicsCapabilities* out_caps) const override {
         if (!out_caps || !hglrc || !hdc) return;
@@ -354,31 +360,19 @@ Graphics* create_opengl_graphics_hwnd(void* hwnd_ptr, const Config& config) {
         return nullptr;
     }
 
-    // Set swap interval based on swap_mode
+    // Resolve the effective swap mode. WGL has no true mailbox, so a Mailbox request
+    // becomes vsync (Fifo); the others map onto the WGL swap interval.
+    SwapMode eff_mode = config.swap_mode;
+    if (eff_mode == SwapMode::Auto)    eff_mode = config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
+    if (eff_mode == SwapMode::Mailbox) eff_mode = SwapMode::Fifo;
+
     if (wglSwapIntervalEXT) {
-        int interval = 1;  // Default to vsync
-        SwapMode swap_mode = config.swap_mode;
-        if (swap_mode == SwapMode::Auto) {
-            swap_mode = config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
-        }
-        switch (swap_mode) {
-            case SwapMode::Immediate:
-                interval = 0;
-                break;
-            case SwapMode::Mailbox:
-                // OpenGL doesn't have true mailbox, use vsync
-                interval = 1;
-                break;
-            case SwapMode::FifoRelaxed:
-                // Adaptive vsync: -1 requires WGL_EXT_swap_control_tear
-                // Falls back to regular vsync if not supported
-                interval = -1;
-                break;
+        int interval = 1;  // vsync
+        switch (eff_mode) {
+            case SwapMode::Immediate:   interval = 0;  break;  // no vsync
+            case SwapMode::FifoRelaxed: interval = -1; break;  // adaptive vsync (falls back to 1 if unsupported)
             case SwapMode::Fifo:
-            case SwapMode::Auto:
-            default:
-                interval = 1;
-                break;
+            default:                    interval = 1;  break;
         }
         wglSwapIntervalEXT(interval);
     }
@@ -387,6 +381,7 @@ Graphics* create_opengl_graphics_hwnd(void* hwnd_ptr, const Config& config) {
     gfx->hwnd = hwnd;
     gfx->hdc = hdc;
     gfx->hglrc = hglrc;
+    gfx->swap_mode = eff_mode;
     gfx->device_name = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
 
     return gfx;

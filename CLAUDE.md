@@ -31,6 +31,8 @@ cd build && ctest -C Release
 - `-DWINDOW_ENABLE_AUDIO=ON|OFF` - Audio support (default: ON)
 - `-DWINDOW_ENABLE_HARFBUZZ=ON|OFF` - HarfBuzz text shaping (default: ON)
 - `-DWINDOW_ENABLE_LIBUNIBREAK=ON|OFF` - libunibreak Unicode line breaking (default: ON)
+- `-DWINDOW_ENABLE_VIDEO=ON|OFF` - GStreamer video renderer (renderer/video/). **Default: OFF** — turning it on makes CMake **build GStreamer from source** (heavy/slow). GStreamer only builds with Meson+Ninja, so CMake **bootstraps both itself**: it builds Ninja from source if absent and runs Meson from a fetched checkout via Python — the only prerequisite is **Python 3** (plus git/network). Without this option the VideoPlayer API still links but reports `ErrorUnsupported`.
+- `-DWINDOW_VIDEO_ZERO_COPY=ON|OFF` - GPU zero-copy frame import (GstGLMemory/GstD3D11Memory → `GraphicDevice::import_texture`); CPU-upload fallback otherwise (default: ON)
 
 Example executables are built as `example_basic`, `example_opengl`, `example_vulkan`, `example_d3d11`, `example_d3d12`, `example_metal`, `example_gamepad`, `example_wheel`, `example_audio` in the build directory.
 
@@ -342,6 +344,39 @@ UniversalGraphicWindow/
 │   ├── glad.c
 │   ├── glad.h
 │   └── khrplatform.h
+├── renderer/           # Higher-level GPU subsystems (built on the graphics abstraction)
+│   ├── material.cpp/.hpp        # Material / shader-parameter sets
+│   ├── vector_renderer.cpp/.hpp # Immediate-mode 2D/3D line + primitive batch renderer
+│   ├── gui_renderer.cpp/.hpp    # GPU GUI renderer (needs WINDOW_ENABLE_GUI)
+│   ├── gui_text_rasterizer.cpp/.hpp
+│   ├── shaders/                 # Material HLSL read at runtime (pbr/quad .hlsl + .material) +
+│   │                           #   lights.hlsli. Engine shaders (vector/gui/space_partition) are
+│   │                           #   inline HLSL in their .cpp, compiled cross-API by the built-in
+│   │                           #   shader_compiler/ (cached in cache/shader/) -- no prebuilt blobs
+│   ├── shader_compiler/         # Built-in HLSL -> SPIR-V/GLSL/DXBC/MSL compiler (glslang +
+│   │   └── shader_compiler.cpp/.hpp #   SPIRV-Cross + d3dcompiler); runtime API + on-disk cache.
+│   │                               #   Material + all engine shaders compile HLSL through this.
+│   ├── light/                   # All light types (Directional/Point/Spot/Area) + LightBuffer;
+│   │   └── light.cpp/.hpp          #   manages the GPU light buffer only, no shading
+│   ├── buffer/                  # Typed RAII buffer/texture wrappers + view model
+│   │   ├── gpu_buffer.cpp/.hpp      # Buffer + Vertex/Index/Const/Storage/Indirect + BufferView
+│   │   └── gpu_texture.cpp/.hpp     # Texture + TextureView (one resource, many views)
+│   ├── space_partition/         # Scene-partition family (CPU + GPU, cross-API)
+│   │   ├── space_partition.cpp/.hpp # Shared SceneItem / GridParams / Frustum / PartitionLeaves
+│   │   ├── uniform_grid.cpp/.hpp    # CPU uniform grid (counting-sort CSR) + queries + broad-phase
+│   │   ├── bvh.cpp/.hpp             # CPU binary BVH (median split)
+│   │   ├── octree.cpp/.hpp          # CPU 8-way octree
+│   │   ├── quadtree.cpp/.hpp        # CPU 4-way XZ quadtree
+│   │   ├── bsp.cpp/.hpp             # CPU axis-aligned BSP / kd-tree
+│   │   ├── gpu_uniform_grid.cpp/.hpp# GPU grid: compute build (bucket insert) + frustum cull
+│   │   ├── gpu_leaf_cull.cpp/.hpp   # GPU frustum cull of any tree's flattened leaves (compute)
+│   │   └── gpu_lbvh.cpp/.hpp        # GPU Linear BVH: Morton id + GPU sort/build (Karras) + broad-phase
+│   │                               #   (compute shaders live in renderer/shaders/, not here)
+│   ├── assets/                  # Image + 3D model loading & GPU management
+│   ├── video/                   # GStreamer video player (renderer/video/, WINDOW_ENABLE_VIDEO)
+│   │   └── video_renderer.cpp/.hpp # playbin -> GPU TextureHandle (zero-copy import_texture
+│   │                               #   on D3D11/GL, CPU-upload fallback) + audio via UGW AudioStream
+│   └── css/                     # CSS-look GUI theme (style presets)
 ├── audio/              # Audio backends
 │   ├── audio.hpp            # Audio public header
 │   ├── audio.cpp            # Platform-independent utilities

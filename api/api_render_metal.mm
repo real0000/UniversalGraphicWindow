@@ -47,12 +47,69 @@ MTLPixelFormat tex_format(TextureFormat f) {
         case TextureFormat::RGBA32_FLOAT: return MTLPixelFormatRGBA32Float;
         case TextureFormat::D32_FLOAT: return MTLPixelFormatDepth32Float;
         case TextureFormat::D24_UNORM_S8_UINT: return MTLPixelFormatDepth24Unorm_Stencil8;
+#if TARGET_OS_OSX
+        // BCn is a macOS-only Metal feature (absent from the iOS SDK enum).
+        case TextureFormat::BC1_UNORM: return MTLPixelFormatBC1_RGBA;
+        case TextureFormat::BC1_UNORM_SRGB: return MTLPixelFormatBC1_RGBA_sRGB;
+        case TextureFormat::BC2_UNORM: return MTLPixelFormatBC2_RGBA;
+        case TextureFormat::BC2_UNORM_SRGB: return MTLPixelFormatBC2_RGBA_sRGB;
+        case TextureFormat::BC3_UNORM: return MTLPixelFormatBC3_RGBA;
+        case TextureFormat::BC3_UNORM_SRGB: return MTLPixelFormatBC3_RGBA_sRGB;
+        case TextureFormat::BC4_UNORM: return MTLPixelFormatBC4_RUnorm;
+        case TextureFormat::BC4_SNORM: return MTLPixelFormatBC4_RSnorm;
+        case TextureFormat::BC5_UNORM: return MTLPixelFormatBC5_RGUnorm;
+        case TextureFormat::BC5_SNORM: return MTLPixelFormatBC5_RGSnorm;
+        case TextureFormat::BC6H_UF16: return MTLPixelFormatBC6H_RGBUfloat;
+        case TextureFormat::BC6H_SF16: return MTLPixelFormatBC6H_RGBFloat;
+        case TextureFormat::BC7_UNORM: return MTLPixelFormatBC7_RGBAUnorm;
+        case TextureFormat::BC7_UNORM_SRGB: return MTLPixelFormatBC7_RGBAUnorm_sRGB;
+#endif
+        // ETC2/EAC + ASTC: Apple-GPU formats (iOS + Apple-silicon macOS). Enum present
+        // in both SDKs; creation fails gracefully where the GPU lacks support.
+        case TextureFormat::ETC2_RGB8: return MTLPixelFormatETC2_RGB8;
+        case TextureFormat::ETC2_RGB8_SRGB: return MTLPixelFormatETC2_RGB8_sRGB;
+        case TextureFormat::ETC2_RGB8A1: return MTLPixelFormatETC2_RGB8A1;
+        case TextureFormat::ETC2_RGB8A1_SRGB: return MTLPixelFormatETC2_RGB8A1_sRGB;
+        case TextureFormat::ETC2_RGBA8: return MTLPixelFormatEAC_RGBA8;
+        case TextureFormat::ETC2_RGBA8_SRGB: return MTLPixelFormatEAC_RGBA8_sRGB;
+        case TextureFormat::EAC_R11_UNORM: return MTLPixelFormatEAC_R11Unorm;
+        case TextureFormat::EAC_R11_SNORM: return MTLPixelFormatEAC_R11Snorm;
+        case TextureFormat::EAC_RG11_UNORM: return MTLPixelFormatEAC_RG11Unorm;
+        case TextureFormat::EAC_RG11_SNORM: return MTLPixelFormatEAC_RG11Snorm;
+        case TextureFormat::ASTC_4x4_UNORM: return MTLPixelFormatASTC_4x4_LDR;
+        case TextureFormat::ASTC_4x4_SRGB: return MTLPixelFormatASTC_4x4_sRGB;
+        case TextureFormat::ASTC_5x4_UNORM: return MTLPixelFormatASTC_5x4_LDR;
+        case TextureFormat::ASTC_5x4_SRGB: return MTLPixelFormatASTC_5x4_sRGB;
+        case TextureFormat::ASTC_5x5_UNORM: return MTLPixelFormatASTC_5x5_LDR;
+        case TextureFormat::ASTC_5x5_SRGB: return MTLPixelFormatASTC_5x5_sRGB;
+        case TextureFormat::ASTC_6x5_UNORM: return MTLPixelFormatASTC_6x5_LDR;
+        case TextureFormat::ASTC_6x5_SRGB: return MTLPixelFormatASTC_6x5_sRGB;
+        case TextureFormat::ASTC_6x6_UNORM: return MTLPixelFormatASTC_6x6_LDR;
+        case TextureFormat::ASTC_6x6_SRGB: return MTLPixelFormatASTC_6x6_sRGB;
+        case TextureFormat::ASTC_8x5_UNORM: return MTLPixelFormatASTC_8x5_LDR;
+        case TextureFormat::ASTC_8x5_SRGB: return MTLPixelFormatASTC_8x5_sRGB;
+        case TextureFormat::ASTC_8x6_UNORM: return MTLPixelFormatASTC_8x6_LDR;
+        case TextureFormat::ASTC_8x6_SRGB: return MTLPixelFormatASTC_8x6_sRGB;
+        case TextureFormat::ASTC_8x8_UNORM: return MTLPixelFormatASTC_8x8_LDR;
+        case TextureFormat::ASTC_8x8_SRGB: return MTLPixelFormatASTC_8x8_sRGB;
+        case TextureFormat::ASTC_10x5_UNORM: return MTLPixelFormatASTC_10x5_LDR;
+        case TextureFormat::ASTC_10x5_SRGB: return MTLPixelFormatASTC_10x5_sRGB;
+        case TextureFormat::ASTC_10x6_UNORM: return MTLPixelFormatASTC_10x6_LDR;
+        case TextureFormat::ASTC_10x6_SRGB: return MTLPixelFormatASTC_10x6_sRGB;
+        case TextureFormat::ASTC_10x8_UNORM: return MTLPixelFormatASTC_10x8_LDR;
+        case TextureFormat::ASTC_10x8_SRGB: return MTLPixelFormatASTC_10x8_sRGB;
+        case TextureFormat::ASTC_10x10_UNORM: return MTLPixelFormatASTC_10x10_LDR;
+        case TextureFormat::ASTC_10x10_SRGB: return MTLPixelFormatASTC_10x10_sRGB;
+        case TextureFormat::ASTC_12x10_UNORM: return MTLPixelFormatASTC_12x10_LDR;
+        case TextureFormat::ASTC_12x10_SRGB: return MTLPixelFormatASTC_12x10_sRGB;
+        case TextureFormat::ASTC_12x12_UNORM: return MTLPixelFormatASTC_12x12_LDR;
+        case TextureFormat::ASTC_12x12_SRGB: return MTLPixelFormatASTC_12x12_sRGB;
         default: return MTLPixelFormatRGBA8Unorm;
     }
 }
 
 struct MTBuffer  { id<MTLBuffer> buf = nil; uint32_t size = 0; };
-struct MTTexture { id<MTLTexture> tex = nil; MTLPixelFormat fmt = MTLPixelFormatRGBA8Unorm; int w = 0, h = 0; };
+struct MTTexture { id<MTLTexture> tex = nil; MTLPixelFormat fmt = MTLPixelFormatRGBA8Unorm; TextureFormat tf = TextureFormat::RGBA8_UNORM; int w = 0, h = 0; };
 struct MTSampler { id<MTLSamplerState> s = nil; };
 struct MTShader  { id<MTLFunction> fn = nil; ShaderStage stage = ShaderStage::Vertex; };
 struct MTPipeline{ id<MTLRenderPipelineState> rps = nil; id<MTLComputePipelineState> cps = nil; id<MTLDepthStencilState> dss = nil; bool compute = false; };
@@ -87,7 +144,7 @@ public:
     void destroy_buffer(BufferHandle h) override { buffers_.release(h.id); }
 
     TextureHandle create_texture(const TextureDesc& d) override {
-        MTTexture t; t.fmt = tex_format(d.format); t.w = d.width; t.h = d.height;
+        MTTexture t; t.fmt = tex_format(d.format); t.tf = d.format; t.w = d.width; t.h = d.height;
         MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.fmt width:d.width height:d.height mipmapped:(d.mip_levels != 1)];
         if (d.array_layers > 1) { td.textureType = MTLTextureType2DArray; td.arrayLength = d.array_layers; }
         MTLTextureUsage u = 0;
@@ -102,7 +159,7 @@ public:
     }
     void update_texture(TextureHandle h, const TextureRegion& r, const void* data) override {
         auto* t = textures_.get(h.id); if (!t || !t->tex || !data) return;
-        [t->tex replaceRegion:MTLRegionMake2D(r.x, r.y, r.width, r.height) mipmapLevel:r.mip withBytes:data bytesPerRow:r.width * 4];
+        [t->tex replaceRegion:MTLRegionMake2D(r.x, r.y, r.width, r.height) mipmapLevel:r.mip withBytes:data bytesPerRow:(NSUInteger)texture_format_row_pitch(t->tf, r.width)];
     }
     void generate_mipmaps(TextureHandle h) override { auto* t = textures_.get(h.id); if (!t) return; id<MTLCommandBuffer> cb = [queue commandBuffer]; id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder]; [e generateMipmapsForTexture:t->tex]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; }
     void destroy_texture(TextureHandle h) override { textures_.release(h.id); }
@@ -143,6 +200,19 @@ public:
     void destroy_render_target(RenderTargetHandle h) override { auto* rt = rts_.get(h.id); if (!rt) return; if (rt->color_tex >= 0) destroy_texture({ rt->color_tex }); if (rt->depth_tex >= 0) destroy_texture({ rt->depth_tex }); rts_.release(h.id); }
     TextureHandle create_texture_view(const TextureViewDesc& d) override { auto* s = textures_.get(d.texture.id); if (!s) return { -1 }; MTTexture v; v.fmt = (d.format == TextureFormat::Unknown) ? s->fmt : tex_format(d.format); v.w = s->w; v.h = s->h; v.tex = [s->tex newTextureViewWithPixelFormat:v.fmt]; return { textures_.alloc(v) }; }
 
+    // Zero-copy interop: wrap an existing id<MTLTexture> (e.g. from a GStreamer Metal/
+    // IOSurface-backed frame on this MTLDevice) as a sampled RHI texture. ARC manages
+    // shared ownership: storing it in MTTexture::tex (a strong ref) retains it while in
+    // use; the external producer keeps its own reference, so destroy_texture is safe.
+    TextureHandle import_texture(const NativeTextureDesc& d) override {
+        id<MTLTexture> native = (__bridge id<MTLTexture>)d.metal_texture;
+        if (!native) { mtl_unsupported("import_texture (null metal_texture)"); return { -1 }; }
+        MTTexture t; t.tex = native; t.tf = d.format; t.fmt = native.pixelFormat;
+        t.w = d.width > 0 ? d.width : (int)native.width;
+        t.h = d.height > 0 ? d.height : (int)native.height;
+        return { textures_.alloc(t) };
+    }
+
     // MTLSharedEvent doubles as fence and native timeline.
     FenceHandle create_fence(bool) override { MTFence f; f.ev = [dev newSharedEvent]; f.value = 0; return { fences_.alloc(f) }; }
     void destroy_fence(FenceHandle h) override { fences_.release(h.id); }
@@ -165,7 +235,7 @@ public:
     void* map_buffer(BufferHandle h, uint32_t offset, uint32_t) override { auto* b = buffers_.get(h.id); return b && b->buf ? (uint8_t*)b->buf.contents + offset : nullptr; }   // shared storage
     void unmap_buffer(BufferHandle) override {}
     void read_buffer(BufferHandle h, void* dst, uint32_t size, uint32_t offset) override { auto* b = buffers_.get(h.id); if (b && b->buf && dst) std::memcpy(dst, (uint8_t*)b->buf.contents + offset, size); }
-    void read_texture(TextureHandle h, const TextureRegion& r, void* dst) override { auto* t = textures_.get(h.id); if (t && t->tex && dst) [t->tex getBytes:dst bytesPerRow:r.width * 4 fromRegion:MTLRegionMake2D(r.x, r.y, r.width, r.height) mipmapLevel:r.mip]; }
+    void read_texture(TextureHandle h, const TextureRegion& r, void* dst) override { auto* t = textures_.get(h.id); if (t && t->tex && dst) [t->tex getBytes:dst bytesPerRow:(NSUInteger)texture_format_row_pitch(t->tf, r.width) fromRegion:MTLRegionMake2D(r.x, r.y, r.width, r.height) mipmapLevel:r.mip]; }
 
     DescriptorSetLayoutHandle create_descriptor_set_layout(const DescriptorSetLayoutDesc& d) override { return { dsls_.alloc(MTDescSetLayout{ d }) }; }
     void destroy_descriptor_set_layout(DescriptorSetLayoutHandle h) override { dsls_.release(h.id); }

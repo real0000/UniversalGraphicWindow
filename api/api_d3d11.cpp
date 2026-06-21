@@ -40,6 +40,8 @@ static DXGI_FORMAT get_dxgi_format(int color_bits) {
 // D3D11 Graphics Implementation
 //=============================================================================
 
+static double primary_refresh_period();   // defined below; used by present()
+
 class GraphicsD3D11 : public Graphics {
 public:
     ID3D11Device* device = nullptr;
@@ -48,7 +50,12 @@ public:
     std::string device_name;
     bool owns_device = true;
     SwapMode swap_mode = SwapMode::Fifo;
-    bool allow_tearing = false;
+    bool allow_tearing = false;   // swapchain created with ALLOW_TEARING (Immediate / FifoRelaxed)
+    int buffer_count = 2;
+    // FifoRelaxed adaptive-sync timing (present unsynced when a frame ran long).
+    LARGE_INTEGER qpc_freq_{}, last_present_{};
+    double refresh_period_ = 1.0 / 60.0;
+    bool timing_init_ = false;
 
     ~GraphicsD3D11() override {
         if (swap_chain) swap_chain->Release();
@@ -73,30 +80,45 @@ public:
     }
 
     void present() override {
-        if (swap_chain) {
-            UINT sync_interval = 1;
-            UINT flags = 0;
-            switch (swap_mode) {
-                case SwapMode::Immediate:
-                    sync_interval = 0;
-                    if (allow_tearing) flags = DXGI_PRESENT_ALLOW_TEARING;
-                    break;
-                case SwapMode::Mailbox:
-                    // Mailbox-like behavior: vsync but drop frames if too fast
-                    sync_interval = 1;
-                    break;
-                case SwapMode::FifoRelaxed:
-                    // Present immediately if we missed vsync
-                    sync_interval = 1;
-                    break;
-                case SwapMode::Fifo:
-                case SwapMode::Auto:
-                default:
-                    sync_interval = 1;
-                    break;
-            }
-            swap_chain->Present(sync_interval, flags);
+        if (!swap_chain) return;
+        if (!timing_init_) {
+            QueryPerformanceFrequency(&qpc_freq_);
+            refresh_period_ = primary_refresh_period();
+            timing_init_ = true;
         }
+        UINT sync_interval = 1;
+        UINT flags = 0;
+        switch (swap_mode) {
+            case SwapMode::Immediate:
+                // No vsync, lowest latency, may tear (needs the tearing flag in windowed flip).
+                sync_interval = 0;
+                if (allow_tearing) flags = DXGI_PRESENT_ALLOW_TEARING;
+                break;
+            case SwapMode::Mailbox:
+                // Flip-model windowed: SyncInterval 0 WITHOUT the tearing flag lets the DWM
+                // composite the newest frame at its vblank (no tearing) and discard stale ones
+                // -- true mailbox. (Adding ALLOW_TEARING would turn this into Immediate.)
+                sync_interval = 0;
+                break;
+            case SwapMode::FifoRelaxed: {
+                // Adaptive: vsync, but if the just-finished frame ran longer than a refresh
+                // interval, present unsynced (tear) to catch up instead of waiting a full vblank.
+                sync_interval = 1;
+                LARGE_INTEGER now; QueryPerformanceCounter(&now);
+                if (last_present_.QuadPart != 0 && qpc_freq_.QuadPart != 0) {
+                    double dt = double(now.QuadPart - last_present_.QuadPart) / double(qpc_freq_.QuadPart);
+                    if (dt > refresh_period_) { sync_interval = 0; if (allow_tearing) flags = DXGI_PRESENT_ALLOW_TEARING; }
+                }
+                last_present_ = now;
+                break;
+            }
+            case SwapMode::Fifo:
+            case SwapMode::Auto:
+            default:
+                sync_interval = 1;
+                break;
+        }
+        swap_chain->Present(sync_interval, flags);
     }
 
     void make_current() override {
@@ -107,6 +129,15 @@ public:
     void* native_device() const override { return device; }
     void* native_context() const override { return context; }
     void* native_swapchain() const override { return swap_chain; }
+
+    int get_backbuffer_count() const override {
+        if (swap_chain) {
+            DXGI_SWAP_CHAIN_DESC1 d = {};
+            if (SUCCEEDED(swap_chain->GetDesc1(&d))) return static_cast<int>(d.BufferCount);
+        }
+        return buffer_count;
+    }
+    SwapMode get_swap_mode() const override { return swap_mode; }
 
     void get_capabilities(GraphicsCapabilities* out_caps) const override {
         if (!out_caps || !device) return;
@@ -246,6 +277,20 @@ static SwapMode resolve_swap_mode(const Config& config) {
     return config.vsync ? SwapMode::Fifo : SwapMode::Immediate;
 }
 
+// The primary display's refresh period (seconds); used by FifoRelaxed adaptive sync.
+static double primary_refresh_period() {
+    DEVMODE dm = {}; dm.dmSize = sizeof(dm);
+    if (EnumDisplaySettings(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
+        return 1.0 / double(dm.dmDisplayFrequency);
+    return 1.0 / 60.0;
+}
+
+// Modes that present unsynchronised (and thus need the swapchain ALLOW_TEARING flag):
+// Immediate always tears; FifoRelaxed tears only on a late frame.
+static bool mode_needs_tearing(SwapMode m) {
+    return m == SwapMode::Immediate || m == SwapMode::FifoRelaxed;
+}
+
 Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     ID3D11Device* device = nullptr;
     ID3D11DeviceContext* context = nullptr;
@@ -303,7 +348,7 @@ Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = config.back_buffers;
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Flags = (allow_tearing && swap_mode == SwapMode::Immediate) ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    sd.Flags = (allow_tearing && mode_needs_tearing(swap_mode)) ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     IDXGISwapChain1* swap_chain;
     HRESULT hr = factory->CreateSwapChainForHwnd(device, static_cast<HWND>(hwnd), &sd, nullptr, nullptr, &swap_chain);
@@ -324,7 +369,8 @@ Graphics* create_d3d11_graphics_hwnd(void* hwnd, const Config& config) {
     gfx->swap_chain = swap_chain;
     gfx->owns_device = owns_device;
     gfx->swap_mode = swap_mode;
-    gfx->allow_tearing = allow_tearing && (swap_mode == SwapMode::Immediate);
+    gfx->allow_tearing = allow_tearing && mode_needs_tearing(swap_mode);
+    gfx->buffer_count = config.back_buffers;
 
     gfx->device_name = internal::wide_to_utf8(adapter_desc.Description);
 
@@ -400,6 +446,7 @@ Graphics* create_d3d11_graphics_corewindow(void* core_window, int width, int hei
     gfx->swap_chain = swap_chain;
     gfx->swap_mode = swap_mode;
     gfx->allow_tearing = false;  // UWP doesn't support tearing
+    gfx->buffer_count = config.back_buffers;
 
     gfx->device_name = internal::wide_to_utf8(adapter_desc.Description);
 

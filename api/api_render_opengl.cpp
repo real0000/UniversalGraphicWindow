@@ -65,9 +65,74 @@ GLenum gl_image_access(StorageAccess a) {
 //-----------------------------------------------------------------------------
 // Enum / format conversions
 //-----------------------------------------------------------------------------
-struct GLFormat { GLint internal_fmt; GLenum format; GLenum type; bool depth; bool stencil; };
+struct GLFormat { GLint internal_fmt; GLenum format; GLenum type; bool depth; bool stencil; bool compressed = false; };
+
+// The GL internal format for a block-compressed TextureFormat (used by glTexStorage2D
+// + glCompressedTexSubImage2D). 0 for uncompressed. Covers S3TC/RGTC/BPTC (desktop)
+// and ETC2/EAC/ASTC (GLES / desktop with the relevant extension).
+GLenum gl_compressed_internal(TextureFormat f) {
+    switch (f) {
+        case TextureFormat::BC1_UNORM:        return GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+        case TextureFormat::BC1_UNORM_SRGB:   return GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT;
+        case TextureFormat::BC2_UNORM:        return GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+        case TextureFormat::BC2_UNORM_SRGB:   return GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT;
+        case TextureFormat::BC3_UNORM:        return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        case TextureFormat::BC3_UNORM_SRGB:   return GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT;
+        case TextureFormat::BC4_UNORM:        return GL_COMPRESSED_RED_RGTC1;
+        case TextureFormat::BC4_SNORM:        return GL_COMPRESSED_SIGNED_RED_RGTC1;
+        case TextureFormat::BC5_UNORM:        return GL_COMPRESSED_RG_RGTC2;
+        case TextureFormat::BC5_SNORM:        return GL_COMPRESSED_SIGNED_RG_RGTC2;
+        case TextureFormat::BC6H_UF16:        return GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT;
+        case TextureFormat::BC6H_SF16:        return GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT;
+        case TextureFormat::BC7_UNORM:        return GL_COMPRESSED_RGBA_BPTC_UNORM;
+        case TextureFormat::BC7_UNORM_SRGB:   return GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM;
+        case TextureFormat::ETC2_RGB8:        return GL_COMPRESSED_RGB8_ETC2;
+        case TextureFormat::ETC2_RGB8_SRGB:   return GL_COMPRESSED_SRGB8_ETC2;
+        case TextureFormat::ETC2_RGB8A1:      return GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2;
+        case TextureFormat::ETC2_RGB8A1_SRGB: return GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2;
+        case TextureFormat::ETC2_RGBA8:       return GL_COMPRESSED_RGBA8_ETC2_EAC;
+        case TextureFormat::ETC2_RGBA8_SRGB:  return GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC;
+        case TextureFormat::EAC_R11_UNORM:    return GL_COMPRESSED_R11_EAC;
+        case TextureFormat::EAC_R11_SNORM:    return GL_COMPRESSED_SIGNED_R11_EAC;
+        case TextureFormat::EAC_RG11_UNORM:   return GL_COMPRESSED_RG11_EAC;
+        case TextureFormat::EAC_RG11_SNORM:   return GL_COMPRESSED_SIGNED_RG11_EAC;
+        case TextureFormat::ASTC_4x4_UNORM:   return GL_COMPRESSED_RGBA_ASTC_4x4_KHR;
+        case TextureFormat::ASTC_4x4_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR;
+        case TextureFormat::ASTC_5x4_UNORM:   return GL_COMPRESSED_RGBA_ASTC_5x4_KHR;
+        case TextureFormat::ASTC_5x4_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR;
+        case TextureFormat::ASTC_5x5_UNORM:   return GL_COMPRESSED_RGBA_ASTC_5x5_KHR;
+        case TextureFormat::ASTC_5x5_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR;
+        case TextureFormat::ASTC_6x5_UNORM:   return GL_COMPRESSED_RGBA_ASTC_6x5_KHR;
+        case TextureFormat::ASTC_6x5_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR;
+        case TextureFormat::ASTC_6x6_UNORM:   return GL_COMPRESSED_RGBA_ASTC_6x6_KHR;
+        case TextureFormat::ASTC_6x6_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR;
+        case TextureFormat::ASTC_8x5_UNORM:   return GL_COMPRESSED_RGBA_ASTC_8x5_KHR;
+        case TextureFormat::ASTC_8x5_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR;
+        case TextureFormat::ASTC_8x6_UNORM:   return GL_COMPRESSED_RGBA_ASTC_8x6_KHR;
+        case TextureFormat::ASTC_8x6_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR;
+        case TextureFormat::ASTC_8x8_UNORM:   return GL_COMPRESSED_RGBA_ASTC_8x8_KHR;
+        case TextureFormat::ASTC_8x8_SRGB:    return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR;
+        case TextureFormat::ASTC_10x5_UNORM:  return GL_COMPRESSED_RGBA_ASTC_10x5_KHR;
+        case TextureFormat::ASTC_10x5_SRGB:   return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR;
+        case TextureFormat::ASTC_10x6_UNORM:  return GL_COMPRESSED_RGBA_ASTC_10x6_KHR;
+        case TextureFormat::ASTC_10x6_SRGB:   return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR;
+        case TextureFormat::ASTC_10x8_UNORM:  return GL_COMPRESSED_RGBA_ASTC_10x8_KHR;
+        case TextureFormat::ASTC_10x8_SRGB:   return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR;
+        case TextureFormat::ASTC_10x10_UNORM: return GL_COMPRESSED_RGBA_ASTC_10x10_KHR;
+        case TextureFormat::ASTC_10x10_SRGB:  return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR;
+        case TextureFormat::ASTC_12x10_UNORM: return GL_COMPRESSED_RGBA_ASTC_12x10_KHR;
+        case TextureFormat::ASTC_12x10_SRGB:  return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR;
+        case TextureFormat::ASTC_12x12_UNORM: return GL_COMPRESSED_RGBA_ASTC_12x12_KHR;
+        case TextureFormat::ASTC_12x12_SRGB:  return GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR;
+        default:                              return 0;
+    }
+}
 
 GLFormat gl_format(TextureFormat f) {
+    if (texture_format_is_compressed(f)) {
+        GLenum ifmt = gl_compressed_internal(f);
+        return { GLint(ifmt ? ifmt : GL_RGBA8), GL_RGBA, GL_UNSIGNED_BYTE, false, false, ifmt != 0 };
+    }
     switch (f) {
         case TextureFormat::R8_UNORM:        return { GL_R8, GL_RED, GL_UNSIGNED_BYTE, false, false };
         case TextureFormat::RG8_UNORM:       return { GL_RG8, GL_RG, GL_UNSIGNED_BYTE, false, false };
@@ -203,7 +268,8 @@ struct Pool {
 };
 
 struct GLBuffer   { GLuint id = 0; GLenum target = GL_ARRAY_BUFFER; uint32_t size = 0; };
-struct GLTexture  { GLuint id = 0; GLenum target = GL_TEXTURE_2D; GLFormat fmt{}; int w = 0, h = 0; int levels = 1, layers = 1; };
+struct GLTexture  { GLuint id = 0; GLenum target = GL_TEXTURE_2D; GLFormat fmt{}; TextureFormat tf = TextureFormat::RGBA8_UNORM; int w = 0, h = 0; int levels = 1, layers = 1;
+                    bool owns = true; };   // false for imported textures we must not glDeleteTextures
 struct GLSampler  { GLuint id = 0; };
 struct GLShader   { GLuint id = 0; ShaderStage stage = ShaderStage::Vertex; };
 struct GLPipeline {
@@ -271,7 +337,7 @@ public:
 
     TextureHandle create_texture(const TextureDesc& d) override {
         cur();
-        GLTexture t; t.fmt = gl_format(d.format); t.w = d.width; t.h = d.height;
+        GLTexture t; t.fmt = gl_format(d.format); t.tf = d.format; t.w = d.width; t.h = d.height;
         t.target = (d.cube ? GL_TEXTURE_CUBE_MAP : ((d.array_layers > 1 || d.array_texture) ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D));
         t.layers = (t.target == GL_TEXTURE_2D_ARRAY) ? (d.array_layers > 1 ? d.array_layers : 1) : 1;
         // mip_levels: >0 explicit, 0 = full chain. Immutable storage needs a count.
@@ -286,11 +352,22 @@ public:
         // Immutable storage (glTexStorage) so the texture can back glTextureView().
         if (t.target == GL_TEXTURE_2D_ARRAY) {
             glTexStorage3D(t.target, t.levels, t.fmt.internal_fmt, d.width, d.height, t.layers);
-            if (d.initial_data) glTexSubImage3D(t.target, 0, 0, 0, 0, d.width, d.height, t.layers, t.fmt.format, t.fmt.type, d.initial_data);
+            if (d.initial_data) {
+                if (t.fmt.compressed)
+                    glCompressedTexSubImage3D(t.target, 0, 0, 0, 0, d.width, d.height, t.layers, GLenum(t.fmt.internal_fmt),
+                                              GLsizei(texture_format_image_size(d.format, d.width, d.height) * t.layers), d.initial_data);
+                else
+                    glTexSubImage3D(t.target, 0, 0, 0, 0, d.width, d.height, t.layers, t.fmt.format, t.fmt.type, d.initial_data);
+            }
         } else { // GL_TEXTURE_2D or GL_TEXTURE_CUBE_MAP
             glTexStorage2D(t.target, t.levels, t.fmt.internal_fmt, d.width, d.height);
-            if (d.initial_data && t.target == GL_TEXTURE_2D)
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, d.width, d.height, t.fmt.format, t.fmt.type, d.initial_data);
+            if (d.initial_data && t.target == GL_TEXTURE_2D) {
+                if (t.fmt.compressed)
+                    glCompressedTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, d.width, d.height, GLenum(t.fmt.internal_fmt),
+                                              GLsizei(texture_format_image_size(d.format, d.width, d.height)), d.initial_data);
+                else
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, d.width, d.height, t.fmt.format, t.fmt.type, d.initial_data);
+            }
         }
         glTexParameteri(t.target, GL_TEXTURE_MIN_FILTER, t.levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         glTexParameteri(t.target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -302,14 +379,20 @@ public:
         cur(); if (auto* t = textures_.get(h.id)) {
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // R8 / odd-width rows
             glBindTexture(t->target, t->id);
-            if (t->target == GL_TEXTURE_2D)
+            if (t->fmt.compressed) {
+                const GLsizei sz = GLsizei(texture_format_image_size(t->tf, r.width, r.height));
+                if (t->target == GL_TEXTURE_2D)
+                    glCompressedTexSubImage2D(GL_TEXTURE_2D, r.mip, r.x, r.y, r.width, r.height, GLenum(t->fmt.internal_fmt), sz, data);
+                else if (t->target == GL_TEXTURE_2D_ARRAY)
+                    glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY, r.mip, r.x, r.y, r.layer, r.width, r.height, 1, GLenum(t->fmt.internal_fmt), sz, data);
+            } else if (t->target == GL_TEXTURE_2D)
                 glTexSubImage2D(GL_TEXTURE_2D, r.mip, r.x, r.y, r.width, r.height, t->fmt.format, t->fmt.type, data);
             else if (t->target == GL_TEXTURE_2D_ARRAY)
                 glTexSubImage3D(GL_TEXTURE_2D_ARRAY, r.mip, r.x, r.y, r.layer, r.width, r.height, 1, t->fmt.format, t->fmt.type, data);
         }
     }
     void generate_mipmaps(TextureHandle h) override { cur(); if (auto* t = textures_.get(h.id)) { glBindTexture(t->target, t->id); glGenerateMipmap(t->target); } }
-    void destroy_texture(TextureHandle h) override { cur(); if (auto* t = textures_.get(h.id)) { glDeleteTextures(1, &t->id); textures_.release(h.id); } }
+    void destroy_texture(TextureHandle h) override { cur(); if (auto* t = textures_.get(h.id)) { if (t->owns && t->id) glDeleteTextures(1, &t->id); textures_.release(h.id); } }
 
     SamplerHandle create_sampler(const SamplerState& s) override {
         cur(); GLSampler smp; glGenSamplers(1, &smp.id);
@@ -509,6 +592,18 @@ public:
     }
     void read_texture(TextureHandle h, const TextureRegion& r, void* dst) override {
         cur(); auto* t = texture(h.id); if (!t || !dst) return;
+        // Compressed textures aren't FBO-readable; pull the whole mip's blocks back
+        // (desktop GL only — glGetCompressedTexImage is absent on GLES/WASM).
+        if (t->fmt.compressed) {
+#if defined(GL_VERSION_1_3) || defined(GL_COMPRESSED_RGBA_S3TC_DXT1_EXT)
+            if (glGetCompressedTexImage) {
+                glBindTexture(t->target, t->id);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glGetCompressedTexImage(t->target, r.mip, dst);
+            }
+#endif
+            return;
+        }
         // Read a region back via a transient FBO (works for the colour/array case the
         // GUI needs; depth uses GL_DEPTH_COMPONENT).
         GLuint fbo = 0; glGenFramebuffers(1, &fbo);
@@ -539,6 +634,22 @@ public:
         glTexParameteri(v.target, GL_TEXTURE_MIN_FILTER, v.levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
         glTexParameteri(v.target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         return { textures_.alloc(v) };
+    }
+
+    // Zero-copy interop: wrap an existing GL texture name (e.g. a GstGLMemory texture
+    // shared via a wrapped GstGLContext on this GL context) as a sampled RHI texture.
+    // We never glDeleteTextures it unless take_ownership (owns=false) — GStreamer owns it.
+    TextureHandle import_texture(const NativeTextureDesc& d) override {
+        if (d.gl_texture == 0) { gl_unsupported("import_texture (null gl_texture)"); return { -1 }; }
+        cur();
+        GLTexture t;
+        t.id     = (GLuint)d.gl_texture;
+        t.target = d.gl_target ? (GLenum)d.gl_target : GL_TEXTURE_2D;
+        t.fmt    = gl_format(d.format);
+        t.tf     = d.format;
+        t.w = d.width; t.h = d.height; t.levels = 1; t.layers = 1;
+        t.owns   = d.take_ownership;
+        return { textures_.alloc(t) };
     }
 
     // ---- Binding model (descriptor sets / pipeline layout = root signature) ---

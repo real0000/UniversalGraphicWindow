@@ -1,5 +1,9 @@
 #include "material.hpp"
 
+#ifdef WINDOW_SUPPORT_SHADER_COMPILER
+#include "shader_compiler/shader_compiler.hpp"
+#endif
+
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/ini_parser.hpp>
 
@@ -95,21 +99,51 @@ bool load_shader_blob(Backend backend, const std::string& dir, const MaterialDes
         case Backend::Vulkan:
             bytes = read_file(base + "." + entry + ".spv"); lang = ShaderLanguage::SPIRV; break;
         case Backend::OpenGL: {
-            // Prefer SPIR-V (GL 4.6 ARB_gl_spirv); fall back to a GLSL blob if present.
-            bytes = read_file(base + "." + entry + ".spv"); lang = ShaderLanguage::SPIRV;
-            if (bytes.empty()) { bytes = read_file(base + "." + entry + ".glsl"); lang = ShaderLanguage::GLSL; }
+            // Prefer a GLSL blob (compiles on any GL); fall back to SPIR-V, which needs
+            // GL 4.6 + GL_ARB_gl_spirv (absent on plain/GLES/ANGLE contexts).
+            bytes = read_file(base + "." + entry + ".glsl"); lang = ShaderLanguage::GLSL;
+            if (bytes.empty()) { bytes = read_file(base + "." + entry + ".spv"); lang = ShaderLanguage::SPIRV; }
             break;
         }
         case Backend::Metal:
             bytes = read_file(base + "." + entry + ".msl"); lang = ShaderLanguage::MSL; break;
         case Backend::D3D11: case Backend::D3D12:
-            // Hand the HLSL source to the backend (it compiles via D3DCompile).
-            bytes = read_file(dir + "/" + d.shader_source); lang = ShaderLanguage::HLSL; break;
+            // DXBC (fxc, SM5) sits alongside the HLSL; works on both D3D11 and D3D12
+            // (D3D12 also accepts DXIL). The backends consume compiled bytecode, not source.
+            bytes = read_file(base + "." + entry + ".dxbc"); lang = ShaderLanguage::DXBC; break;
         default:
             return false;
     }
     return !bytes.empty();
 }
+
+#ifdef WINDOW_SUPPORT_SHADER_COMPILER
+// The "one language, cross-API" path: compile the material's single HLSL source for the
+// active backend (pbr.hlsl -> SPIR-V / GLSL / DXBC / MSL) with the built-in compiler. The
+// .hlsl is the source of truth; prebuilt blobs are only a fallback when it is absent. The
+// shader directory doubles as the #include root (so e.g. lights.hlsli resolves).
+bool compile_shader_blob(Backend backend, const std::string& dir, const MaterialDesc& d,
+                         ShaderStage stage, const std::string& entry,
+                         std::vector<uint8_t>& bytes, ShaderLanguage& lang) {
+    const std::string src_path = dir + "/" + d.shader_source;
+    std::vector<uint8_t> src = read_file(src_path);
+    if (src.empty()) return false;   // no HLSL source on disk -> fall back to a prebuilt blob
+
+    ShaderCompileOptions o;
+    o.target      = backend;
+    o.source_name = d.shader_source.c_str();
+    o.include_dir = dir.c_str();
+    ShaderCompileResult r = ShaderCompiler::compile(src.data(), src.size(), stage, entry.c_str(), o);
+    if (!r.ok) {
+        std::fprintf(stderr, "[Material] compile %s (%s) for backend %d:\n%s\n",
+                     d.shader_source.c_str(), entry.c_str(), int(backend), r.log.c_str());
+        return false;
+    }
+    bytes = std::move(r.bytecode);
+    lang  = r.language;
+    return true;
+}
+#endif // WINDOW_SUPPORT_SHADER_COMPILER
 
 } // namespace
 
@@ -186,8 +220,17 @@ Material* Material::create(GraphicDevice* device, const char* material_path, con
         const ShaderStage stage = ShaderStage(s);
         if (!m->desc_.has(stage)) continue;
         ShaderLanguage lang;
-        if (!load_shader_blob(backend, shader_dir, m->desc_, m->desc_.entry[s], blobs[s], lang)) {
-            std::fprintf(stderr, "[Material] no shader blob for stage %d backend %d (%s)\n", s, int(backend), m->desc_.shader_source.c_str());
+        bool got = false;
+        // Source of truth is the HLSL: compile it for this backend when the built-in compiler
+        // is available, and only fall back to a prebuilt per-backend blob otherwise.
+#ifdef WINDOW_SUPPORT_SHADER_COMPILER
+        if (ShaderCompiler::available())
+            got = compile_shader_blob(backend, shader_dir, m->desc_, stage, m->desc_.entry[s], blobs[s], lang);
+#endif
+        if (!got)
+            got = load_shader_blob(backend, shader_dir, m->desc_, m->desc_.entry[s], blobs[s], lang);
+        if (!got) {
+            std::fprintf(stderr, "[Material] no shader for stage %d backend %d (%s)\n", s, int(backend), m->desc_.shader_source.c_str());
             m->destroy(); if (out_result) *out_result = Result::ErrorNotSupported; return nullptr;
         }
         ShaderDesc sd; sd.stage = stage; sd.language = lang; sd.code = blobs[s].data(); sd.code_size = blobs[s].size();

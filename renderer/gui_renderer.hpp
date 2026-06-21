@@ -63,7 +63,11 @@ private:
     void emit_line(float x0, float y0, float x1, float y1, float width, const math::Vec4& c);
     TextureHandle resolve_texture(const WidgetRenderInfo::TextureCmd& t);
 
-    DescriptorSetHandle desc_set_for(TextureHandle tex);   // per-texture bind group (non-GL), cached
+    // Per-draw bind group {projection UBO slot, texture, sampler}, cached by (UBO slot, texture id)
+    // so each (slot,texture) pair is built once and reused. The slot is passed in because the
+    // projection UBO is a ring (see proj_ubo_) -- multiple render() calls per frame must each point
+    // their sets at the slot they wrote, or a later call clobbers an earlier one on Vulkan/D3D12.
+    DescriptorSetHandle desc_set_for(TextureHandle tex, uint32_t ubo_slot);
 
     GraphicDevice*      device_ = nullptr;
     Backend             backend_ = Backend::OpenGL;
@@ -74,16 +78,27 @@ private:
     PipelineHandle      image_pipeline_;  // RGBA images (sampler2D)
     BufferHandle        vbo_;
     uint32_t            vbo_capacity_ = 0;  // bytes
+    uint32_t            vbo_off_ = 0;       // ring write cursor (bytes)
     std::vector<float>  verts_;
     std::unordered_map<std::string, TextureHandle> tex_cache_;
 
-    // Modern-binding backends (Vulkan/D3D12/Metal): proj via push constants + the
-    // atlas/image texture via a descriptor set, instead of GL's UBO + bind_texture.
-    bool uses_descriptor_sets() const { return backend_ != Backend::OpenGL; }
+    // API-agnostic binding: one descriptor set per draw holds the projection UBO (binding 0),
+    // the texture (binding 1) and the sampler (binding 2). The RHI emulates descriptor sets as
+    // slot binds on GL/D3D11, so there is no per-backend path here. OpenGL still needs the
+    // scissor Y flipped (bottom-left origin), which is the only remaining backend check.
+    bool flip_scissor_y() const { return backend_ == Backend::OpenGL; }
+    // Projection UBO ring: each render() call writes the slot at ubo_slot_ and advances, so several
+    // GUI passes per frame don't overwrite each other's projection before the GPU draws (deferred
+    // backends). Separate buffers (not offsets into one) so each gets a full update -- D3D11 can't
+    // partial-update a constant buffer.
+    static const uint32_t     kUboSlots = 64;
+    BufferHandle              proj_ubo_[kUboSlots];   // 16-float projection per slot
+    uint32_t                  ubo_slot_ = 0;
+    TextureHandle             dummy_atlas_;   // 1x1 atlas so solid-only draws still bind a set
     SamplerHandle             sampler_;
     DescriptorSetLayoutHandle set_layout_;
     PipelineLayoutHandle      pipe_layout_;
-    std::unordered_map<int, DescriptorSetHandle> desc_sets_;  // texture id → bind group
+    std::unordered_map<uint64_t, DescriptorSetHandle> desc_sets_;  // (ubo_slot<<32 | texture id) → bind group
 };
 
 } // namespace gui

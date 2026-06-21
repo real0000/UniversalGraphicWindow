@@ -21,8 +21,18 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <unordered_map>
 #include <vector>
+
+// SPIRV-Cross (linked with the shader compiler) reflects a module's set-0 bindings so that
+// pipelines built WITHOUT an explicit pipeline layout get an auto descriptor-set layout. That
+// makes slot-based bind_uniform_buffer/bind_texture/bind_sampler/bind_storage_buffer work on
+// Vulkan exactly like GL/D3D11 (the commander auto-allocates + writes a descriptor set per draw).
+#if defined(WINDOW_SUPPORT_SHADER_COMPILER)
+#include <spirv_cross.hpp>
+#define VK_AUTO_BIND 1
+#endif
 
 namespace window {
 namespace {
@@ -31,6 +41,32 @@ void vk_unsupported(const char* what) {
     static std::unordered_map<const char*, bool> seen;
     if (!seen[what]) { seen[what] = true; std::fprintf(stderr, "[UGW/Vulkan] %s not supported (no-op)\n", what); }
 }
+
+#ifdef VK_AUTO_BIND
+// Reflect set-0 resource bindings of one SPIR-V stage into descriptor-set-layout bindings.
+void reflect_set0_bindings(const uint32_t* code, size_t bytes, VkShaderStageFlags stage,
+                           std::vector<VkDescriptorSetLayoutBinding>& out) {
+    try {
+        spirv_cross::Compiler comp(code, bytes / 4);
+        spirv_cross::ShaderResources res = comp.get_shader_resources();
+        auto add = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, VkDescriptorType type) {
+            for (const auto& r : list) {
+                if (comp.get_decoration(r.id, spv::DecorationDescriptorSet) != 0) continue;  // set 0 only
+                VkDescriptorSetLayoutBinding b{};
+                b.binding = comp.get_decoration(r.id, spv::DecorationBinding);
+                b.descriptorType = type; b.descriptorCount = 1; b.stageFlags = stage;
+                out.push_back(b);
+            }
+        };
+        add(res.uniform_buffers,   VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        add(res.storage_buffers,   VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        add(res.sampled_images,    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        add(res.separate_images,   VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
+        add(res.separate_samplers, VK_DESCRIPTOR_TYPE_SAMPLER);
+        add(res.storage_images,    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    } catch (...) {}
+}
+#endif
 
 // ---- State mapping (honour the requested PipelineDesc, not a hardcode) -------
 VkBlendFactor vk_blend_factor(BlendFactor f) {
@@ -108,6 +144,59 @@ VkFormat tex_format(TextureFormat f) {
         case TextureFormat::RGBA32_FLOAT:      return VK_FORMAT_R32G32B32A32_SFLOAT;
         case TextureFormat::D32_FLOAT:         return VK_FORMAT_D32_SFLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
+        // Block-compressed: BCn (desktop), ETC2/EAC + ASTC (mobile; needs device support).
+        case TextureFormat::BC1_UNORM:         return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+        case TextureFormat::BC1_UNORM_SRGB:    return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case TextureFormat::BC2_UNORM:         return VK_FORMAT_BC2_UNORM_BLOCK;
+        case TextureFormat::BC2_UNORM_SRGB:    return VK_FORMAT_BC2_SRGB_BLOCK;
+        case TextureFormat::BC3_UNORM:         return VK_FORMAT_BC3_UNORM_BLOCK;
+        case TextureFormat::BC3_UNORM_SRGB:    return VK_FORMAT_BC3_SRGB_BLOCK;
+        case TextureFormat::BC4_UNORM:         return VK_FORMAT_BC4_UNORM_BLOCK;
+        case TextureFormat::BC4_SNORM:         return VK_FORMAT_BC4_SNORM_BLOCK;
+        case TextureFormat::BC5_UNORM:         return VK_FORMAT_BC5_UNORM_BLOCK;
+        case TextureFormat::BC5_SNORM:         return VK_FORMAT_BC5_SNORM_BLOCK;
+        case TextureFormat::BC6H_UF16:         return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+        case TextureFormat::BC6H_SF16:         return VK_FORMAT_BC6H_SFLOAT_BLOCK;
+        case TextureFormat::BC7_UNORM:         return VK_FORMAT_BC7_UNORM_BLOCK;
+        case TextureFormat::BC7_UNORM_SRGB:    return VK_FORMAT_BC7_SRGB_BLOCK;
+        case TextureFormat::ETC2_RGB8:         return VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK;
+        case TextureFormat::ETC2_RGB8_SRGB:    return VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK;
+        case TextureFormat::ETC2_RGB8A1:       return VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK;
+        case TextureFormat::ETC2_RGB8A1_SRGB:  return VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK;
+        case TextureFormat::ETC2_RGBA8:        return VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK;
+        case TextureFormat::ETC2_RGBA8_SRGB:   return VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK;
+        case TextureFormat::EAC_R11_UNORM:     return VK_FORMAT_EAC_R11_UNORM_BLOCK;
+        case TextureFormat::EAC_R11_SNORM:     return VK_FORMAT_EAC_R11_SNORM_BLOCK;
+        case TextureFormat::EAC_RG11_UNORM:    return VK_FORMAT_EAC_R11G11_UNORM_BLOCK;
+        case TextureFormat::EAC_RG11_SNORM:    return VK_FORMAT_EAC_R11G11_SNORM_BLOCK;
+        case TextureFormat::ASTC_4x4_UNORM:    return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+        case TextureFormat::ASTC_4x4_SRGB:     return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
+        case TextureFormat::ASTC_5x4_UNORM:    return VK_FORMAT_ASTC_5x4_UNORM_BLOCK;
+        case TextureFormat::ASTC_5x4_SRGB:     return VK_FORMAT_ASTC_5x4_SRGB_BLOCK;
+        case TextureFormat::ASTC_5x5_UNORM:    return VK_FORMAT_ASTC_5x5_UNORM_BLOCK;
+        case TextureFormat::ASTC_5x5_SRGB:     return VK_FORMAT_ASTC_5x5_SRGB_BLOCK;
+        case TextureFormat::ASTC_6x5_UNORM:    return VK_FORMAT_ASTC_6x5_UNORM_BLOCK;
+        case TextureFormat::ASTC_6x5_SRGB:     return VK_FORMAT_ASTC_6x5_SRGB_BLOCK;
+        case TextureFormat::ASTC_6x6_UNORM:    return VK_FORMAT_ASTC_6x6_UNORM_BLOCK;
+        case TextureFormat::ASTC_6x6_SRGB:     return VK_FORMAT_ASTC_6x6_SRGB_BLOCK;
+        case TextureFormat::ASTC_8x5_UNORM:    return VK_FORMAT_ASTC_8x5_UNORM_BLOCK;
+        case TextureFormat::ASTC_8x5_SRGB:     return VK_FORMAT_ASTC_8x5_SRGB_BLOCK;
+        case TextureFormat::ASTC_8x6_UNORM:    return VK_FORMAT_ASTC_8x6_UNORM_BLOCK;
+        case TextureFormat::ASTC_8x6_SRGB:     return VK_FORMAT_ASTC_8x6_SRGB_BLOCK;
+        case TextureFormat::ASTC_8x8_UNORM:    return VK_FORMAT_ASTC_8x8_UNORM_BLOCK;
+        case TextureFormat::ASTC_8x8_SRGB:     return VK_FORMAT_ASTC_8x8_SRGB_BLOCK;
+        case TextureFormat::ASTC_10x5_UNORM:   return VK_FORMAT_ASTC_10x5_UNORM_BLOCK;
+        case TextureFormat::ASTC_10x5_SRGB:    return VK_FORMAT_ASTC_10x5_SRGB_BLOCK;
+        case TextureFormat::ASTC_10x6_UNORM:   return VK_FORMAT_ASTC_10x6_UNORM_BLOCK;
+        case TextureFormat::ASTC_10x6_SRGB:    return VK_FORMAT_ASTC_10x6_SRGB_BLOCK;
+        case TextureFormat::ASTC_10x8_UNORM:   return VK_FORMAT_ASTC_10x8_UNORM_BLOCK;
+        case TextureFormat::ASTC_10x8_SRGB:    return VK_FORMAT_ASTC_10x8_SRGB_BLOCK;
+        case TextureFormat::ASTC_10x10_UNORM:  return VK_FORMAT_ASTC_10x10_UNORM_BLOCK;
+        case TextureFormat::ASTC_10x10_SRGB:   return VK_FORMAT_ASTC_10x10_SRGB_BLOCK;
+        case TextureFormat::ASTC_12x10_UNORM:  return VK_FORMAT_ASTC_12x10_UNORM_BLOCK;
+        case TextureFormat::ASTC_12x10_SRGB:   return VK_FORMAT_ASTC_12x10_SRGB_BLOCK;
+        case TextureFormat::ASTC_12x12_UNORM:  return VK_FORMAT_ASTC_12x12_UNORM_BLOCK;
+        case TextureFormat::ASTC_12x12_SRGB:   return VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
         default:                               return VK_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -179,13 +268,18 @@ VkShaderStageFlags stage_flags(uint32_t bits) {
 //-----------------------------------------------------------------------------
 struct VKBuffer  { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkDeviceSize size = 0; void* mapped = nullptr; };
 struct VKTexture { VkImage image = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE;
-                   VkFormat format = VK_FORMAT_UNDEFINED; VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                   VkFormat format = VK_FORMAT_UNDEFINED; TextureFormat tf = TextureFormat::RGBA8_UNORM; VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
                    int w = 0, h = 0, layers = 1, levels = 1; VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED; bool owns = true; };
 struct VKSampler { VkSampler sampler = VK_NULL_HANDLE; };
-struct VKShader  { VkShaderModule mod = VK_NULL_HANDLE; ShaderStage stage = ShaderStage::Vertex; std::string entry = "main"; };
+struct VKShader  { VkShaderModule mod = VK_NULL_HANDLE; ShaderStage stage = ShaderStage::Vertex; std::string entry = "main";
+                   std::vector<VkDescriptorSetLayoutBinding> bindings; };   // reflected set-0 bindings
 struct VKPipeline{ VkPipeline pipeline = VK_NULL_HANDLE; VkPipelineLayout layout = VK_NULL_HANDLE; bool owns_layout = false;
                    VkRenderPass render_pass = VK_NULL_HANDLE; VkPipelineBindPoint bind = VK_PIPELINE_BIND_POINT_GRAPHICS;
-                   bool has_depth = false; };
+                   bool has_depth = false;
+                   // Auto descriptor-set layout built from shader reflection (when no explicit
+                   // PipelineDesc::layout). auto_bindings drives per-draw descriptor writes.
+                   VkDescriptorSetLayout auto_dsl = VK_NULL_HANDLE;
+                   std::vector<VkDescriptorSetLayoutBinding> auto_bindings; };
 struct VKRenderTarget { int color_tex = -1; int depth_tex = -1; };
 struct VKFence   { VkFence fence = VK_NULL_HANDLE; };
 struct VKSem     { VkSemaphore sem = VK_NULL_HANDLE; };
@@ -218,9 +312,22 @@ public:
     PFN_vkCmdEndDebugUtilsLabelEXT    p_end_label = nullptr;
     PFN_vkCmdInsertDebugUtilsLabelEXT p_insert_label = nullptr;
 
+    // Swapchain present path (set_render_target_backbuffer): each swapchain image is wrapped as
+    // a VKTexture (owns=false; we own only its view). One acquire/render-finished semaphore pair
+    // and a full queue-idle after each present keep the (interactive) windowed loop simple+correct.
+    VkSwapchainKHR    swapchain_ = VK_NULL_HANDLE;
+    VkSurfaceKHR      surface_   = VK_NULL_HANDLE;
+    VkFormat          sc_format_ = VK_FORMAT_UNDEFINED;
+    std::vector<int>  bb_ids_;                       // texture-pool ids of the wrapped images
+    VkSemaphore       acquire_sem_ = VK_NULL_HANDLE; // signalled by vkAcquireNextImageKHR
+    VkSemaphore       render_sem_  = VK_NULL_HANDLE; // signalled by submit, waited by present
+    uint32_t          acquired_index_ = 0;
+    bool              have_acquired_  = false;
+
     explicit VKDevice(const VulkanGraphicsInfo& gi) {
         instance = (VkInstance)gi.instance; phys = (VkPhysicalDevice)gi.physical_device;
         dev = (VkDevice)gi.device; queue = (VkQueue)gi.graphics_queue; queue_family = gi.graphics_queue_family;
+        swapchain_ = (VkSwapchainKHR)gi.swapchain; surface_ = (VkSurfaceKHR)gi.surface; sc_format_ = (VkFormat)gi.swapchain_format;
         vkGetPhysicalDeviceMemoryProperties(phys, &mem_props);
         VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
         pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; pci.queueFamilyIndex = queue_family;
@@ -231,7 +338,12 @@ public:
         p_insert_label = (PFN_vkCmdInsertDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdInsertDebugUtilsLabelEXT");
         has_debug_utils = (p_set_name != nullptr);
     }
-    ~VKDevice() override { if (pool) vkDestroyCommandPool(dev, pool, nullptr); }
+    ~VKDevice() override {
+        for (int id : bb_ids_) if (auto* t = textures_.get(id)) if (t->view) vkDestroyImageView(dev, t->view, nullptr);
+        if (acquire_sem_) vkDestroySemaphore(dev, acquire_sem_, nullptr);
+        if (render_sem_)  vkDestroySemaphore(dev, render_sem_, nullptr);
+        if (pool) vkDestroyCommandPool(dev, pool, nullptr);
+    }
 
     Backend get_backend() const override { return Backend::Vulkan; }
     void get_capabilities(GraphicsCapabilities* out) const override {
@@ -294,6 +406,53 @@ public:
         t->layout = newL;
     }
 
+    // ---- swapchain present path ---------------------------------------------
+    // Lazily wrap each swapchain image as a (non-owning) VKTexture so the existing
+    // clear/render-pass paths work against it, and create the present semaphores.
+    void ensure_backbuffers() {
+        if (!bb_ids_.empty() || !swapchain_) return;
+        uint32_t count = 0; vkGetSwapchainImagesKHR(dev, swapchain_, &count, nullptr);
+        if (!count) return;
+        std::vector<VkImage> images(count); vkGetSwapchainImagesKHR(dev, swapchain_, &count, images.data());
+        VkSurfaceCapabilitiesKHR caps{}; if (surface_) vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, surface_, &caps);
+        int w = (int)caps.currentExtent.width, h = (int)caps.currentExtent.height;
+        if (w <= 0 || (uint32_t)w == 0xFFFFFFFFu) w = 1;
+        if (h <= 0 || (uint32_t)h == 0xFFFFFFFFu) h = 1;
+        for (uint32_t i = 0; i < count; ++i) {
+            VKTexture t; t.image = images[i]; t.format = sc_format_; t.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+            t.w = w; t.h = h; t.layers = 1; t.levels = 1; t.layout = VK_IMAGE_LAYOUT_UNDEFINED; t.owns = false;
+            VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+            vi.image = images[i]; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = sc_format_;
+            vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vkCreateImageView(dev, &vi, nullptr, &t.view);
+            bb_ids_.push_back(textures_.alloc(t));
+        }
+        VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        vkCreateSemaphore(dev, &sci, nullptr, &acquire_sem_);
+        vkCreateSemaphore(dev, &sci, nullptr, &render_sem_);
+    }
+    // Acquire the next image; returns its wrapped texture id (or -1 if no swapchain).
+    int acquire_backbuffer() {
+        ensure_backbuffers();
+        if (bb_ids_.empty()) return -1;
+        vkAcquireNextImageKHR(dev, swapchain_, ~0ull, acquire_sem_, VK_NULL_HANDLE, &acquired_index_);
+        have_acquired_ = true;
+        // The previous contents are gone after present; treat as UNDEFINED for the next barrier.
+        if (auto* t = textures_.get(bb_ids_[acquired_index_])) t->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        return bb_ids_[acquired_index_];
+    }
+    // Present the acquired image (waits the render-finished semaphore the submit signalled), then
+    // idle the queue so the single semaphore pair is safe to reuse next frame.
+    void present_backbuffer() {
+        if (!have_acquired_) return;
+        VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+        pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &render_sem_;
+        pi.swapchainCount = 1; pi.pSwapchains = &swapchain_; pi.pImageIndices = &acquired_index_;
+        vkQueuePresentKHR(queue, &pi);
+        vkQueueWaitIdle(queue);
+        have_acquired_ = false;
+    }
+
     // ---- buffers ------------------------------------------------------------
     BufferHandle create_buffer(const BufferDesc& d) override {
         VKBuffer b; b.size = d.size ? d.size : 4;
@@ -327,7 +486,7 @@ public:
 
     // ---- textures -----------------------------------------------------------
     TextureHandle create_texture(const TextureDesc& d) override {
-        VKTexture t; t.format = tex_format(d.format); t.w = d.width; t.h = d.height;
+        VKTexture t; t.format = tex_format(d.format); t.tf = d.format; t.w = d.width; t.h = d.height;
         t.layers = (d.array_layers > 1 || d.array_texture) ? (d.array_layers > 1 ? d.array_layers : 1) : 1;
         t.levels = d.mip_levels > 0 ? d.mip_levels : 1;
         if (d.mip_levels == 0) { int s = d.width > d.height ? d.width : d.height; t.levels = 1; while (s > 1) { s >>= 1; ++t.levels; } }
@@ -363,7 +522,8 @@ public:
         VkImageView v = VK_NULL_HANDLE; VK_OK(vkCreateImageView(dev, &vi, nullptr, &v)); return v;
     }
     void upload(VKTexture& t, const void* data) {
-        const VkDeviceSize bytes = VkDeviceSize(t.w) * t.h * format_bytes(t.format) * t.layers;
+        // Block-aware tight size (per layer) so compressed payloads aren't truncated.
+        const VkDeviceSize bytes = VkDeviceSize(texture_format_image_size(t.tf, t.w, t.h)) * t.layers;
         VKBuffer stage = make_staging(bytes, data);
         immediate([&](VkCommandBuffer cb) {
             barrier(cb, &t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -376,7 +536,7 @@ public:
     }
     void update_texture(TextureHandle h, const TextureRegion& reg, const void* data) override {
         auto* t = textures_.get(h.id); if (!t || !data) return;
-        const VkDeviceSize bytes = VkDeviceSize(reg.width) * reg.height * format_bytes(t->format);
+        const VkDeviceSize bytes = texture_format_image_size(t->tf, reg.width, reg.height);
         VKBuffer stage = make_staging(bytes, data);
         immediate([&](VkCommandBuffer cb) {
             barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -428,6 +588,9 @@ public:
         mi.codeSize = d.code_size; mi.pCode = static_cast<const uint32_t*>(d.code);
         VKShader sh; sh.stage = d.stage; sh.entry = d.entry_point ? d.entry_point : "main"; VK_OK(vkCreateShaderModule(dev, &mi, nullptr, &sh.mod));
         if (!sh.mod) return { -1 };
+#ifdef VK_AUTO_BIND
+        reflect_set0_bindings(static_cast<const uint32_t*>(d.code), d.code_size, shader_stage(d.stage), sh.bindings);
+#endif
         return { shaders_.alloc(sh) };
     }
     void destroy_shader(ShaderHandle h) override { auto* s = shaders_.get(h.id); if (s && s->mod) vkDestroyShaderModule(dev, s->mod, nullptr); shaders_.release(h.id); }
@@ -521,16 +684,40 @@ public:
         ci.attachmentCount = count; ci.pAttachments = atts; ci.subpassCount = 1; ci.pSubpasses = &sub;
         VkRenderPass rp = VK_NULL_HANDLE; VK_OK(vkCreateRenderPass(dev, &ci, nullptr, &rp)); return rp;
     }
+    // Build an auto descriptor-set layout (set 0) + pipeline layout from the stages' reflected
+    // bindings, so a pipeline created without an explicit layout still supports slot binds.
+    void build_auto_layout(std::initializer_list<ShaderHandle> shs, VKPipeline& p) {
+        std::map<uint32_t, VkDescriptorSetLayoutBinding> merged;
+        for (ShaderHandle h : shs) { auto* s = shaders_.get(h.id); if (!s) continue;
+            for (const auto& b : s->bindings) {
+                auto it = merged.find(b.binding);
+                if (it == merged.end()) merged[b.binding] = b; else it->second.stageFlags |= b.stageFlags;
+            }
+        }
+        if (merged.empty()) {   // no resources: a plain empty pipeline layout (as before)
+            VkPipelineLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            vkCreatePipelineLayout(dev, &lci, nullptr, &p.layout); p.owns_layout = true; return;
+        }
+        for (auto& kv : merged) p.auto_bindings.push_back(kv.second);
+        VkDescriptorSetLayoutCreateInfo dci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        dci.bindingCount = (uint32_t)p.auto_bindings.size(); dci.pBindings = p.auto_bindings.data();
+        vkCreateDescriptorSetLayout(dev, &dci, nullptr, &p.auto_dsl);
+        VkDescriptorSetLayout sets[1] = { p.auto_dsl };
+        VkPipelineLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        lci.setLayoutCount = 1; lci.pSetLayouts = sets;
+        vkCreatePipelineLayout(dev, &lci, nullptr, &p.layout); p.owns_layout = true;
+    }
+
     PipelineHandle create_pipeline(const PipelineDesc& d) override {
         VKPipeline p;
         auto* pl = plls_.get(d.layout.id);
-        if (pl) p.layout = pl->layout;
-        else { VkPipelineLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO }; vkCreatePipelineLayout(dev, &lci, nullptr, &p.layout); p.owns_layout = true; }
+        if (pl) p.layout = pl->layout;   // else: auto layout from reflection (built below)
         VkPipelineCache cache = VK_NULL_HANDLE; if (auto* c = pcaches_.get(d.cache.id)) cache = c->cache;
 
         if (d.compute_shader.valid()) {
             p.bind = VK_PIPELINE_BIND_POINT_COMPUTE;
             auto* cs = shaders_.get(d.compute_shader.id); if (!cs) return { -1 };
+            if (!p.layout) build_auto_layout({ d.compute_shader }, p);
             VkComputePipelineCreateInfo ci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
             ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }; ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
             ci.stage.module = cs->mod; ci.stage.pName = cs->entry.c_str(); ci.layout = p.layout;
@@ -545,6 +732,7 @@ public:
         if (d.geometry_shader.valid()) add(d.geometry_shader);
         if (d.tess_control_shader.valid()) add(d.tess_control_shader);
         if (d.tess_eval_shader.valid()) add(d.tess_eval_shader);
+        if (!p.layout) build_auto_layout({ d.vertex_shader, d.fragment_shader, d.geometry_shader, d.tess_control_shader, d.tess_eval_shader }, p);
 
         const VertexLayout& vl = d.vertex_layout;
         std::vector<VkVertexInputBindingDescription> binds;
@@ -588,6 +776,7 @@ public:
         if (p->pipeline) vkDestroyPipeline(dev, p->pipeline, nullptr);
         if (p->render_pass) vkDestroyRenderPass(dev, p->render_pass, nullptr);
         if (p->owns_layout && p->layout) vkDestroyPipelineLayout(dev, p->layout, nullptr);
+        if (p->auto_dsl) vkDestroyDescriptorSetLayout(dev, p->auto_dsl, nullptr);
         pipelines_.release(h.id);
     }
 
@@ -618,6 +807,25 @@ public:
         v.format = fmt; v.levels = levels; v.layers = layers;
         v.view = make_view(*src, fmt, d.cube ? VK_IMAGE_VIEW_TYPE_CUBE : (layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D), d.base_mip, levels, d.base_layer, layers);
         return { textures_.alloc(v) };
+    }
+
+    // Zero-copy interop: wrap an existing VkImage (e.g. from a GStreamer vulkan decoder
+    // sharing this VkDevice) as a sampled RHI texture. We create our own VkImageView but
+    // never destroy the image/memory unless take_ownership (owns=false). The caller tells
+    // us the image's current layout so binding samples it correctly.
+    TextureHandle import_texture(const NativeTextureDesc& d) override {
+        VkImage img = (VkImage)d.vk_image;
+        if (img == VK_NULL_HANDLE) { vk_unsupported("import_texture (null vk_image)"); return { -1 }; }
+        VKTexture t;
+        t.image = img; t.mem = VK_NULL_HANDLE; t.owns = d.take_ownership;
+        t.tf = d.format;
+        t.format = d.vk_format ? (VkFormat)d.vk_format : tex_format(d.format);
+        t.w = d.width; t.h = d.height; t.layers = 1; t.levels = 1;
+        t.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        t.layout = d.vk_layout ? (VkImageLayout)d.vk_layout : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        t.view = make_view(t, t.format, VK_IMAGE_VIEW_TYPE_2D, 0, 1, 0, 1);
+        if (d.debug_name) set_name(VK_OBJECT_TYPE_IMAGE, (uint64_t)t.image, d.debug_name);
+        return { textures_.alloc(t) };
     }
 
     // ---- fences / semaphores / timeline -------------------------------------
@@ -682,7 +890,7 @@ public:
     }
     void read_texture(TextureHandle h, const TextureRegion& r, void* dst) override {
         auto* t = textures_.get(h.id); if (!t || !dst) return;
-        const VkDeviceSize bytes = VkDeviceSize(r.width) * r.height * format_bytes(t->format);
+        const VkDeviceSize bytes = texture_format_image_size(t->tf, r.width, r.height);
         VKBuffer stage = make_staging(bytes, nullptr);
         immediate([&](VkCommandBuffer cb) {
             barrier(cb, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -732,6 +940,7 @@ public:
     // accessors for the commander
     VKBuffer* buffer(int id) { return buffers_.get(id); }
     VKTexture* texture(int id) { return textures_.get(id); }
+    VKSampler* sampler(int id) { return samplers_.get(id); }
     VKPipeline* pipeline(int id) { return pipelines_.get(id); }
     VKRenderTarget* rt(int id) { return rts_.get(id); }
     VKQuery* query(int id) { return queries_.get(id); }
@@ -754,15 +963,37 @@ public:
         VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
         ai.commandPool = d->pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
         vkAllocateCommandBuffers(d->dev, &ai, &cb_);
+        // Per-frame pool for the auto descriptor sets that back slot binds (reset each begin()).
+        VkDescriptorPoolSize sizes[] = {
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 512 }, { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 512 },
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 512 },  { VK_DESCRIPTOR_TYPE_SAMPLER, 512 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 512 }, { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256 },
+        };
+        VkDescriptorPoolCreateInfo pci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        pci.maxSets = 1024; pci.poolSizeCount = 6; pci.pPoolSizes = sizes;
+        vkCreateDescriptorPool(d->dev, &pci, nullptr, &desc_pool_);
     }
-    ~VKCommander() override { vkFreeCommandBuffers(dev_->dev, dev_->pool, 1, &cb_); }
+    ~VKCommander() override { if (desc_pool_) vkDestroyDescriptorPool(dev_->dev, desc_pool_, nullptr); vkFreeCommandBuffers(dev_->dev, dev_->pool, 1, &cb_); }
     VKDevice* device() const { return dev_; }
     VkCommandBuffer cmd() const { return cb_; }
 
-    void begin() override { vkResetCommandBuffer(cb_, 0); VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }; bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; vkBeginCommandBuffer(cb_, &bi); in_pass_ = false; }
-    void end() override { end_pass(); vkEndCommandBuffer(cb_); }
+    void begin() override {
+        vkResetCommandBuffer(cb_, 0);
+        VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }; bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cb_, &bi); in_pass_ = false;
+        if (desc_pool_) vkResetDescriptorPool(dev_->dev, desc_pool_, 0);
+        for (int i = 0; i < MAX_BIND; ++i) { ubo_[i] = {}; ssbo_[i] = {}; tex_[i] = VK_NULL_HANDLE; samp_[i] = VK_NULL_HANDLE; }
+        desc_dirty_ = false;
+    }
+    void end() override {
+        end_pass();
+        // Hand the acquired swapchain image to the presentation engine.
+        if (dev_->have_acquired_) if (auto* t = dev_->texture(color_tex_)) VKDevice::barrier(cb_, t, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        vkEndCommandBuffer(cb_);
+    }
 
-    void set_render_target_backbuffer() override { end_pass(); color_tex_ = -1; depth_tex_ = -1; }   // present path TODO
+    // Acquire the next swapchain image and bind it as the colour target (windowed present).
+    void set_render_target_backbuffer() override { end_pass(); color_tex_ = dev_->acquire_backbuffer(); depth_tex_ = -1; }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
         end_pass(); color_tex_ = -1; depth_tex_ = -1;
         if (count > 0 && colors) if (auto* rt = dev_->rt(colors[0].id)) color_tex_ = rt->color_tex;
@@ -788,19 +1019,21 @@ public:
     void set_pipeline(PipelineHandle h) override { auto* p = dev_->pipeline(h.id); if (!p) return; cur_pipeline_ = p; vkCmdBindPipeline(cb_, p->bind, p->pipeline); }
     void bind_vertex_buffer(uint32_t slot, BufferHandle h, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (!b) return; VkDeviceSize off = offset; vkCmdBindVertexBuffers(cb_, slot, 1, &b->buf, &off); }
     void bind_index_buffer(BufferHandle h, IndexFormat fmt, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (!b) return; vkCmdBindIndexBuffer(cb_, b->buf, offset, fmt == IndexFormat::UInt16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32); }
-    void bind_texture(uint32_t, TextureHandle) override {}        // Vulkan binds via descriptor sets
-    void bind_sampler(uint32_t, SamplerHandle) override {}
-    void bind_uniform_buffer(uint32_t, BufferHandle, uint32_t, uint32_t) override {}
+    // Slot binds record into the pending tables; flush_descriptors() writes + binds an auto
+    // descriptor set per draw (so these work like GL/D3D11 on pipelines with a reflected layout).
+    void bind_texture(uint32_t slot, TextureHandle h) override { if (slot >= MAX_BIND) return; auto* t = dev_->texture(h.id); if (!t) return; tex_[slot] = t->view; desc_dirty_ = true; }
+    void bind_sampler(uint32_t slot, SamplerHandle h) override { if (slot >= MAX_BIND) return; auto* s = dev_->sampler(h.id); if (!s) return; samp_[slot] = s->sampler; desc_dirty_ = true; }
+    void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override { if (slot >= MAX_BIND) return; auto* b = dev_->buffer(h.id); if (!b) return; ubo_[slot] = { b->buf, offset, size ? size : VK_WHOLE_SIZE }; desc_dirty_ = true; }
     void push_constants(uint32_t offset, const void* data, uint32_t size) override { if (cur_pipeline_ && cur_pipeline_->layout) vkCmdPushConstants(cb_, cur_pipeline_->layout, VK_SHADER_STAGE_ALL, offset, size, data); }
-    void bind_storage_buffer(uint32_t, BufferHandle, uint32_t, uint32_t) override {}
+    void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override { if (slot >= MAX_BIND) return; auto* b = dev_->buffer(h.id); if (!b) return; ssbo_[slot] = { b->buf, offset, size ? size : VK_WHOLE_SIZE }; desc_dirty_ = true; }
     void bind_storage_texture(uint32_t, TextureHandle, int, StorageAccess) override {}
     void bind_descriptor_set(uint32_t set_index, DescriptorSetHandle h, const uint32_t* dyn, int dyn_count) override {
         auto* ds = dev_->descriptor_set(h.id); if (!ds || !cur_pipeline_) return;
         vkCmdBindDescriptorSets(cb_, cur_pipeline_->bind, cur_pipeline_->layout, set_index, 1, &ds->set, (uint32_t)dyn_count, dyn);
     }
-    void draw(uint32_t vc, uint32_t first, uint32_t inst, uint32_t first_inst) override { ensure_pass(); vkCmdDraw(cb_, vc, inst ? inst : 1, first, first_inst); }
-    void draw_indexed(uint32_t ic, uint32_t first, int32_t base_v, uint32_t inst, uint32_t first_inst) override { ensure_pass(); vkCmdDrawIndexed(cb_, ic, inst ? inst : 1, first, base_v, first_inst); }
-    void dispatch(uint32_t x, uint32_t y, uint32_t z) override { vkCmdDispatch(cb_, x, y, z); }
+    void draw(uint32_t vc, uint32_t first, uint32_t inst, uint32_t first_inst) override { ensure_pass(); flush_descriptors(); vkCmdDraw(cb_, vc, inst ? inst : 1, first, first_inst); }
+    void draw_indexed(uint32_t ic, uint32_t first, int32_t base_v, uint32_t inst, uint32_t first_inst) override { ensure_pass(); flush_descriptors(); vkCmdDrawIndexed(cb_, ic, inst ? inst : 1, first, base_v, first_inst); }
+    void dispatch(uint32_t x, uint32_t y, uint32_t z) override { flush_descriptors(); vkCmdDispatch(cb_, x, y, z); }
     void draw_indirect(BufferHandle a, uint32_t off, uint32_t count, uint32_t stride) override { ensure_pass(); auto* b = dev_->buffer(a.id); if (b) vkCmdDrawIndirect(cb_, b->buf, off, count, stride ? stride : sizeof(VkDrawIndirectCommand)); }
     void draw_indexed_indirect(BufferHandle a, uint32_t off, uint32_t count, uint32_t stride) override { ensure_pass(); auto* b = dev_->buffer(a.id); if (b) vkCmdDrawIndexedIndirect(cb_, b->buf, off, count, stride ? stride : sizeof(VkDrawIndexedIndirectCommand)); }
     void dispatch_indirect(BufferHandle a, uint32_t off) override { auto* b = dev_->buffer(a.id); if (b) vkCmdDispatchIndirect(cb_, b->buf, off); }
@@ -884,6 +1117,47 @@ private:
     }
     void end_pass() { if (in_pass_) { vkCmdEndRenderPass(cb_); in_pass_ = false; } if (fb_) { vkDestroyFramebuffer(dev_->dev, fb_, nullptr); fb_ = VK_NULL_HANDLE; } }
 
+    // Write the pending slot binds into a fresh descriptor set and bind it (only for pipelines
+    // whose layout was auto-built from reflection; explicit-layout pipelines use bind_descriptor_set).
+    void flush_descriptors() {
+        if (!desc_dirty_ || !cur_pipeline_ || cur_pipeline_->auto_dsl == VK_NULL_HANDLE) return;
+        VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        ai.descriptorPool = desc_pool_; ai.descriptorSetCount = 1; ai.pSetLayouts = &cur_pipeline_->auto_dsl;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(dev_->dev, &ai, &set) != VK_SUCCESS) return;
+        std::vector<VkWriteDescriptorSet> writes;
+        std::vector<VkDescriptorBufferInfo> bufs; bufs.reserve(MAX_BIND * 2);
+        std::vector<VkDescriptorImageInfo>  imgs; imgs.reserve(MAX_BIND * 2);
+        for (const auto& b : cur_pipeline_->auto_bindings) {
+            if (b.binding >= MAX_BIND) continue;
+            VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            w.dstSet = set; w.dstBinding = b.binding; w.descriptorCount = 1; w.descriptorType = b.descriptorType;
+            switch (b.descriptorType) {
+                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                    if (!ubo_[b.binding].buf) continue;
+                    bufs.push_back({ ubo_[b.binding].buf, ubo_[b.binding].off, ubo_[b.binding].range }); w.pBufferInfo = &bufs.back(); break;
+                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                    if (!ssbo_[b.binding].buf) continue;
+                    bufs.push_back({ ssbo_[b.binding].buf, ssbo_[b.binding].off, ssbo_[b.binding].range }); w.pBufferInfo = &bufs.back(); break;
+                case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+                    if (!tex_[b.binding]) continue;
+                    imgs.push_back({ VK_NULL_HANDLE, tex_[b.binding], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }); w.pImageInfo = &imgs.back(); break;
+                case VK_DESCRIPTOR_TYPE_SAMPLER:
+                    if (!samp_[b.binding]) continue;
+                    imgs.push_back({ samp_[b.binding], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED }); w.pImageInfo = &imgs.back(); break;
+                case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                    if (!tex_[b.binding] || !samp_[b.binding]) continue;
+                    imgs.push_back({ samp_[b.binding], tex_[b.binding], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }); w.pImageInfo = &imgs.back(); break;
+                default: continue;
+            }
+            writes.push_back(w);
+        }
+        if (!writes.empty()) vkUpdateDescriptorSets(dev_->dev, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+        vkCmdBindDescriptorSets(cb_, cur_pipeline_->bind, cur_pipeline_->layout, 0, 1, &set, 0, nullptr);
+        desc_dirty_ = false;
+    }
+
+    static const int MAX_BIND = 16;
     VKDevice* dev_ = nullptr;
     VkCommandBuffer cb_ = VK_NULL_HANDLE;
     VkFramebuffer fb_ = VK_NULL_HANDLE;
@@ -891,6 +1165,13 @@ private:
     int depth_tex_ = -1;   // bound depth target's texture id (-1 = none)
     VKPipeline* cur_pipeline_ = nullptr;
     bool in_pass_ = false;
+    // Pending slot binds (auto descriptor path) + the per-frame pool they allocate from.
+    VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
+    struct SlotBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize off = 0; VkDeviceSize range = VK_WHOLE_SIZE; };
+    SlotBuf  ubo_[MAX_BIND]{}, ssbo_[MAX_BIND]{};
+    VkImageView tex_[MAX_BIND]{};
+    VkSampler   samp_[MAX_BIND]{};
+    bool desc_dirty_ = false;
 };
 
 } // namespace
@@ -918,6 +1199,17 @@ void submit_commander_vulkan(Graphics*, GraphicCommander* commander, FenceHandle
     VkSemaphore tl_sem = VK_NULL_HANDLE;
     if (timeline.valid()) { if (auto* t = d->timeline(timeline.id)) { tl_sem = t->sem; ts.signalSemaphoreValueCount = 1; ts.pSignalSemaphoreValues = &value; si.pNext = &ts; si.signalSemaphoreCount = 1; si.pSignalSemaphores = &tl_sem; } }
     VkFence f = VK_NULL_HANDLE; if (fence.valid()) if (auto* fh = d->fence(fence.id)) f = fh->fence;
+
+    // Windowed present: wait the acquire semaphore (at colour-output), signal render-finished,
+    // submit, then present the image. Otherwise the plain offscreen submit.
+    if (d->have_acquired_) {
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        si.waitSemaphoreCount = 1; si.pWaitSemaphores = &d->acquire_sem_; si.pWaitDstStageMask = &wait_stage;
+        si.signalSemaphoreCount = 1; si.pSignalSemaphores = &d->render_sem_; si.pNext = nullptr;
+        vkQueueSubmit(d->queue, 1, &si, f);
+        d->present_backbuffer();
+        return;
+    }
     vkQueueSubmit(d->queue, 1, &si, f);
 }
 

@@ -54,6 +54,21 @@ DXGI_FORMAT tex_format(TextureFormat f) {
         case TextureFormat::RGBA32_FLOAT:      return DXGI_FORMAT_R32G32B32A32_FLOAT;
         case TextureFormat::D32_FLOAT:         return DXGI_FORMAT_D32_FLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        // Block-compressed (BCn). ETC2/ASTC have no D3D equivalent (CPU-decode them).
+        case TextureFormat::BC1_UNORM:         return DXGI_FORMAT_BC1_UNORM;
+        case TextureFormat::BC1_UNORM_SRGB:    return DXGI_FORMAT_BC1_UNORM_SRGB;
+        case TextureFormat::BC2_UNORM:         return DXGI_FORMAT_BC2_UNORM;
+        case TextureFormat::BC2_UNORM_SRGB:    return DXGI_FORMAT_BC2_UNORM_SRGB;
+        case TextureFormat::BC3_UNORM:         return DXGI_FORMAT_BC3_UNORM;
+        case TextureFormat::BC3_UNORM_SRGB:    return DXGI_FORMAT_BC3_UNORM_SRGB;
+        case TextureFormat::BC4_UNORM:         return DXGI_FORMAT_BC4_UNORM;
+        case TextureFormat::BC4_SNORM:         return DXGI_FORMAT_BC4_SNORM;
+        case TextureFormat::BC5_UNORM:         return DXGI_FORMAT_BC5_UNORM;
+        case TextureFormat::BC5_SNORM:         return DXGI_FORMAT_BC5_SNORM;
+        case TextureFormat::BC6H_UF16:         return DXGI_FORMAT_BC6H_UF16;
+        case TextureFormat::BC6H_SF16:         return DXGI_FORMAT_BC6H_SF16;
+        case TextureFormat::BC7_UNORM:         return DXGI_FORMAT_BC7_UNORM;
+        case TextureFormat::BC7_UNORM_SRGB:    return DXGI_FORMAT_BC7_UNORM_SRGB;
         default:                               return DXGI_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -134,7 +149,9 @@ D3D11_COMPARISON_FUNC d11_compare(CompareFunc f) {
 
 struct D11Buffer  { ID3D11Buffer* buf = nullptr; UINT size = 0; UINT byte_width = 0; BufferType type = BufferType::Vertex; ID3D11UnorderedAccessView* uav = nullptr; ID3D11Buffer* map_staging = nullptr; };
 struct D11Texture { ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; ID3D11RenderTargetView* rtv = nullptr;
-                    ID3D11DepthStencilView* dsv = nullptr; ID3D11UnorderedAccessView* uav = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; int w = 0, h = 0; };
+                    ID3D11DepthStencilView* dsv = nullptr; ID3D11UnorderedAccessView* uav = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+                    TextureFormat tf = TextureFormat::RGBA8_UNORM; int w = 0, h = 0;
+                    bool owns_tex = true; };   // false for imported textures we must not Release
 struct D11Sampler { ID3D11SamplerState* s = nullptr; };
 struct D11Shader  { ID3D11DeviceChild* shader = nullptr; ShaderStage stage = ShaderStage::Vertex; std::vector<uint8_t> bytecode; };
 struct D11Pipeline{ ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; ID3D11ComputeShader* cs = nullptr;
@@ -153,8 +170,13 @@ class D11Device : public GraphicDevice {
 public:
     ID3D11Device* dev = nullptr;
     ID3D11DeviceContext* ctx = nullptr;
+    IDXGISwapChain* swap_chain = nullptr;   // for set_render_target_backbuffer() (windowed present)
 
-    explicit D11Device(Graphics* g) { dev = (ID3D11Device*)g->native_device(); ctx = (ID3D11DeviceContext*)g->native_context(); }
+    explicit D11Device(Graphics* g) {
+        dev = (ID3D11Device*)g->native_device();
+        ctx = (ID3D11DeviceContext*)g->native_context();
+        swap_chain = (IDXGISwapChain*)g->native_swapchain();
+    }
     ~D11Device() override {}
 
     Backend get_backend() const override { return Backend::D3D11; }
@@ -200,7 +222,7 @@ public:
 
     // ---- textures -----------------------------------------------------------
     TextureHandle create_texture(const TextureDesc& d) override {
-        D11Texture t; t.fmt = tex_format(d.format); t.w = d.width; t.h = d.height;
+        D11Texture t; t.fmt = tex_format(d.format); t.tf = d.format; t.w = d.width; t.h = d.height;
         const bool depth = (d.usage & TEXTURE_USAGE_DEPTH_STENCIL) != 0;
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = d.width; td.Height = d.height; td.MipLevels = d.mip_levels ? d.mip_levels : 1;
@@ -212,7 +234,9 @@ public:
         if (d.usage & TEXTURE_USAGE_DEPTH_STENCIL) td.BindFlags |= D3D11_BIND_DEPTH_STENCIL;
         if (d.usage & TEXTURE_USAGE_STORAGE)       td.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
         if (d.cube) { td.ArraySize = 6; td.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE; }
-        D3D11_SUBRESOURCE_DATA srd = {}; srd.pSysMem = d.initial_data; srd.SysMemPitch = d.width * 4;
+        D3D11_SUBRESOURCE_DATA srd = {}; srd.pSysMem = d.initial_data;
+        srd.SysMemPitch = (UINT)texture_format_row_pitch(d.format, d.width);   // block-aware (compressed = blocks*blockBytes)
+        srd.SysMemSlicePitch = (UINT)texture_format_image_size(d.format, d.width, d.height);
         dev->CreateTexture2D(&td, d.initial_data ? &srd : nullptr, &t.tex);
         if (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) dev->CreateShaderResourceView(t.tex, nullptr, &t.srv);
         if (td.BindFlags & D3D11_BIND_RENDER_TARGET)   dev->CreateRenderTargetView(t.tex, nullptr, &t.rtv);
@@ -223,12 +247,17 @@ public:
     void update_texture(TextureHandle h, const TextureRegion& r, const void* data) override {
         auto* t = textures_.get(h.id); if (!t || !t->tex) return;
         D3D11_BOX box{ (UINT)r.x, (UINT)r.y, 0, UINT(r.x + r.width), UINT(r.y + r.height), 1 };
-        ctx->UpdateSubresource(t->tex, r.mip, &box, data, r.width * 4, 0);
+        const UINT row_pitch   = (UINT)texture_format_row_pitch(t->tf, r.width);
+        const UINT slice_pitch = (UINT)texture_format_image_size(t->tf, r.width, r.height);
+        ctx->UpdateSubresource(t->tex, r.mip, &box, data, row_pitch, slice_pitch);
     }
     void generate_mipmaps(TextureHandle h) override { auto* t = textures_.get(h.id); if (t && t->srv) ctx->GenerateMips(t->srv); }
     void destroy_texture(TextureHandle h) override {
         auto* t = textures_.get(h.id); if (!t) return;
-        if (t->srv) t->srv->Release(); if (t->rtv) t->rtv->Release(); if (t->dsv) t->dsv->Release(); if (t->uav) t->uav->Release(); if (t->tex) t->tex->Release();
+        // We always own the views we created; the texture itself only when owns_tex
+        // (imported textures are owned by their external producer unless take_ownership).
+        if (t->srv) t->srv->Release(); if (t->rtv) t->rtv->Release(); if (t->dsv) t->dsv->Release(); if (t->uav) t->uav->Release();
+        if (t->tex && t->owns_tex) t->tex->Release();
         textures_.release(h.id);
     }
 
@@ -309,6 +338,30 @@ public:
 
     TextureHandle create_texture_view(const TextureViewDesc& d) override { d11_unsupported("create_texture_view (use the source texture's SRV)"); return d.texture; }
 
+    // Zero-copy interop: wrap an existing ID3D11Texture2D* (e.g. from a GStreamer
+    // d3d11 decoder sharing this device) as a sampled RHI texture. We create our own
+    // SRV but never Release the texture unless take_ownership.
+    TextureHandle import_texture(const NativeTextureDesc& d) override {
+        auto* native = (ID3D11Texture2D*)d.d3d_resource;
+        if (!native) { d11_unsupported("import_texture (null d3d_resource)"); return { -1 }; }
+        D11Texture t; t.tex = native; t.owns_tex = d.take_ownership;
+        t.tf = d.format; t.fmt = tex_format(d.format); t.w = d.width; t.h = d.height;
+        // Prefer the texture's own dimensions/format when the caller left them unset.
+        D3D11_TEXTURE2D_DESC td = {}; native->GetDesc(&td);
+        if (t.w <= 0) t.w = (int)td.Width;
+        if (t.h <= 0) t.h = (int)td.Height;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+        sd.Format = (t.fmt != DXGI_FORMAT_UNKNOWN) ? t.fmt : td.Format;
+        sd.ViewDimension = (td.SampleDesc.Count > 1) ? D3D11_SRV_DIMENSION_TEXTURE2DMS
+                                                     : D3D11_SRV_DIMENSION_TEXTURE2D;
+        sd.Texture2D.MipLevels = td.MipLevels ? td.MipLevels : 1;
+        if (FAILED(dev->CreateShaderResourceView(native, &sd, &t.srv))) {
+            // Fall back to a default SRV (format must be non-typeless for this to work).
+            dev->CreateShaderResourceView(native, nullptr, &t.srv);
+        }
+        return { textures_.alloc(t) };
+    }
+
     // ---- sync (event query as fence; timeline emulated) ---------------------
     FenceHandle create_fence(bool) override { D11Fence f; D3D11_QUERY_DESC qd{ D3D11_QUERY_EVENT, 0 }; dev->CreateQuery(&qd, &f.q); return { fences_.alloc(f) }; }
     void destroy_fence(FenceHandle h) override { auto* f = fences_.get(h.id); if (f && f->q) f->q->Release(); fences_.release(h.id); }
@@ -354,7 +407,10 @@ public:
     }
     void read_buffer(BufferHandle h, void* dst, uint32_t size, uint32_t offset) override {
         auto* b = buffers_.get(h.id); if (!b || !dst) return;
-        D3D11_BUFFER_DESC bd = {}; bd.ByteWidth = b->size; bd.Usage = D3D11_USAGE_STAGING; bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        // Stage at the resource's real (padded) width — CopyResource requires identical
+        // sizes, and b->buf is rounded up (16 for VB/IB/CB, 4 for raw storage). Using the
+        // unpadded logical size here silently fails the copy for non-16-multiple buffers.
+        D3D11_BUFFER_DESC bd = {}; bd.ByteWidth = b->byte_width; bd.Usage = D3D11_USAGE_STAGING; bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         ID3D11Buffer* stg = nullptr; dev->CreateBuffer(&bd, nullptr, &stg);
         ctx->CopyResource(stg, b->buf);
         D3D11_MAPPED_SUBRESOURCE m{}; if (ctx->Map(stg, 0, D3D11_MAP_READ, 0, &m) == S_OK) { std::memcpy(dst, (const uint8_t*)m.pData + offset, size); ctx->Unmap(stg, 0); }
@@ -367,8 +423,12 @@ public:
         ID3D11Texture2D* stg = nullptr; dev->CreateTexture2D(&td, nullptr, &stg);
         ctx->CopyResource(stg, t->tex);
         D3D11_MAPPED_SUBRESOURCE m{}; if (ctx->Map(stg, 0, D3D11_MAP_READ, 0, &m) == S_OK) {
-            const uint8_t* src = (const uint8_t*)m.pData + r.y * m.RowPitch + r.x * 4;
-            for (int row = 0; row < r.height; ++row) std::memcpy((uint8_t*)dst + row * r.width * 4, src + row * m.RowPitch, r.width * 4);
+            int bw = 1, bh = 1; texture_format_block_dims(t->tf, &bw, &bh);
+            const int    bpp        = texture_format_bytes_per_pixel(t->tf);   // per-pixel or per-block
+            const size_t copy_pitch = texture_format_row_pitch(t->tf, r.width);
+            const int    rows       = texture_format_row_count(t->tf, r.height);
+            const uint8_t* src = (const uint8_t*)m.pData + (r.y / bh) * m.RowPitch + (r.x / bw) * bpp;
+            for (int row = 0; row < rows; ++row) std::memcpy((uint8_t*)dst + row * copy_pitch, src + row * m.RowPitch, copy_pitch);
             ctx->Unmap(stg, 0);
         }
         stg->Release();
@@ -414,18 +474,32 @@ public:
     D11Commander(D11Device* d) : dev_(d), ctx_(d->ctx) {}
     D11Device* device() const { return dev_; }
 
+    ~D11Commander() { if (bb_rtv_) bb_rtv_->Release(); }
     void begin() override {}
     void end() override {}
-    void set_render_target_backbuffer() override { /* present path: bind swapchain RTV (TODO) */ }
+    // Bind the swapchain backbuffer as the sole colour target (windowed present). FLIP_DISCARD
+    // recycles buffer 0 each Present, so re-acquire it and rebuild the RTV every bind.
+    void set_render_target_backbuffer() override {
+        if (bb_rtv_) { bb_rtv_->Release(); bb_rtv_ = nullptr; }
+        color0_ = nullptr; depth0_ = nullptr; cur_color_rtv_ = nullptr;
+        if (!dev_->swap_chain) return;
+        ID3D11Texture2D* bb = nullptr;
+        if (FAILED(dev_->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) || !bb) return;
+        dev_->dev->CreateRenderTargetView(bb, nullptr, &bb_rtv_);
+        bb->Release();
+        cur_color_rtv_ = bb_rtv_;
+        ctx_->OMSetRenderTargets(1, &bb_rtv_, nullptr);
+    }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
         ID3D11RenderTargetView* rtvs[8] = {}; int n = 0; color0_ = nullptr; depth0_ = nullptr;
         for (int i = 0; i < count && i < 8 && colors; ++i) if (auto* rt = dev_->rt(colors[i].id)) if (auto* t = dev_->texture(rt->color_tex)) { rtvs[n++] = t->rtv; if (!color0_) color0_ = t; }
         if (depth.valid()) if (auto* rt = dev_->rt(depth.id)) if (auto* t = dev_->texture(rt->depth_tex)) depth0_ = t;
+        cur_color_rtv_ = n > 0 ? rtvs[0] : nullptr;
         ctx_->OMSetRenderTargets(n, rtvs, depth0_ ? depth0_->dsv : nullptr);
     }
     void set_viewport(const Viewport& v) override { D3D11_VIEWPORT vp{ v.x, v.y, v.width, v.height, v.min_depth, v.max_depth }; ctx_->RSSetViewports(1, &vp); }
     void set_scissor(const ScissorRect& r) override { D3D11_RECT rc{ r.x, r.y, r.x + r.width, r.y + r.height }; ctx_->RSSetScissorRects(1, &rc); }
-    void clear_color(const ClearColor& c) override { if (color0_ && color0_->rtv) { float col[4]{ c.r, c.g, c.b, c.a }; ctx_->ClearRenderTargetView(color0_->rtv, col); } }
+    void clear_color(const ClearColor& c) override { if (cur_color_rtv_) { float col[4]{ c.r, c.g, c.b, c.a }; ctx_->ClearRenderTargetView(cur_color_rtv_, col); } }
     void clear_depth_stencil(const ClearDepthStencil& ds) override { if (depth0_ && depth0_->dsv) ctx_->ClearDepthStencilView(depth0_->dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, ds.depth, ds.stencil); }
     void set_pipeline(PipelineHandle h) override {
         auto* p = dev_->pipeline(h.id); if (!p) return; cur_ = p;
@@ -438,7 +512,7 @@ public:
     void bind_index_buffer(BufferHandle h, IndexFormat fmt, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (b) ctx_->IASetIndexBuffer(b->buf, fmt == IndexFormat::UInt16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT, offset); }
     void bind_texture(uint32_t slot, TextureHandle h) override { auto* t = dev_->texture(h.id); if (t) { ctx_->PSSetShaderResources(slot, 1, &t->srv); ctx_->VSSetShaderResources(slot, 1, &t->srv); } }
     void bind_sampler(uint32_t slot, SamplerHandle h) override { auto* s = dev_->sampler(h.id); if (s) ctx_->PSSetSamplers(slot, 1, &s->s); }
-    void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t, uint32_t) override { auto* b = dev_->buffer(h.id); if (b) { ctx_->VSSetConstantBuffers(slot, 1, &b->buf); ctx_->PSSetConstantBuffers(slot, 1, &b->buf); } }
+    void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t, uint32_t) override { auto* b = dev_->buffer(h.id); if (b) { ctx_->VSSetConstantBuffers(slot, 1, &b->buf); ctx_->PSSetConstantBuffers(slot, 1, &b->buf); ctx_->CSSetConstantBuffers(slot, 1, &b->buf); } }
     void push_constants(uint32_t, const void*, uint32_t) override { d11_unsupported("push_constants (use a constant buffer)"); }
     void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t, uint32_t) override { auto* b = dev_->buffer(h.id); if (b && b->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &b->uav, nullptr); }
     void bind_storage_texture(uint32_t slot, TextureHandle h, int, StorageAccess) override { auto* t = dev_->texture(h.id); if (t && t->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &t->uav, nullptr); }
@@ -497,6 +571,8 @@ public:
 private:
     D11Device* dev_ = nullptr; ID3D11DeviceContext* ctx_ = nullptr;
     D11Pipeline* cur_ = nullptr; D11Texture* color0_ = nullptr; D11Texture* depth0_ = nullptr;
+    ID3D11RenderTargetView* cur_color_rtv_ = nullptr;  // current colour target's RTV (RT or backbuffer), for clear
+    ID3D11RenderTargetView* bb_rtv_ = nullptr;         // owned backbuffer RTV (recreated each bind)
 };
 
 } // namespace

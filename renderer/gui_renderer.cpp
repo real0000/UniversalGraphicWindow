@@ -1,48 +1,57 @@
 #include "gui_renderer.hpp"
-#include "gui_vk_vert.spv.h"        // Vulkan SPIR-V (glslangValidator): proj via push constant
-#include "gui_vk_atlas_frag.spv.h"  // sampler2DArray atlas (alpha mask / solid)
-#include "gui_vk_image_frag.spv.h"  // sampler2D image * tint
+
+#include "shader_compiler/shader_compiler.hpp"   // HLSL -> backend blob (cached) at runtime
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace window {
 namespace gui {
 namespace {
 
+using gfx::ShaderCompiler;
+
 const int FLOATS_PER_VERT = 9;  // pos2 + uvw3 + rgba4
 
-// GLSL (OpenGL backend). Projection comes through a std140 UBO at binding 0
-// (the abstraction's push_constants); the glyph atlas is a sampler2DArray.
-const char* VS_GLSL = R"(#version 460 core
-layout(location=0) in vec2 aPos;
-layout(location=1) in vec3 aUVW;
-layout(location=2) in vec4 aColor;
-out vec3 vUVW;
-out vec4 vColor;
-layout(std140, binding=0) uniform Proj { mat4 uProjection; };
-void main() { gl_Position = uProjection * vec4(aPos, 0.0, 1.0); vUVW = aUVW; vColor = aColor; }
-)";
+// One HLSL language for every backend, compiled + disk-cached at runtime with NO per-backend
+// flags. Resources share one set: projection UBO at register(b0) -> binding 0, the texture at
+// register(t1) -> binding 1, the sampler at register(s2) -> binding 2 (distinct numbers so they
+// don't collide in a Vulkan set; SPIRV-Cross folds texture+sampler into a combined sampler for
+// OpenGL). Vertex inputs use TEXCOORD<n> so the RHI maps attribute n.
+//
+// Atlas source: vertex + the glyph/solid pixel shader (sampler2DArray as an alpha mask).
+const char* kHLSL_ATLAS = R"(
+cbuffer Proj : register(b0) { float4x4 uProjection; };
 
-const char* FS_GLSL = R"(#version 460 core
-in vec3 vUVW;
-in vec4 vColor;
-out vec4 FragColor;
-uniform sampler2DArray uTexture;
-void main() {
-    if (vUVW.z >= 0.0) { float a = texture(uTexture, vUVW).r; FragColor = vec4(vColor.rgb, vColor.a * a); }
-    else               { FragColor = vColor; }
+struct VSIn  { float2 pos : TEXCOORD0; float3 uvw : TEXCOORD1; float4 color : TEXCOORD2; };
+struct VSOut { float4 pos : SV_Position; float3 uvw : TEXCOORD0; float4 color : TEXCOORD1; };
+
+VSOut vs_main(VSIn i) {
+    VSOut o;
+    o.pos   = mul(uProjection, float4(i.pos, 0.0, 1.0));
+    o.uvw   = i.uvw;
+    o.color = i.color;
+    return o;
+}
+
+Texture2DArray uAtlas : register(t1);
+SamplerState   uSamp  : register(s2);
+float4 ps_atlas(VSOut i) : SV_Target {
+    if (i.uvw.z >= 0.0) {                                  // glyph: R8 atlas as an alpha mask
+        float a = uAtlas.Sample(uSamp, i.uvw).r;
+        return float4(i.color.rgb, i.color.a * a);
+    }
+    return i.color;                                        // solid colour
 }
 )";
 
-// Image fragment shader: samples a full RGBA sampler2D and modulates by the vertex
-// colour (tint). Shares VS_GLSL; uvw.z (the atlas layer) is unused here.
-const char* FS_IMAGE_GLSL = R"(#version 460 core
-in vec3 vUVW;
-in vec4 vColor;
-out vec4 FragColor;
-uniform sampler2D uImage;
-void main() { FragColor = texture(uImage, vUVW.xy) * vColor; }
+// Image source: full RGBA sampler2D modulated by the vertex colour (tint).
+const char* kHLSL_IMAGE = R"(
+struct VSOut { float4 pos : SV_Position; float3 uvw : TEXCOORD0; float4 color : TEXCOORD1; };
+Texture2D    uImage : register(t1);
+SamplerState uSamp  : register(s2);
+float4 ps_image(VSOut i) : SV_Target { return uImage.Sample(uSamp, i.uvw.xy) * i.color; }
 )";
 
 } // namespace
@@ -52,39 +61,46 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     if (!device_) return false;
     backend_ = device_->get_backend();
 
-    // Shaders are per-backend: GL uses GLSL (proj via a UBO emulating push_constants,
-    // atlas via bind_texture); Vulkan uses SPIR-V (proj via a real push constant,
-    // atlas/image via a descriptor set). D3D/Metal renderer shaders are a follow-up.
-    ShaderDesc vd; vd.stage = ShaderStage::Vertex;
-    ShaderDesc fd; fd.stage = ShaderStage::Fragment;
-    ShaderDesc fid; fid.stage = ShaderStage::Fragment;
-    if (backend_ == Backend::Vulkan) {
-        vd.language  = ShaderLanguage::SPIRV; vd.code  = gui_vk_vert_spv;        vd.code_size  = sizeof(gui_vk_vert_spv);
-        fd.language  = ShaderLanguage::SPIRV; fd.code  = gui_vk_atlas_frag_spv;  fd.code_size  = sizeof(gui_vk_atlas_frag_spv);
-        fid.language = ShaderLanguage::SPIRV; fid.code = gui_vk_image_frag_spv;  fid.code_size = sizeof(gui_vk_image_frag_spv);
-    } else if (backend_ == Backend::OpenGL) {
-        vd.language  = ShaderLanguage::GLSL; vd.code  = VS_GLSL;
-        fd.language  = ShaderLanguage::GLSL; fd.code  = FS_GLSL;
-        fid.language = ShaderLanguage::GLSL; fid.code = FS_IMAGE_GLSL;
-    } else {
-        return false;   // D3D/Metal GUI shaders not provided yet (follow-up)
-    }
-    vs_       = device_->create_shader(vd);
-    fs_       = device_->create_shader(fd);
-    fs_image_ = device_->create_shader(fid);
+    // One HLSL source compiled (and disk-cached) for the active backend, with no per-backend
+    // flags. Works on every backend the RHI supports (the projection is a uniform buffer, not a
+    // push constant, so there is no D3D11 restriction).
+#ifdef WINDOW_SUPPORT_SHADER_COMPILER
+    const size_t atlas_len = std::strlen(kHLSL_ATLAS);
+    const size_t image_len = std::strlen(kHLSL_IMAGE);
+    vs_       = ShaderCompiler::compile_and_create_cached(device_, kHLSL_ATLAS, atlas_len, ShaderStage::Vertex,   "vs_main");
+    fs_       = ShaderCompiler::compile_and_create_cached(device_, kHLSL_ATLAS, atlas_len, ShaderStage::Fragment, "ps_atlas");
+    fs_image_ = ShaderCompiler::compile_and_create_cached(device_, kHLSL_IMAGE, image_len, ShaderStage::Fragment, "ps_image");
     if (!vs_.valid() || !fs_.valid() || !fs_image_.valid()) return false;
+#else
+    return false;   // the GUI renderer's shaders now require the built-in shader compiler
+#endif
 
-    // Modern backends: a pipeline layout (push range for proj + a 1-binding atlas/
-    // image descriptor set) and a sampler. GL ignores the layout (UBO + bind_texture).
-    if (uses_descriptor_sets()) {
-        DescriptorSetLayoutDesc dl; dl.binding_count = 1;
-        dl.bindings[0] = { 0, BindingType::CombinedImageSampler, 1, STAGE_FRAGMENT };
-        set_layout_ = device_->create_descriptor_set_layout(dl);
-        PipelineLayoutDesc pll; pll.set_layout_count = 1; pll.set_layouts[0] = set_layout_;
-        pll.push_constant_count = 1; pll.push_constants[0] = { 0, 16 * sizeof(float), STAGE_VERTEX };
-        pipe_layout_ = device_->create_pipeline_layout(pll);
-        SamplerState ss; sampler_ = device_->create_sampler(ss);
+    // Projection uniform buffer ring (a fresh slot per render() so multiple GUI passes a frame
+    // don't clobber each other on deferred backends; separate buffers => full updates for D3D11).
+    float identity[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+    for (uint32_t i = 0; i < kUboSlots; ++i) {
+        BufferDesc ud; ud.size = 16 * sizeof(float); ud.type = BufferType::Uniform;
+        ud.usage = ResourceUsage::Dynamic; ud.initial_data = identity;
+        proj_ubo_[i] = device_->create_buffer(ud);
+        if (!proj_ubo_[i].valid()) return false;
     }
+
+    // 1x1 white atlas so solid-only draws (no glyph atlas supplied) still bind a complete set.
+    uint8_t white = 255;
+    TextureDesc dt; dt.width = 1; dt.height = 1; dt.array_layers = 1; dt.array_texture = true;
+    dt.format = TextureFormat::R8_UNORM; dt.usage = TEXTURE_USAGE_SAMPLED; dt.initial_data = &white;
+    dummy_atlas_ = device_->create_texture(dt);
+
+    // One descriptor set per draw: UBO (binding 0, vertex) + texture (1) + sampler (2, fragment).
+    // The RHI emulates this on GL/D3D11 as slot binds, so it works on every backend uniformly.
+    SamplerState ss; sampler_ = device_->create_sampler(ss);
+    DescriptorSetLayoutDesc dl; dl.binding_count = 3;
+    dl.bindings[0] = { 0, BindingType::UniformBuffer,  1, STAGE_VERTEX };
+    dl.bindings[1] = { 1, BindingType::SampledTexture, 1, STAGE_FRAGMENT };
+    dl.bindings[2] = { 2, BindingType::Sampler,        1, STAGE_FRAGMENT };
+    set_layout_ = device_->create_descriptor_set_layout(dl);
+    PipelineLayoutDesc pll; pll.set_layout_count = 1; pll.set_layouts[0] = set_layout_;
+    pipe_layout_ = device_->create_pipeline_layout(pll);
 
     // Both pipelines share everything but the fragment shader (atlas vs image).
     PipelineDesc pd;
@@ -108,22 +124,29 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     return pipeline_.valid() && image_pipeline_.valid();
 }
 
-// Per-texture descriptor set (cached by texture id) for the modern-binding path:
-// one combined-image-sampler at binding 0 (atlas = sampler2DArray, image = sampler2D).
-DescriptorSetHandle GpuGuiRenderer::desc_set_for(TextureHandle tex) {
-    auto it = desc_sets_.find(tex.id);
+// Per-draw descriptor set (cached by UBO slot + texture id): the projection UBO of `ubo_slot` at
+// binding 0, the texture at 1, the sampler at 2 (atlas = sampler2DArray, image = sampler2D). Caching
+// by (slot,texture) keeps each pair created once -- the slot ring cycles deterministically and the
+// texture set is small, so the cache stays bounded with no per-frame churn.
+DescriptorSetHandle GpuGuiRenderer::desc_set_for(TextureHandle tex, uint32_t ubo_slot) {
+    const uint64_t key = (uint64_t(ubo_slot) << 32) | uint32_t(tex.id);
+    auto it = desc_sets_.find(key);
     if (it != desc_sets_.end()) return it->second;
-    DescriptorSetDesc d; d.layout = set_layout_; d.write_count = 1;
-    d.writes[0].binding = 0; d.writes[0].type = BindingType::CombinedImageSampler;
-    d.writes[0].texture = tex; d.writes[0].sampler = sampler_;
+    DescriptorSetDesc d; d.layout = set_layout_; d.write_count = 3;
+    d.writes[0].binding = 0; d.writes[0].type = BindingType::UniformBuffer;  d.writes[0].buffer = proj_ubo_[ubo_slot]; d.writes[0].buffer_size = 16 * sizeof(float);
+    d.writes[1].binding = 1; d.writes[1].type = BindingType::SampledTexture; d.writes[1].texture = tex;
+    d.writes[2].binding = 2; d.writes[2].type = BindingType::Sampler;        d.writes[2].sampler = sampler_;
     DescriptorSetHandle set = device_->create_descriptor_set(d);
-    desc_sets_.emplace(tex.id, set);
+    desc_sets_.emplace(key, set);
     return set;
 }
 
 void GpuGuiRenderer::shutdown() {
     if (!device_) return;
     if (vbo_.valid())            device_->destroy_buffer(vbo_);
+    for (uint32_t i = 0; i < kUboSlots; ++i)
+        if (proj_ubo_[i].valid()) device_->destroy_buffer(proj_ubo_[i]);
+    if (dummy_atlas_.valid())    device_->destroy_texture(dummy_atlas_);
     if (pipeline_.valid())       device_->destroy_pipeline(pipeline_);
     if (image_pipeline_.valid()) device_->destroy_pipeline(image_pipeline_);
     if (vs_.valid())             device_->destroy_shader(vs_);
@@ -263,7 +286,7 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
                 const float by = math::y(math::box_min(ref.clip));
                 sx = int(bx * scale); sw = int(bw * scale); sh = int(bh * scale);
                 // GL scissor origin is bottom-left (Y flip); Vulkan/D3D/Metal are top-left.
-                sy = uses_descriptor_sets() ? int(by * scale) : int(fb_h - (by + bh) * scale);
+                sy = flip_scissor_y() ? int(fb_h - (by + bh) * scale) : int(by * scale);
             }
             force_break = true;   // applies even if the next primitive(s) are skipped
         }
@@ -309,28 +332,37 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
     flush();
     if (verts_.empty()) return;
 
+    // VBO ring: write this pass at its own byte offset so an earlier pass this frame is not
+    // overwritten on deferred backends (Vulkan/D3D12); wrap when full, grow if one pass exceeds
+    // the capacity. Every segment binds the buffer at vbo_base and indexes with its first-vertex.
     const uint32_t bytes = uint32_t(verts_.size() * sizeof(float));
-    if (!vbo_.valid() || bytes > vbo_capacity_) {
+    const uint32_t need  = (bytes + 15u) & ~15u;
+    if (!vbo_.valid() || need > vbo_capacity_) {
         if (vbo_.valid()) device_->destroy_buffer(vbo_);
-        BufferDesc bd; bd.size = bytes; bd.type = BufferType::Vertex; bd.usage = ResourceUsage::Dynamic; bd.initial_data = verts_.data();
-        vbo_ = device_->create_buffer(bd);
-        vbo_capacity_ = bytes;
-    } else {
-        device_->update_buffer(vbo_, verts_.data(), bytes, 0);
+        uint32_t cap = vbo_capacity_ ? vbo_capacity_ : 64u * 1024u;
+        while (cap < need) cap *= 2;
+        BufferDesc bd; bd.size = cap; bd.type = BufferType::Vertex; bd.usage = ResourceUsage::Dynamic;
+        vbo_ = device_->create_buffer(bd); vbo_capacity_ = cap; vbo_off_ = 0;
+    } else if (vbo_off_ + need > vbo_capacity_) {
+        vbo_off_ = 0;   // wrap (prior frames' passes are done via per-frame present sync)
     }
+    const uint32_t vbo_base = vbo_off_;
+    device_->update_buffer(vbo_, verts_.data(), bytes, vbo_base);
+    vbo_off_ += need;
+
+    // Projection -> a fresh UBO ring slot; every draw's descriptor set points at this slot.
+    const uint32_t slot = ubo_slot_;
+    ubo_slot_ = (ubo_slot_ + 1) % kUboSlots;
+    device_->update_buffer(proj_ubo_[slot], proj, 16 * sizeof(float), 0);
 
     for (const auto& s : segs) {
         cmd->set_pipeline(s.kind == Kind::Image ? image_pipeline_ : pipeline_);
-        cmd->push_constants(0, proj, 16 * sizeof(float));
-        cmd->bind_vertex_buffer(0, vbo_);
-        const TextureHandle tex = (s.kind == Kind::Image) ? TextureHandle{ s.tex } : atlas;
-        if (uses_descriptor_sets()) {
-            // Vulkan/D3D/Metal: bind the texture through a (cached) descriptor set.
-            if (tex.valid()) cmd->bind_descriptor_set(0, desc_set_for(tex));
-        } else {
-            // OpenGL: direct texture binding (proj is the emulated UBO at binding 0).
-            if (tex.valid()) cmd->bind_texture(0, tex);
-        }
+        cmd->bind_vertex_buffer(0, vbo_, vbo_base);
+        // Atlas-kind draws fall back to the 1x1 dummy atlas when none was supplied, so the set
+        // (which carries the projection UBO) is always complete and bindable.
+        TextureHandle tex = (s.kind == Kind::Image) ? TextureHandle{ s.tex }
+                                                    : (atlas.valid() ? atlas : dummy_atlas_);
+        cmd->bind_descriptor_set(0, desc_set_for(tex, slot));   // UBO slot + texture + sampler; same on every backend
         cmd->set_scissor(ScissorRect{ s.sx, s.sy, s.sw, s.sh });
         cmd->draw(s.count, s.first);
     }

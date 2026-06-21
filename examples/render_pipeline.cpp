@@ -280,6 +280,34 @@ static void test_texture_upload(Ctx& c) {
     c.dev->destroy_texture(t);
 }
 
+// Block-compressed upload/readback: the bytes are opaque BC1 blocks, so a correct
+// block-aware update_texture/read_texture round-trips them byte-exact. Exercises both
+// the create-with-initial_data and the explicit update_texture paths.
+static void test_compressed_texture(Ctx& c) {
+    const int W = 8, H = 8;   // 2x2 BC1 blocks (8 bytes each) = 32 bytes
+    const size_t bytes = texture_format_image_size(TextureFormat::BC1_UNORM, W, H);
+    std::vector<uint8_t> blocks(bytes);
+    for (size_t i = 0; i < bytes; ++i) blocks[i] = uint8_t((i * 37 + 11) & 0xFF);
+
+    auto run = [&](const char* tag, bool via_update) {
+        TextureDesc td; td.width = W; td.height = H; td.format = TextureFormat::BC1_UNORM;
+        td.usage = TEXTURE_USAGE_SAMPLED | TEXTURE_USAGE_COPY_SRC | TEXTURE_USAGE_COPY_DST;
+        if (!via_update) td.initial_data = blocks.data();
+        TextureHandle t = c.dev->create_texture(td);
+        if (!t.valid()) { skip(tag, "BC1 not supported on this backend"); return; }
+        if (via_update) { TextureRegion u; u.x = u.y = 0; u.width = W; u.height = H; c.dev->update_texture(t, u, blocks.data()); }
+        std::vector<uint8_t> back(bytes, 0);
+        TextureRegion r; r.x = r.y = 0; r.width = W; r.height = H;
+        c.dev->read_texture(t, r, back.data());
+        bool ok = true; size_t bad = 0;
+        for (size_t i = 0; i < bytes; ++i) if (blocks[i] != back[i]) { ok = false; ++bad; }
+        check(tag, ok, ok ? "BC1 32B round-trip exact" : (std::to_string(bad) + "/" + std::to_string(bytes) + " bytes differ"));
+        c.dev->destroy_texture(t);
+    };
+    run("texture.bc1_initial", false);   // create_texture(initial_data) -> read_texture
+    run("texture.bc1_update",  true);    // create_texture + update_texture -> read_texture
+}
+
 static void test_rt_clear(Ctx& c) {
     RenderTargetDesc rd; rd.width = RT_W; rd.height = RT_H; rd.format = TextureFormat::RGBA8_UNORM;
     RenderTargetHandle rt = c.dev->create_render_target(rd);
@@ -836,6 +864,7 @@ static bool run_backend(Backend backend, const char* name) {
     test_caps(c);
     test_buffers(c);
     test_texture_upload(c);
+    test_compressed_texture(c);
     test_rt_clear(c);
     test_depth_target(c);
     test_fence(c);

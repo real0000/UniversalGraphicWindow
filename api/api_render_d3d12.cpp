@@ -20,10 +20,13 @@
 
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <d3dcompiler.h>   // D3DReflect — auto root signature from DXBC for slot binding
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <vector>
+#pragma comment(lib, "d3dcompiler.lib")
 
 namespace window {
 namespace {
@@ -50,6 +53,21 @@ DXGI_FORMAT tex_format(TextureFormat f) {
         case TextureFormat::RGBA32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
         case TextureFormat::D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        // Block-compressed (BCn). ETC2/ASTC have no D3D equivalent (CPU-decode them).
+        case TextureFormat::BC1_UNORM: return DXGI_FORMAT_BC1_UNORM;
+        case TextureFormat::BC1_UNORM_SRGB: return DXGI_FORMAT_BC1_UNORM_SRGB;
+        case TextureFormat::BC2_UNORM: return DXGI_FORMAT_BC2_UNORM;
+        case TextureFormat::BC2_UNORM_SRGB: return DXGI_FORMAT_BC2_UNORM_SRGB;
+        case TextureFormat::BC3_UNORM: return DXGI_FORMAT_BC3_UNORM;
+        case TextureFormat::BC3_UNORM_SRGB: return DXGI_FORMAT_BC3_UNORM_SRGB;
+        case TextureFormat::BC4_UNORM: return DXGI_FORMAT_BC4_UNORM;
+        case TextureFormat::BC4_SNORM: return DXGI_FORMAT_BC4_SNORM;
+        case TextureFormat::BC5_UNORM: return DXGI_FORMAT_BC5_UNORM;
+        case TextureFormat::BC5_SNORM: return DXGI_FORMAT_BC5_SNORM;
+        case TextureFormat::BC6H_UF16: return DXGI_FORMAT_BC6H_UF16;
+        case TextureFormat::BC6H_SF16: return DXGI_FORMAT_BC6H_SF16;
+        case TextureFormat::BC7_UNORM: return DXGI_FORMAT_BC7_UNORM;
+        case TextureFormat::BC7_UNORM_SRGB: return DXGI_FORMAT_BC7_UNORM_SRGB;
         default: return DXGI_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -101,9 +119,13 @@ D3D12_COMPARISON_FUNC d12_compare(CompareFunc f) {
 }
 
 struct D12Buffer  { ID3D12Resource* res = nullptr; UINT64 size = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; ID3D12Resource* map_upload = nullptr; };
-struct D12Texture { ID3D12Resource* res = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; int w = 0, h = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; };
+struct D12Texture { ID3D12Resource* res = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; TextureFormat tf = TextureFormat::RGBA8_UNORM; int w = 0, h = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+                   bool owns_res = true; };   // false for imported resources we must not Release
 struct D12Sampler { D3D12_SAMPLER_DESC desc{}; };
-struct D12Shader  { std::vector<uint8_t> bytecode; ShaderStage stage = ShaderStage::Vertex; };
+// Reflected resource binding from DXBC: (register, kind). kind: 0=CBV(b#), 1=UAV(u#).
+// (SRV/sampler slot binding on D3D12's auto path is a follow-up; explicit layouts handle them.)
+struct D12Shader  { std::vector<uint8_t> bytecode; ShaderStage stage = ShaderStage::Vertex;
+                    std::vector<std::pair<UINT, int>> binds; };
 // Per descriptor set, the root-parameter index of its CBV/SRV/UAV table and (separate,
 // as D3D12 requires) its SAMPLER table. -1 = that set has no table of that kind.
 struct SetParams { int srv_param = -1; int samp_param = -1; };
@@ -137,8 +159,42 @@ public:
     static const UINT kGpuHeapCount = 4096;
     static const UINT kSampHeapCount = 256;
 
+    // Swapchain backbuffers for the windowed present path (set_render_target_backbuffer).
+    IDXGISwapChain*       swap_raw_ = nullptr;   // from native_swapchain()
+    IDXGISwapChain3*      swap3_    = nullptr;   // QI'd lazily (GetCurrentBackBufferIndex)
+    ID3D12DescriptorHeap* bb_rtv_heap_ = nullptr;
+    ID3D12Resource*       backbuffers_[8] = {};
+    D3D12_CPU_DESCRIPTOR_HANDLE bb_rtv_[8] = {};
+    D3D12_RESOURCE_STATES  bb_state_[8] = {};
+    UINT                   bb_count_ = 0;
+
+    // Lazily wrap the swapchain backbuffers as render targets (one RTV each, own heap).
+    void ensure_backbuffers() {
+        if (swap3_ || !swap_raw_) return;
+        if (FAILED(swap_raw_->QueryInterface(IID_PPV_ARGS(&swap3_))) || !swap3_) return;
+        DXGI_SWAP_CHAIN_DESC d{}; swap3_->GetDesc(&d);
+        bb_count_ = d.BufferCount > 8 ? 8 : d.BufferCount;
+        D3D12_DESCRIPTOR_HEAP_DESC rh{ D3D12_DESCRIPTOR_HEAP_TYPE_RTV, bb_count_, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
+        dev->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&bb_rtv_heap_));
+        auto base = bb_rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+        for (UINT i = 0; i < bb_count_; ++i) {
+            swap3_->GetBuffer(i, IID_PPV_ARGS(&backbuffers_[i]));
+            bb_rtv_[i] = base; bb_rtv_[i].ptr += SIZE_T(i) * rtv_size;
+            dev->CreateRenderTargetView(backbuffers_[i], nullptr, bb_rtv_[i]);
+            bb_state_[i] = D3D12_RESOURCE_STATE_PRESENT;
+        }
+    }
+    UINT current_bb_index() { return swap3_ ? swap3_->GetCurrentBackBufferIndex() : 0; }
+    void transition_bb(ID3D12GraphicsCommandList* cl, UINT i, D3D12_RESOURCE_STATES to) {
+        if (i >= bb_count_ || bb_state_[i] == to) return;
+        D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition = { backbuffers_[i], D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, bb_state_[i], to };
+        cl->ResourceBarrier(1, &b); bb_state_[i] = to;
+    }
+
     explicit D12Device(Graphics* g) {
         dev = (ID3D12Device*)g->native_device(); queue = (ID3D12CommandQueue*)g->native_context();
+        swap_raw_ = (IDXGISwapChain*)g->native_swapchain();
         dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&imm_fence));
         imm_event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
         D3D12_DESCRIPTOR_HEAP_DESC rh{ D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kHeapCount, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
@@ -150,7 +206,7 @@ public:
         D3D12_DESCRIPTOR_HEAP_DESC sh{ D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSampHeapCount, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0 };
         dev->CreateDescriptorHeap(&sh, IID_PPV_ARGS(&samp_heap)); samp_size = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     }
-    ~D12Device() override { if (samp_heap) samp_heap->Release(); if (gpu_heap) gpu_heap->Release(); if (default_root_) default_root_->Release(); if (rtv_heap) rtv_heap->Release(); if (dsv_heap) dsv_heap->Release(); if (imm_fence) imm_fence->Release(); if (imm_event) CloseHandle(imm_event); }
+    ~D12Device() override { for (UINT i = 0; i < bb_count_; ++i) if (backbuffers_[i]) backbuffers_[i]->Release(); if (bb_rtv_heap_) bb_rtv_heap_->Release(); if (swap3_) swap3_->Release(); if (samp_heap) samp_heap->Release(); if (gpu_heap) gpu_heap->Release(); if (default_root_) default_root_->Release(); if (rtv_heap) rtv_heap->Release(); if (dsv_heap) dsv_heap->Release(); if (imm_fence) imm_fence->Release(); if (imm_event) CloseHandle(imm_event); }
 
     D3D12_CPU_DESCRIPTOR_HANDLE alloc_rtv() { auto h = rtv_heap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(rtv_next++ % kHeapCount) * rtv_size; return h; }
     D3D12_CPU_DESCRIPTOR_HANDLE alloc_dsv() { auto h = dsv_heap->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(dsv_next++ % kHeapCount) * dsv_size; return h; }
@@ -219,7 +275,7 @@ public:
     void destroy_buffer(BufferHandle h) override { auto* b = buffers_.get(h.id); if (b) { if (b->map_upload) b->map_upload->Release(); if (b->res) b->res->Release(); } buffers_.release(h.id); }
 
     TextureHandle create_texture(const TextureDesc& d) override {
-        D12Texture t; t.fmt = tex_format(d.format); t.w = d.width; t.h = d.height;
+        D12Texture t; t.fmt = tex_format(d.format); t.tf = d.format; t.w = d.width; t.h = d.height;
         D3D12_RESOURCE_DESC rd = {}; rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; rd.Width = d.width; rd.Height = d.height;
         rd.DepthOrArraySize = d.array_layers > 1 ? d.array_layers : 1; rd.MipLevels = d.mip_levels ? d.mip_levels : 1; rd.Format = t.fmt; rd.SampleDesc.Count = d.samples > 1 ? d.samples : 1;
         if (d.usage & TEXTURE_USAGE_RENDER_TARGET) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
@@ -232,23 +288,29 @@ public:
     }
     void update_texture(TextureHandle h, const TextureRegion& r, const void* data) override {
         auto* t = textures_.get(h.id); if (!t || !data) return;
-        const UINT64 rowPitch = (UINT64(r.width) * 4 + 255) & ~255ull; const UINT64 upSize = rowPitch * r.height;
+        int bw = 1, bh = 1; texture_format_block_dims(t->tf, &bw, &bh);
+        const UINT64 srcRowPitch = texture_format_row_pitch(t->tf, r.width);          // tight bytes per (block)row
+        const int    rows        = texture_format_row_count(t->tf, r.height);         // texel- or block-rows
+        const UINT64 rowPitch    = (srcRowPitch + 255) & ~255ull;                     // D3D12 256-byte row alignment
+        const UINT64 upSize      = rowPitch * UINT64(rows);
+        const UINT   fpW = UINT(((r.width  + bw - 1) / bw) * bw);                     // footprint dims block-aligned
+        const UINT   fpH = UINT(((r.height + bh - 1) / bh) * bh);
         D3D12_RESOURCE_DESC bd = {}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = upSize; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         ID3D12Resource* up = commit(bd, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         uint8_t* p = nullptr; D3D12_RANGE rng{ 0, 0 }; up->Map(0, &rng, (void**)&p);
-        for (int y = 0; y < r.height; ++y) std::memcpy(p + y * rowPitch, (const uint8_t*)data + y * r.width * 4, r.width * 4);
+        for (int y = 0; y < rows; ++y) std::memcpy(p + y * rowPitch, (const uint8_t*)data + y * srcRowPitch, (size_t)srcRowPitch);
         up->Unmap(0, nullptr);
         immediate([&](ID3D12GraphicsCommandList* cl) {
             D3D12_TEXTURE_COPY_LOCATION dstL{}; dstL.pResource = t->res; dstL.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dstL.SubresourceIndex = r.mip;
             D3D12_TEXTURE_COPY_LOCATION srcL{}; srcL.pResource = up; srcL.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            srcL.PlacedFootprint.Footprint = { t->fmt, (UINT)r.width, (UINT)r.height, 1, (UINT)rowPitch };
+            srcL.PlacedFootprint.Footprint = { t->fmt, fpW, fpH, 1, (UINT)rowPitch };
             transition(cl, t, D3D12_RESOURCE_STATE_COPY_DEST);
             cl->CopyTextureRegion(&dstL, r.x, r.y, 0, &srcL, nullptr);
         });
         up->Release();
     }
     void generate_mipmaps(TextureHandle) override { d12_unsupported("generate_mipmaps (run a downsample compute pass)"); }
-    void destroy_texture(TextureHandle h) override { auto* t = textures_.get(h.id); if (t && t->res) t->res->Release(); textures_.release(h.id); }
+    void destroy_texture(TextureHandle h) override { auto* t = textures_.get(h.id); if (t && t->res && t->owns_res) t->res->Release(); textures_.release(h.id); }
 
     SamplerHandle create_sampler(const SamplerState& s) override { D12Sampler smp; smp.desc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR; smp.desc.AddressU = smp.desc.AddressV = smp.desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP; smp.desc.MaxLOD = D3D12_FLOAT32_MAX; (void)s; return { samplers_.alloc(smp) }; }
     void destroy_sampler(SamplerHandle h) override { samplers_.release(h.id); }
@@ -256,6 +318,21 @@ public:
     ShaderHandle create_shader(const ShaderDesc& d) override {
         if (d.language != ShaderLanguage::DXIL && d.language != ShaderLanguage::DXBC) { d12_unsupported("non-DXIL shader (compile HLSL to DXIL)"); return { -1 }; }
         D12Shader sh; sh.stage = d.stage; sh.bytecode.assign((const uint8_t*)d.code, (const uint8_t*)d.code + d.code_size);
+        // Reflect cbuffer/UAV registers so a pipeline built without an explicit layout can
+        // synthesise a root signature (enables slot-based bind_uniform_buffer/bind_storage_buffer).
+        ID3D12ShaderReflection* refl = nullptr;
+        if (SUCCEEDED(D3DReflect(d.code, d.code_size, IID_PPV_ARGS(&refl))) && refl) {
+            D3D12_SHADER_DESC sd{}; refl->GetDesc(&sd);
+            for (UINT i = 0; i < sd.BoundResources; ++i) {
+                D3D12_SHADER_INPUT_BIND_DESC bd{}; refl->GetResourceBindingDesc(i, &bd);
+                if (bd.Type == D3D_SIT_CBUFFER) sh.binds.push_back({ bd.BindPoint, 0 });
+                else if (bd.Type == D3D_SIT_UAV_RWTYPED || bd.Type == D3D_SIT_UAV_RWSTRUCTURED ||
+                         bd.Type == D3D_SIT_UAV_RWBYTEADDRESS || bd.Type == D3D_SIT_UAV_APPEND_STRUCTURED ||
+                         bd.Type == D3D_SIT_UAV_CONSUME_STRUCTURED || bd.Type == D3D_SIT_UAV_RWSTRUCTURED_WITH_COUNTER)
+                    sh.binds.push_back({ bd.BindPoint, 1 });
+            }
+            refl->Release();
+        }
         return { shaders_.alloc(std::move(sh)) };
     }
     void destroy_shader(ShaderHandle h) override { shaders_.release(h.id); }
@@ -306,9 +383,40 @@ public:
     void update_descriptor_set(DescriptorSetHandle h, const DescriptorSetDesc& d) override { if (auto* s = dsets_.get(h.id)) s->writes.assign(d.writes, d.writes + d.write_count); }
     void destroy_descriptor_set(DescriptorSetHandle h) override { dsets_.release(h.id); }
 
+    // Synthesize a root signature from reflected cbuffer/UAV registers: root param i is a root
+    // CBV (or UAV) at register i, so bind_uniform_buffer(i)/bind_storage_buffer(i) -- which call
+    // SetGraphicsRoot{ConstantBufferView,UnorderedAccessView}(i) -- hit the matching param.
+    // Returns null when there are no such resources (caller falls back to the empty default).
+    ID3D12RootSignature* build_auto_root(std::initializer_list<ShaderHandle> shs) {
+        std::vector<std::pair<UINT, int>> all; UINT maxreg = 0; bool any = false;
+        for (ShaderHandle h : shs) { auto* s = shaders_.get(h.id); if (!s) continue;
+            for (auto& b : s->binds) { all.push_back(b); if (b.first > maxreg) maxreg = b.first; any = true; } }
+        if (!any) return nullptr;
+        std::vector<D3D12_ROOT_PARAMETER> params(maxreg + 1);
+        for (UINT i = 0; i <= maxreg; ++i) {
+            int kind = 0; for (auto& b : all) if (b.first == i) { kind = b.second; break; }   // gaps -> dummy CBV
+            D3D12_ROOT_PARAMETER& rp = params[i]; rp = {};
+            rp.ParameterType = (kind == 1) ? D3D12_ROOT_PARAMETER_TYPE_UAV : D3D12_ROOT_PARAMETER_TYPE_CBV;
+            rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            rp.Descriptor.ShaderRegister = i; rp.Descriptor.RegisterSpace = 0;
+        }
+        D3D12_ROOT_SIGNATURE_DESC rsd{}; rsd.NumParameters = (UINT)params.size(); rsd.pParameters = params.data();
+        rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ID3DBlob* blob = nullptr; ID3DBlob* err = nullptr;
+        D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err);
+        ID3D12RootSignature* root = nullptr;
+        if (blob) { dev->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&root)); blob->Release(); }
+        if (err) err->Release();
+        return root;
+    }
+
     PipelineHandle create_pipeline(const PipelineDesc& d) override {
         D12Pipeline p; p.vl = d.vertex_layout; auto* pl = plls_.get(d.layout.id); if (pl) { p.root = pl->root; if (p.root) p.root->AddRef(); p.set_params = pl->set_params; }
-        if (!p.root) { p.root = default_root(); if (p.root) p.root->AddRef(); }   // PSOs require a root signature
+        if (!p.root) {   // no explicit layout: synthesize one from reflection (slot binding)
+            p.root = d.compute_shader.valid() ? build_auto_root({ d.compute_shader })
+                   : build_auto_root({ d.vertex_shader, d.fragment_shader, d.geometry_shader, d.tess_control_shader, d.tess_eval_shader });
+            if (!p.root) { p.root = default_root(); if (p.root) p.root->AddRef(); }   // PSOs require a root signature
+        }
         auto blob = [&](ShaderHandle h) -> D3D12_SHADER_BYTECODE { auto* s = shaders_.get(h.id); return s ? D3D12_SHADER_BYTECODE{ s->bytecode.data(), s->bytecode.size() } : D3D12_SHADER_BYTECODE{ nullptr, 0 }; };
         if (d.compute_shader.valid()) {
             p.compute = true; D3D12_COMPUTE_PIPELINE_STATE_DESC cd = {}; cd.pRootSignature = p.root; cd.CS = blob(d.compute_shader);
@@ -354,6 +462,23 @@ public:
     TextureHandle render_target_texture(RenderTargetHandle h) override { auto* rt = rts_.get(h.id); if (!rt) return { -1 }; return { rt->color_tex >= 0 ? rt->color_tex : rt->depth_tex }; }
     void destroy_render_target(RenderTargetHandle h) override { auto* rt = rts_.get(h.id); if (!rt) return; if (rt->color_tex >= 0) destroy_texture({ rt->color_tex }); if (rt->depth_tex >= 0) destroy_texture({ rt->depth_tex }); rts_.release(h.id); }
     TextureHandle create_texture_view(const TextureViewDesc& d) override { d12_unsupported("create_texture_view (create another SRV/UAV descriptor)"); return d.texture; }
+
+    // Zero-copy interop: wrap an existing ID3D12Resource* (e.g. from a GStreamer d3d12
+    // decoder sharing this device) as a sampled RHI texture. SRVs are created on demand
+    // at bind time from t->res, so we only record the resource + its dimensions/format.
+    // It starts in COMMON state so the binding-time transition() promotes it correctly.
+    TextureHandle import_texture(const NativeTextureDesc& d) override {
+        auto* native = (ID3D12Resource*)d.d3d_resource;
+        if (!native) { d12_unsupported("import_texture (null d3d_resource)"); return { -1 }; }
+        D12Texture t; t.res = native; t.owns_res = d.take_ownership;
+        t.tf = d.format; t.fmt = tex_format(d.format); t.w = d.width; t.h = d.height;
+        const D3D12_RESOURCE_DESC rd = native->GetDesc();
+        if (t.w <= 0) t.w = (int)rd.Width;
+        if (t.h <= 0) t.h = (int)rd.Height;
+        if (t.fmt == DXGI_FORMAT_UNKNOWN) t.fmt = rd.Format;
+        t.state = D3D12_RESOURCE_STATE_COMMON;
+        return { textures_.alloc(t) };
+    }
 
     // native ID3D12Fence serves both fences and timelines
     FenceHandle create_fence(bool signaled) override { D12Fence f; dev->CreateFence(signaled ? 1 : 0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&f.fence)); f.value = signaled ? 1 : 0; return { fences_.alloc(f) }; }
@@ -401,17 +526,22 @@ public:
     }
     void read_texture(TextureHandle h, const TextureRegion& r, void* dst) override {
         auto* t = textures_.get(h.id); if (!t || !dst) return;
-        const UINT64 rowPitch = (UINT64(r.width) * 4 + 255) & ~255ull;
-        D3D12_RESOURCE_DESC bd = {}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = rowPitch * r.height; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        int bw = 1, bh = 1; texture_format_block_dims(t->tf, &bw, &bh);
+        const UINT64 srcRowPitch = texture_format_row_pitch(t->tf, r.width);
+        const int    rows        = texture_format_row_count(t->tf, r.height);
+        const UINT64 rowPitch    = (srcRowPitch + 255) & ~255ull;
+        const UINT   fpW = UINT(((r.width  + bw - 1) / bw) * bw);
+        const UINT   fpH = UINT(((r.height + bh - 1) / bh) * bh);
+        D3D12_RESOURCE_DESC bd = {}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = rowPitch * UINT64(rows); bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1; bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         ID3D12Resource* rb = commit(bd, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
         immediate([&](ID3D12GraphicsCommandList* cl) {
             transition(cl, t, D3D12_RESOURCE_STATE_COPY_SOURCE);
             D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = t->res; src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = r.mip;
-            D3D12_TEXTURE_COPY_LOCATION dl{}; dl.pResource = rb; dl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dl.PlacedFootprint.Footprint = { t->fmt, (UINT)r.width, (UINT)r.height, 1, (UINT)rowPitch };
-            D3D12_BOX box{ (UINT)r.x, (UINT)r.y, 0, UINT(r.x + r.width), UINT(r.y + r.height), 1 };
+            D3D12_TEXTURE_COPY_LOCATION dl{}; dl.pResource = rb; dl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dl.PlacedFootprint.Footprint = { t->fmt, fpW, fpH, 1, (UINT)rowPitch };
+            D3D12_BOX box{ (UINT)r.x, (UINT)r.y, 0, UINT(r.x + fpW), UINT(r.y + fpH), 1 };
             cl->CopyTextureRegion(&dl, 0, 0, 0, &src, &box);
         });
-        uint8_t* p = nullptr; D3D12_RANGE rng{ 0, (SIZE_T)(rowPitch * r.height) }; if (rb->Map(0, &rng, (void**)&p) == S_OK) { for (int y = 0; y < r.height; ++y) std::memcpy((uint8_t*)dst + y * r.width * 4, p + y * rowPitch, r.width * 4); rb->Unmap(0, nullptr); }
+        uint8_t* p = nullptr; D3D12_RANGE rng{ 0, (SIZE_T)(rowPitch * UINT64(rows)) }; if (rb->Map(0, &rng, (void**)&p) == S_OK) { for (int y = 0; y < rows; ++y) std::memcpy((uint8_t*)dst + y * (size_t)srcRowPitch, p + y * rowPitch, (size_t)srcRowPitch); rb->Unmap(0, nullptr); }
         rb->Release();
     }
 
@@ -454,19 +584,42 @@ public:
 // are scaffolded — see TODOs — as they need GPU-visible heaps and the backbuffer.)
 class D12Commander : public GraphicCommander {
 public:
-    D12Commander(D12Device* d) : dev_(d) { dev_->dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc_)); dev_->dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc_, nullptr, IID_PPV_ARGS(&cl_)); cl_->Close(); }
-    ~D12Commander() override { if (cl_) cl_->Release(); if (alloc_) alloc_->Release(); }
+    D12Commander(D12Device* d) : dev_(d) {
+        dev_->dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc_));
+        dev_->dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc_, nullptr, IID_PPV_ARGS(&cl_)); cl_->Close();
+        dev_->dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&frame_fence_));
+        frame_event_ = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+    }
+    ~D12Commander() override { if (cl_) cl_->Release(); if (alloc_) alloc_->Release(); if (frame_fence_) frame_fence_->Release(); if (frame_event_) CloseHandle(frame_event_); }
     D12Device* device() const { return dev_; }
     ID3D12GraphicsCommandList* list() const { return cl_; }
+    // Signalled on the queue after each submit so the next begin() can wait for the GPU to
+    // finish before reusing this allocator (windowed begin->submit->present loops).
+    void signal_frame() { if (frame_fence_) dev_->queue->Signal(frame_fence_, ++frame_value_); }
 
     void begin() override {
+        if (frame_value_ > 0 && frame_fence_->GetCompletedValue() < frame_value_) {
+            frame_fence_->SetEventOnCompletion(frame_value_, frame_event_);
+            WaitForSingleObject(frame_event_, INFINITE);
+        }
         alloc_->Reset(); cl_->Reset(alloc_, nullptr);
         ID3D12DescriptorHeap* heaps[] = { dev_->gpu_heap, dev_->samp_heap };
         cl_->SetDescriptorHeaps(2, heaps);
-        cur_ = nullptr; has_rtv_ = has_dsv_ = false;
+        cur_ = nullptr; has_rtv_ = has_dsv_ = false; bound_bb_ = false;
     }
-    void end() override { cl_->Close(); }
-    void set_render_target_backbuffer() override { d12_unsupported("backbuffer target (swapchain present path TODO)"); }
+    void end() override {
+        if (bound_bb_) dev_->transition_bb(cl_, bb_idx_, D3D12_RESOURCE_STATE_PRESENT);
+        cl_->Close();
+    }
+    // Bind the current swapchain backbuffer as the colour target (transition to RENDER_TARGET).
+    void set_render_target_backbuffer() override {
+        dev_->ensure_backbuffers();
+        if (dev_->bb_count_ == 0) { has_rtv_ = false; return; }
+        bb_idx_ = dev_->current_bb_index();
+        dev_->transition_bb(cl_, bb_idx_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cur_rtv_ = dev_->bb_rtv_[bb_idx_]; has_rtv_ = true; has_dsv_ = false; bound_bb_ = true;
+        cl_->OMSetRenderTargets(1, &cur_rtv_, FALSE, nullptr);
+    }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
         has_rtv_ = false; has_dsv_ = false;
         D3D12_CPU_DESCRIPTOR_HANDLE rtvs[8]; int n = 0;
@@ -600,6 +753,8 @@ private:
     D12Device* dev_ = nullptr; ID3D12CommandAllocator* alloc_ = nullptr; ID3D12GraphicsCommandList* cl_ = nullptr;
     D12Pipeline* cur_ = nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE cur_rtv_{}, cur_dsv_{}; bool has_rtv_ = false, has_dsv_ = false;
+    ID3D12Fence* frame_fence_ = nullptr; UINT64 frame_value_ = 0; HANDLE frame_event_ = nullptr;  // per-frame GPU sync
+    bool bound_bb_ = false; UINT bb_idx_ = 0;   // current backbuffer bound this frame
 };
 
 } // namespace
@@ -620,6 +775,7 @@ void submit_commander_d3d12(Graphics*, GraphicCommander* commander, FenceHandle 
     ID3D12CommandList* lists[] = { c->list() }; d->queue->ExecuteCommandLists(1, lists);
     if (fence.valid()) if (auto* f = d->fence(fence.id)) { f->value++; d->queue->Signal(f->fence, f->value); }
     if (timeline.valid()) if (auto* t = d->timeline(timeline.id)) d->queue->Signal(t->fence, value);
+    c->signal_frame();   // let the next begin() wait for this frame's GPU work (windowed loops)
 }
 
 } // namespace window

@@ -66,6 +66,8 @@ public:
     bool owns_instance = false;
     bool owns_device = true;
     uint32_t queue_family_index = 0;
+    int backbuffer_count = 0;             // actual swapchain image count
+    SwapMode swap_mode = SwapMode::Auto;  // present mode actually in effect (reflects fallback)
 
     ~GraphicsVulkan() override {
         if (swapchain && device) vkDestroySwapchainKHR(device, swapchain, nullptr);
@@ -102,6 +104,9 @@ public:
     void* native_device() const override { return device; }
     void* native_context() const override { return graphics_queue; }
     void* native_swapchain() const override { return swapchain; }
+
+    int get_backbuffer_count() const override { return backbuffer_count; }
+    SwapMode get_swap_mode() const override { return swap_mode; }
 
     bool get_vulkan_info(VulkanGraphicsInfo* out) const override {
         if (!out) return false;
@@ -408,6 +413,19 @@ static VkPresentModeKHR choose_present_mode(VkPhysicalDevice device, VkSurfaceKH
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
+// Map the Vulkan present mode actually selected back to the cross-API SwapMode so
+// get_swap_mode() reports what is truly in effect (e.g. a Mailbox request that fell
+// back to FIFO reports Fifo).
+static SwapMode swap_mode_from_vk(VkPresentModeKHR mode) {
+    switch (mode) {
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:    return SwapMode::Immediate;
+        case VK_PRESENT_MODE_MAILBOX_KHR:      return SwapMode::Mailbox;
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return SwapMode::FifoRelaxed;
+        case VK_PRESENT_MODE_FIFO_KHR:
+        default:                               return SwapMode::Fifo;
+    }
+}
+
 static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurfaceKHR surface,
                                                       int width, int height, const Config& config,
                                                       bool owns_instance,
@@ -524,6 +542,11 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
     gfx->owns_instance = owns_instance;
     gfx->owns_device = owns_device;
     gfx->queue_family_index = queue_family;
+    gfx->swap_mode = swap_mode_from_vk(present_mode);
+    // The actual number of images the driver allocated (may exceed the requested minimum).
+    uint32_t actual_images = 0;
+    vkGetSwapchainImagesKHR(device, swapchain, &actual_images, nullptr);
+    gfx->backbuffer_count = static_cast<int>(actual_images);
 
     return gfx;
 }

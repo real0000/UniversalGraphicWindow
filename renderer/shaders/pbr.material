@@ -1,0 +1,48 @@
+; pbr.material — physically-based metallic-roughness surface, driven entirely by the
+; Material system (no dedicated C++ renderer). Pairs with pbr.hlsl; the build emits the
+; per-backend blobs alongside (pbr.vs_main.spv / pbr.ps_main.spv for Vulkan & OpenGL,
+; pbr.vs_main.dxbc / pbr.ps_main.dxbc for D3D11/D3D12).
+;
+; Drive it from app code:
+;   Material* m = Material::create(device, "pbr.material", shader_dir);
+;   m->set_uniform_buffer("Frame",  frame_ubo);     // viewProj, camera, light, ambient
+;   m->set_uniform_buffer("Object", object_ubo);    // model + normal matrix
+;   m->set_uniform_buffer("Material", material_ubo);// base/emissive factors, metallic, roughness
+;   m->set_texture("uBaseColorTex", base); ... ; m->set_sampler("uSamp", sampler);
+;   m->bind(cmd);  draw the asset GpuModel (MeshVertex layout).
+
+[shader]
+source = pbr.hlsl
+vertex = vs_main
+pixel  = ps_main
+
+[state]
+blend      = none
+depth_test = true
+cull       = back
+topology   = triangles
+
+; MeshVertex layout (renderer/assets/mesh.hpp): pos/normal/tangent/uv0/uv1/color.
+; <loc> = <format>:<byte_offset>:<buffer_slot>
+[vertex_layout]
+0      = float3:0:0      ; position
+1      = float3:12:0     ; normal
+2      = float4:32:0     ; tangent (xyz + bitangent sign)
+3      = float2:48:0     ; uv0
+4      = float2:56:0     ; uv1
+5      = float4:64:0     ; color
+stride = 80
+
+; resource bindings: <name> = <set>:<binding>:<type>[:<stages>]
+; The RHI maps each binding number straight to the backend slot per type (UBO→bN,
+; texture→tN, sampler→sN) — matching pbr.hlsl's register() / vk::binding().
+[bindings]
+Frame          = 0:0:uniform_buffer
+Object         = 0:1:uniform_buffer:vertex
+Material       = 0:2:uniform_buffer:fragment
+uBaseColorTex  = 0:3:sampled_texture:fragment
+uNormalTex     = 0:4:sampled_texture:fragment
+uMetalRoughTex = 0:5:sampled_texture:fragment
+uEmissiveTex   = 0:6:sampled_texture:fragment
+uOcclusionTex  = 0:7:sampled_texture:fragment
+uSamp          = 0:8:sampler:fragment

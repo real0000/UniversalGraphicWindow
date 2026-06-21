@@ -33,6 +33,21 @@ option(WINDOW_ENABLE_FLAC_DECODER "Enable FLAC decoder (dr_flac)" OFF)
 # GUI options
 option(WINDOW_ENABLE_GUI "Enable GUI interface support" ON)
 option(WINDOW_ENABLE_RENDERER "Build the optional GPU GUI renderer (renderer/, uses the graphics abstraction)" ON)
+option(WINDOW_ENABLE_CSS_THEME "Build the CSS-look GUI theme (renderer/css/, style presets only, no graphics backend needed)" ON)
+option(WINDOW_ENABLE_SHADER_COMPILER "Build the built-in runtime shader compiler (renderer/shader_compiler/, HLSL->SPIR-V/GLSL/DXBC via glslang+SPIRV-Cross+d3dcompiler; fetched by CMake)" ON)
+
+# Video renderer (renderer/video/). OFF by default: turning it on makes CMake fetch
+# and BUILD GStreamer from source (Meson+Ninja), which is heavy and slow.
+option(WINDOW_ENABLE_VIDEO "Build the GStreamer video renderer (renderer/video/); fetches+builds GStreamer from source via Meson" OFF)
+option(WINDOW_VIDEO_ZERO_COPY "Enable GPU zero-copy frame import (GstGLMemory/GstD3D11Memory -> import_texture); CPU upload fallback otherwise" ON)
+
+# Asset loading/management options (renderer/assets/)
+option(WINDOW_ENABLE_ASSETS "Build the asset system (image + 3D model loading & GPU management)" ON)
+option(WINDOW_ENABLE_MODEL_LOADER "Enable 3D model loading via Assimp (OBJ/FBX/glTF/...); fetched by CMake" ON)
+option(WINDOW_ENABLE_EXR "Enable OpenEXR (.exr) HDR image loading via tinyexr; fetched by CMake" ON)
+option(WINDOW_ENABLE_DDS "Enable DDS (.dds) texture loading via tinyddsloader + bcdec; fetched by CMake" ON)
+option(WINDOW_ENABLE_ETC2 "Enable ETC2/EAC texture decoding (KTX containers) via detex; fetched by CMake" ON)
+option(WINDOW_ENABLE_ASTC "Enable ASTC texture decoding (KTX / .astc) via astc_dec; fetched by CMake" ON)
 
 # Virtual keyboard options
 option(WINDOW_ENABLE_VIRTUAL_KEYBOARD "Enable virtual keyboard support" ON)
@@ -76,6 +91,29 @@ function(window_fetch_content name)
         GIT_SHALLOW TRUE
         ${FETCH_UNPARSED_ARGUMENTS}
     )
+endfunction()
+
+# Compile-probe: can <src> (a .cpp) be compiled with <dirs> (a ;-list) on the include
+# path? Sets <out_var> to TRUE/FALSE. Builds a throwaway static library (no link/main
+# needed) via try_compile's project form (CMake 3.16-compatible), and forces a fresh test
+# every configure so a re-fetched dependency is re-checked rather than reusing a cached
+# result.
+function(window_try_compile_cpp out_var src dirs)
+    set(_probe "${CMAKE_BINARY_DIR}/compile_probe")
+    file(MAKE_DIRECTORY "${_probe}")
+    file(WRITE "${_probe}/CMakeLists.txt"
+"cmake_minimum_required(VERSION 3.16)
+project(compile_probe CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_library(compile_probe STATIC \"${src}\")
+target_include_directories(compile_probe PRIVATE ${dirs})
+")
+    unset(_WINDOW_PROBE_RESULT CACHE)   # force a real re-test each configure
+    try_compile(_WINDOW_PROBE_RESULT
+        "${_probe}/build" "${_probe}" compile_probe
+        OUTPUT_VARIABLE _WINDOW_PROBE_LOG)
+    set(${out_var} ${_WINDOW_PROBE_RESULT} PARENT_SCOPE)
 endfunction()
 
 #=============================================================================
@@ -137,6 +175,7 @@ list(APPEND WINDOW_SOURCES window/window.cpp api/graphics_config.cpp input/input
 # when compiled out), so the factory always links regardless of enabled backends.
 list(APPEND WINDOW_SOURCES
     api/api_render.cpp          # public factory → dispatches on Backend
+    api/api_texture_format.cpp  # TextureFormat memory-layout helpers (block-aware upload/readback)
     api/api_render_opengl.cpp   # OpenGL (+ GLES via EGL, WebGL via WASM)
     api/api_render_vulkan.cpp
     api/api_render_d3d11.cpp
@@ -659,24 +698,503 @@ else()
 endif()
 
 #=============================================================================
-# GPU GUI Renderer (optional, opt-in)
+# GPU Renderer (optional, opt-in)
 #
-# An optional, self-contained renderer that draws the GUI's WidgetRenderInfo
-# through the backend-neutral graphics abstraction (GraphicDevice/Commander).
-# Consumers who supply their own renderer can switch this off; it requires the
-# GUI (for WidgetRenderInfo) and a graphics backend (for the abstraction).
+# Optional, self-contained renderers built on the backend-neutral graphics
+# abstraction (GraphicDevice/Commander). The gfx-level pieces (Material, the
+# VectorRenderer for 2D/3D lines, gizmos and wireframes) need only a graphics
+# backend. The GUI renderer additionally draws the GUI's WidgetRenderInfo and
+# so requires the GUI. Consumers who supply their own renderer can switch the
+# whole feature off.
 #=============================================================================
 
-if(WINDOW_ENABLE_RENDERER AND WINDOW_ENABLE_GUI)
+if(WINDOW_ENABLE_RENDERER)
     list(APPEND WINDOW_SOURCES
-        renderer/gui_renderer.cpp
-        renderer/gui_text_rasterizer.cpp
         renderer/material.cpp
+        renderer/vector_renderer.cpp
+        renderer/buffer/gpu_buffer.cpp
+        renderer/buffer/gpu_texture.cpp
+        renderer/light/light.cpp
+        renderer/space_partition/space_partition.cpp
+        renderer/space_partition/uniform_grid.cpp
+        renderer/space_partition/bvh.cpp
+        renderer/space_partition/octree.cpp
+        renderer/space_partition/quadtree.cpp
+        renderer/space_partition/bsp.cpp
+        renderer/space_partition/gpu_uniform_grid.cpp
+        renderer/space_partition/gpu_leaf_cull.cpp
+        renderer/space_partition/gpu_lbvh.cpp
+        renderer/video/video_renderer.cpp   # self-guards: real impl only when WINDOW_SUPPORT_VIDEO, else a stub
     )
+    if(WINDOW_ENABLE_GUI)
+        list(APPEND WINDOW_SOURCES
+            renderer/gui_renderer.cpp
+            renderer/gui_text_rasterizer.cpp
+        )
+        message(STATUS "GPU renderer enabled (gfx + GUI)")
+    else()
+        message(STATUS "GPU renderer enabled (gfx only; GUI renderer needs WINDOW_ENABLE_GUI)")
+    endif()
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_RENDERER)
-    message(STATUS "GPU GUI renderer enabled")
 else()
-    message(STATUS "GPU GUI renderer disabled")
+    message(STATUS "GPU renderer disabled")
+endif()
+
+#=============================================================================
+# Video renderer dependency: build GStreamer FROM SOURCE (renderer/video/)
+#
+# Per project policy we do not depend on a system GStreamer install: when
+# WINDOW_ENABLE_VIDEO is ON, CMake fetches the GStreamer monorepo and builds it
+# with its native build system (Meson + Ninja) via ExternalProject, installing
+# into the build tree. The monorepo's Meson subproject "wraps" auto-fetch GLib
+# and the other deps at build time (network required). This is heavy and slow,
+# which is why the feature is opt-in.
+#
+# video_renderer.cpp is always part of the renderer sources (it self-guards), so
+# without this block it still links as an ErrorUnsupported stub. This block adds
+# the real GStreamer include dirs / libs and defines WINDOW_SUPPORT_VIDEO (+ the
+# per-backend WINDOW_SUPPORT_VIDEO_* zero-copy paths).
+#=============================================================================
+
+if(WINDOW_ENABLE_VIDEO AND WINDOW_ENABLE_RENDERER)
+    # GStreamer's only build system is Meson (+Ninja); GLib and GStreamer have no
+    # CMake build, and hand-porting them is impractical (thousands of files with
+    # Meson-generated headers). So instead of REQUIRING meson/ninja preinstalled, we
+    # bootstrap both through CMake:
+    #   * Ninja  -- use a system one if present, else build it from source (it is a
+    #     small CMake project) so no manual install is needed.
+    #   * Meson  -- fetch its source and run it via a Python 3 interpreter. Meson is
+    #     pure Python and runs straight from a checkout (no install step).
+    # The single remaining prerequisite is Python 3 (Meson cannot run without it).
+    include(ExternalProject)
+
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+    # --- Ninja: reuse a system binary, else build from source via CMake ---
+    set(_video_dep_targets "")
+    find_program(NINJA_EXECUTABLE NAMES ninja ninja-build)
+    if(NINJA_EXECUTABLE)
+        set(GST_NINJA "${NINJA_EXECUTABLE}")
+        message(STATUS "Video: ninja found at ${NINJA_EXECUTABLE}")
+    else()
+        message(STATUS "Video: ninja not found - building it from source (ninja-build)")
+        window_fetch_content(ninja_src
+            GIT_REPOSITORY https://github.com/ninja-build/ninja.git
+            GIT_TAG v1.12.1)
+        FetchContent_MakeAvailable(ninja_src)   # builds the `ninja` executable target
+        set(GST_NINJA "$<TARGET_FILE:ninja>")
+        list(APPEND _video_dep_targets ninja)
+    endif()
+
+    # --- Meson: fetch source, invoke via Python (no install) ---
+    window_fetch_content(meson_src
+        GIT_REPOSITORY https://github.com/mesonbuild/meson.git
+        GIT_TAG 1.6.1)
+    FetchContent_GetProperties(meson_src)
+    if(NOT meson_src_POPULATED)
+        FetchContent_Populate(meson_src)
+    endif()
+    set(GST_MESON ${Python3_EXECUTABLE} "${meson_src_SOURCE_DIR}/meson.py")
+    message(STATUS "Video: meson via ${Python3_EXECUTABLE} ${meson_src_SOURCE_DIR}/meson.py")
+
+    set(GST_VERSION "1.24.10")
+    set(GST_PREFIX  "${CMAKE_CURRENT_BINARY_DIR}/third/gstreamer")
+    set(GST_INSTALL "${GST_PREFIX}/install")
+
+    # Enable only what the video renderer needs: core + app/video/audio (appsink,
+    # video frame map, audio caps) + playback (playbin) + typefind/codecs, and the
+    # GPU-interop plugins (gl always; d3d11 on Windows) for zero-copy. Everything
+    # else stays disabled (auto_features=disabled) to keep the build minimal.
+    set(GST_MESON_ARGS
+        --prefix=${GST_INSTALL}
+        --buildtype=release
+        -Ddefault_library=shared
+        -Dauto_features=disabled
+        -Dgst-full=disabled
+        -Dexamples=disabled
+        -Dtests=disabled
+        -Dtools=disabled
+        -Dintrospection=disabled
+        -Ddoc=disabled
+        -Dgstreamer:check=disabled
+        -Dbase=enabled
+        -Dgood=enabled
+        -Dbad=enabled
+        -Dgst-plugins-base:app=enabled
+        -Dgst-plugins-base:playback=enabled
+        -Dgst-plugins-base:typefind=enabled
+        -Dgst-plugins-base:videoconvertscale=enabled
+        -Dgst-plugins-base:audioconvert=enabled
+        -Dgst-plugins-base:audioresample=enabled
+        -Dgst-plugins-base:gl=enabled
+        -Dgst-plugins-bad:gl=enabled)
+    if(WIN32)
+        list(APPEND GST_MESON_ARGS -Dgst-plugins-bad:d3d11=enabled)
+    endif()
+
+    # Drive the build entirely through Meson (which invokes Ninja for us). The
+    # bootstrapped Ninja is handed to Meson via the NINJA env var so it is used even
+    # when not on PATH; `cmake -E env` sets it for the meson invocations.
+    ExternalProject_Add(gstreamer_ext
+        GIT_REPOSITORY https://github.com/GStreamer/gstreamer.git   # GitHub mirror (faster/more reliable than gitlab.freedesktop.org)
+        GIT_TAG        ${GST_VERSION}
+        GIT_SHALLOW    TRUE
+        GIT_PROGRESS   TRUE
+        GIT_SUBMODULES ""                       # skip ALL submodules: the only ones are the
+                                                # gst-integration-testsuites media (git-LFS,
+                                                # gigabytes) which we don't need. Real build
+                                                # deps (GLib, ...) come from Meson wrap fetches.
+        UPDATE_DISCONNECTED TRUE                 # pinned tag -> skip the post-clone update step
+                                                # (redundant, and it fails on a re-run).
+        PREFIX         ${GST_PREFIX}
+        DEPENDS        ${_video_dep_targets}
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "NINJA=${GST_NINJA}"
+                          ${GST_MESON} setup <BINARY_DIR> <SOURCE_DIR> --backend=ninja ${GST_MESON_ARGS}
+        BUILD_COMMAND     ${CMAKE_COMMAND} -E env "NINJA=${GST_NINJA}"
+                          ${GST_MESON} compile -C <BINARY_DIR>
+        INSTALL_COMMAND   ${GST_MESON} install -C <BINARY_DIR> --no-rebuild
+        BUILD_ALWAYS      FALSE
+        LOG_CONFIGURE     TRUE
+        LOG_BUILD         TRUE
+        LOG_INSTALL       TRUE)
+
+    # The ExternalProject installs at build time; reference the known install layout
+    # and order it before `window` compiles video_renderer.cpp.
+    set(GST_INCLUDE_DIRS
+        ${GST_INSTALL}/include/gstreamer-1.0
+        ${GST_INSTALL}/include/glib-2.0
+        ${GST_INSTALL}/lib/glib-2.0/include)
+    if(WIN32)
+        set(GST_LIB_DIR "${GST_INSTALL}/lib")
+        set(GST_LIBS
+            ${GST_LIB_DIR}/gstreamer-1.0.lib
+            ${GST_LIB_DIR}/gstapp-1.0.lib
+            ${GST_LIB_DIR}/gstvideo-1.0.lib
+            ${GST_LIB_DIR}/gstaudio-1.0.lib
+            ${GST_LIB_DIR}/gobject-2.0.lib
+            ${GST_LIB_DIR}/glib-2.0.lib)
+    else()
+        set(GST_LIB_DIR "${GST_INSTALL}/lib")
+        set(GST_LIBS
+            ${GST_LIB_DIR}/libgstreamer-1.0.so
+            ${GST_LIB_DIR}/libgstapp-1.0.so
+            ${GST_LIB_DIR}/libgstvideo-1.0.so
+            ${GST_LIB_DIR}/libgstaudio-1.0.so
+            ${GST_LIB_DIR}/libgobject-2.0.so
+            ${GST_LIB_DIR}/libglib-2.0.so)
+    endif()
+
+    list(APPEND WINDOW_VIDEO_INCLUDES ${GST_INCLUDE_DIRS})
+    list(APPEND WINDOW_VIDEO_LIBS     ${GST_LIBS})
+    list(APPEND WINDOW_DEFINES        WINDOW_SUPPORT_VIDEO)
+
+    # Per-backend zero-copy interop (needs the gl/d3d11 plugin dev headers, which the
+    # above Meson config builds). gl is enabled everywhere; d3d11 only on Windows.
+    if(WINDOW_VIDEO_ZERO_COPY)
+        list(APPEND WINDOW_VIDEO_INCLUDES ${GST_INSTALL}/include/gstreamer-1.0)  # gst/gl, gst/d3d11
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VIDEO_GL)
+        if(WIN32)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VIDEO_D3D11)
+            list(APPEND WINDOW_VIDEO_LIBS ${GST_LIB_DIR}/gstd3d11-1.0.lib ${GST_LIB_DIR}/gstgl-1.0.lib)
+        else()
+            list(APPEND WINDOW_VIDEO_LIBS ${GST_LIB_DIR}/libgstgl-1.0.so)
+        endif()
+    endif()
+
+    set(WINDOW_VIDEO_ENABLED TRUE)
+    message(STATUS "Video renderer enabled: GStreamer ${GST_VERSION} built from source (Meson+Ninja); "
+                   "zero-copy=${WINDOW_VIDEO_ZERO_COPY}")
+else()
+    message(STATUS "Video renderer disabled (renderer/video stub returns ErrorUnsupported)")
+endif()
+
+#=============================================================================
+# Built-in shader compiler (renderer/shader_compiler/, optional)
+#
+# Compiles HLSL source into each backend's blob at runtime (and offline via a
+# CLI), so consumers don't have to pre-bake shaders by hand:
+#   * HLSL -> SPIR-V  (Vulkan, and OpenGL 4.6 via ARB_gl_spirv)  -- glslang
+#   * SPIR-V -> GLSL  (OpenGL)                                    -- SPIRV-Cross
+#   * HLSL -> DXBC    (D3D11 and D3D12)                           -- d3dcompiler
+# glslang + SPIRV-Cross are fetched and built from source; d3dcompiler is the
+# Windows system component (the only producer of DXBC -- FXC has no source form).
+# DXC/DXIL is intentionally unused: both D3D backends consume DXBC here, so the
+# heavy LLVM-based DXC build is avoided entirely.
+#=============================================================================
+
+if(WINDOW_ENABLE_SHADER_COMPILER AND WINDOW_ENABLE_RENDERER)
+    # --- glslang (HLSL/GLSL -> SPIR-V), built from source, minimal footprint ---
+    set(ENABLE_OPT OFF CACHE BOOL "" FORCE)              # no SPIRV-Tools optimizer dep
+    set(ENABLE_HLSL ON CACHE BOOL "" FORCE)              # need the HLSL frontend
+    set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE) # no standalone exe
+    set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
+    window_fetch_content(glslang
+        GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+        GIT_TAG 14.3.0
+    )
+    FetchContent_MakeAvailable(glslang)
+
+    # --- SPIRV-Cross (SPIR-V -> GLSL / MSL), built from source ---
+    set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_HLSL OFF CACHE BOOL "" FORCE)   # we emit GLSL/MSL, not HLSL
+    set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+    window_fetch_content(spirv_cross
+        GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+        GIT_TAG vulkan-sdk-1.3.296.0
+    )
+    FetchContent_MakeAvailable(spirv_cross)
+
+    list(APPEND WINDOW_SOURCES renderer/shader_compiler/shader_compiler.cpp)
+    # glslang + SPIRV-Cross are fetched static libs with no install export, so link them
+    # build-only ($<BUILD_INTERFACE:>) to keep them out of window's exported interface
+    # (install(EXPORT) would otherwise fail) -- same treatment as Assimp.
+    list(APPEND WINDOW_SHADER_COMPILER_PRIVATE_LIBS
+        glslang SPIRV glslang-default-resource-limits
+        spirv-cross-core spirv-cross-glsl spirv-cross-msl)
+    if(WIN32)
+        list(APPEND WINDOW_LIBS d3dcompiler)   # HLSL -> DXBC (D3D11/D3D12); system lib
+    endif()
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_SHADER_COMPILER)
+    message(STATUS "Shader compiler enabled (glslang + SPIRV-Cross from source; DXBC via d3dcompiler=${WIN32})")
+else()
+    message(STATUS "Shader compiler disabled")
+endif()
+
+#=============================================================================
+# CSS-look GUI Theme (optional, opt-in)
+#
+# A "looks like a web page" skin for the GUI: style presets (GuiStyle,
+# ButtonStyle, …) coloured/sized to match HTML+CSS defaults, plus helpers to
+# apply them onto a widget subtree. It only sets widget styles, so unlike the
+# GPU renderer it needs the GUI but no graphics backend, and the ordinary
+# renderer draws the result.
+#=============================================================================
+
+if(WINDOW_ENABLE_CSS_THEME AND WINDOW_ENABLE_GUI)
+    list(APPEND WINDOW_SOURCES
+        renderer/css/css_theme.cpp
+    )
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_CSS_THEME)
+    message(STATUS "CSS GUI theme enabled")
+else()
+    message(STATUS "CSS GUI theme disabled")
+endif()
+
+#=============================================================================
+# Asset System (renderer/assets/) - image + 3D model loading & GPU management
+#
+# Images decode through stb_image (PNG/JPEG/BMP/TGA/GIF/HDR/PSD/PIC/PNM); 3D models
+# decode through Assimp (OBJ/FBX/glTF/GLB/Collada/STL/PLY/3DS/...). Both libraries are
+# fetched by CMake. Assimp is optional (WINDOW_ENABLE_MODEL_LOADER); without it image
+# loading and AssetManager still build and model loads return an error at runtime.
+#=============================================================================
+
+set(WINDOW_ASSET_INCLUDES "")
+set(WINDOW_ASSET_PRIVATE_LIBS "")
+if(WINDOW_ENABLE_ASSETS)
+    list(APPEND WINDOW_SOURCES
+        renderer/assets/image.cpp
+        renderer/assets/mesh.cpp
+        renderer/assets/model.cpp
+        renderer/assets/asset_manager.cpp
+    )
+    list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_ASSETS)
+
+    # stb_image (single-header image decoder). Shares the stb repo with stb_vorbis.
+    message(STATUS "Assets: fetching image decoder (stb_image)...")
+    window_fetch_content(stb
+        GIT_REPOSITORY https://github.com/nothings/stb.git
+        GIT_TAG master
+    )
+    FetchContent_MakeAvailable(stb)
+    list(APPEND WINDOW_ASSET_INCLUDES ${stb_SOURCE_DIR})
+
+    # tinyexr (OpenEXR HDR decoder) - optional. Populate-only (don't configure its
+    # own CMake project / examples); use the header + its bundled miniz for zlib.
+    if(WINDOW_ENABLE_EXR)
+        message(STATUS "Assets: fetching EXR decoder (tinyexr)...")
+        window_fetch_content(tinyexr
+            GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
+            GIT_TAG v1.0.8
+        )
+        FetchContent_GetProperties(tinyexr)
+        if(NOT tinyexr_POPULATED)
+            FetchContent_Populate(tinyexr)
+        endif()
+        list(APPEND WINDOW_ASSET_INCLUDES ${tinyexr_SOURCE_DIR} ${tinyexr_SOURCE_DIR}/deps/miniz)
+        list(APPEND WINDOW_SOURCES ${tinyexr_SOURCE_DIR}/deps/miniz/miniz.c)
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_EXR)
+        message(STATUS "Assets: EXR loading enabled (tinyexr)")
+    endif()
+
+    # DDS textures: tinyddsloader (container parsing) + bcdec (BCn block decode) -
+    # optional. Both header-only; populate-only (skip their example/test CMake).
+    if(WINDOW_ENABLE_DDS)
+        message(STATUS "Assets: fetching DDS decoders (tinyddsloader + bcdec)...")
+        window_fetch_content(tinyddsloader
+            GIT_REPOSITORY https://github.com/benikabocha/tinyddsloader.git
+            GIT_TAG master
+        )
+        FetchContent_GetProperties(tinyddsloader)
+        if(NOT tinyddsloader_POPULATED)
+            FetchContent_Populate(tinyddsloader)
+        endif()
+        list(APPEND WINDOW_ASSET_INCLUDES ${tinyddsloader_SOURCE_DIR})
+        window_fetch_content(bcdec
+            GIT_REPOSITORY https://github.com/iOrange/bcdec.git
+            GIT_TAG main
+        )
+        FetchContent_GetProperties(bcdec)
+        if(NOT bcdec_POPULATED)
+            FetchContent_Populate(bcdec)
+        endif()
+        list(APPEND WINDOW_ASSET_INCLUDES ${bcdec_SOURCE_DIR})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_DDS)
+        message(STATUS "Assets: DDS loading enabled (tinyddsloader + bcdec)")
+    endif()
+
+    # ETC2/EAC block decoder (detex) - optional. Carried by KTX/KTX2 containers.
+    if(WINDOW_ENABLE_ETC2)
+        message(STATUS "Assets: fetching ETC2/EAC decoder (detex)...")
+        window_fetch_content(detex
+            GIT_REPOSITORY https://github.com/hglm/detex.git
+            GIT_TAG master
+        )
+        FetchContent_GetProperties(detex)
+        if(NOT detex_POPULATED)
+            FetchContent_Populate(detex)
+        endif()
+        list(APPEND WINDOW_ASSET_INCLUDES ${detex_SOURCE_DIR})
+        # Only the ETC/EAC block decoders are needed and they include just detex.h
+        # (its inline helpers cover the rest). The other detex sources pull POSIX-only
+        # headers (pthread.h/strings.h) and tool main()s, so they are deliberately skipped.
+        set(DETEX_SOURCES
+            ${detex_SOURCE_DIR}/decompress-etc.c
+            ${detex_SOURCE_DIR}/decompress-eac.c
+            ${detex_SOURCE_DIR}/clamp.c           # detex_clamp0to255_table (used by detex.h's inline clamp)
+        )
+        # MSVC can't parse detex's __attribute__((always_inline)); force-include a shim
+        # that neutralizes it (no-op on GCC/Clang, which compile detex natively).
+        if(MSVC)
+            set_source_files_properties(${DETEX_SOURCES} PROPERTIES
+                COMPILE_OPTIONS "/FI${CMAKE_CURRENT_SOURCE_DIR}/renderer/assets/detex_compat.h")
+        endif()
+        list(APPEND WINDOW_SOURCES ${DETEX_SOURCES})
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_ETC2)
+        message(STATUS "Assets: ETC2/EAC decoding enabled (detex)")
+    endif()
+
+    # ASTC block decoder (astc_dec, single source). KTX / raw .astc.
+    #
+    # ASTC can't simply be turned off here — renderer/assets/image.cpp uses the decoder
+    # unconditionally — so the job is to always make astc_dec *build*, not to disable it.
+    # astc_dec is fetched from a moving branch (master) by default, and upstream has
+    # shipped sources that don't build as-is (e.g. astc_decomp.cpp #include's
+    # "basisu_astc_decomp.h" while the matching declarations ship as "astc_decomp.h").
+    # So rather than trust the latest blindly:
+    #   1. always drop in a forwarding shim header (basisu_astc_decomp.h -> astc_decomp.h)
+    #      so the misnamed include resolves, then compile-probe astc_decomp.cpp;
+    #   2. if it still won't compile, re-fetch a pinned known commit and probe again.
+    # ASTC stays enabled either way; the probe re-runs every configure so a fixed upstream
+    # (or a better pinned commit) is picked up automatically.
+    if(WINDOW_ENABLE_ASTC)
+        set(WINDOW_ASTC_DEC_TAG      "master" CACHE STRING "astc_dec git tag/branch tried first")
+        set(WINDOW_ASTC_DEC_FALLBACK "0b45f6c772e34878ebc7f989ba83f753034b49fe"
+            CACHE STRING "Known astc_dec commit used if the tag fails the compile probe")
+
+        # Forwarding shim for the misnamed include (works for any astc_dec checkout, since
+        # it resolves astc_decomp.h from whichever source dir is on the include path).
+        set(_astc_compat "${CMAKE_CURRENT_BINARY_DIR}/astc_compat")
+        file(MAKE_DIRECTORY "${_astc_compat}")
+        file(WRITE "${_astc_compat}/basisu_astc_decomp.h" "#pragma once\n#include \"astc_decomp.h\"\n")
+
+        message(STATUS "Assets: fetching ASTC decoder (astc_dec @ ${WINDOW_ASTC_DEC_TAG})...")
+        window_fetch_content(astc_dec
+            GIT_REPOSITORY https://github.com/richgel999/astc_dec.git
+            GIT_TAG ${WINDOW_ASTC_DEC_TAG})
+        FetchContent_GetProperties(astc_dec)
+        if(NOT astc_dec_POPULATED)
+            FetchContent_Populate(astc_dec)
+        endif()
+        set(ASTC_DIR "${astc_dec_SOURCE_DIR}")
+        window_try_compile_cpp(ASTC_OK "${ASTC_DIR}/astc_decomp.cpp" "${ASTC_DIR};${_astc_compat}")
+
+        # (2) Fall back to the pinned commit if the moving tag won't compile.
+        if(NOT ASTC_OK)
+            message(STATUS "Assets: astc_dec '${WINDOW_ASTC_DEC_TAG}' failed the compile probe; "
+                           "pinning to ${WINDOW_ASTC_DEC_FALLBACK}")
+            FetchContent_Declare(astc_dec_pinned
+                GIT_REPOSITORY https://github.com/richgel999/astc_dec.git
+                GIT_TAG ${WINDOW_ASTC_DEC_FALLBACK}
+                GIT_PROGRESS TRUE)   # full clone (not shallow): an arbitrary SHA must be checkout-able
+            FetchContent_GetProperties(astc_dec_pinned)
+            if(NOT astc_dec_pinned_POPULATED)
+                FetchContent_Populate(astc_dec_pinned)
+            endif()
+            set(ASTC_DIR "${astc_dec_pinned_SOURCE_DIR}")
+            window_try_compile_cpp(ASTC_OK "${ASTC_DIR}/astc_decomp.cpp" "${ASTC_DIR};${_astc_compat}")
+        endif()
+
+        # (3) Wire it in. If even the pinned commit failed the probe we still enable it
+        # (image.cpp needs the decoder) and warn — so the build surfaces the real astc_dec
+        # compile error rather than an unrelated downstream one.
+        if(NOT ASTC_OK)
+            message(WARNING "Assets: astc_dec failed the compile probe even at the pinned "
+                            "commit ${WINDOW_ASTC_DEC_FALLBACK}; enabling anyway so the actual "
+                            "error is visible. Update WINDOW_ASTC_DEC_FALLBACK to a buildable commit.")
+        endif()
+        list(APPEND WINDOW_ASSET_INCLUDES ${ASTC_DIR} ${_astc_compat})
+        list(APPEND WINDOW_SOURCES ${ASTC_DIR}/astc_decomp.cpp)
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_ASTC)
+        message(STATUS "Assets: ASTC decoding enabled (astc_dec)")
+    endif()
+
+    # Assimp (3D model importer) - optional.
+    if(WINDOW_ENABLE_MODEL_LOADER)
+        message(STATUS "Assets: fetching 3D model importer (Assimp)...")
+        # Trim Assimp to an import-only static lib (no tools/tests/exports/install).
+        set(ASSIMP_BUILD_TESTS              OFF CACHE BOOL "" FORCE)
+        set(ASSIMP_BUILD_ASSIMP_TOOLS       OFF CACHE BOOL "" FORCE)
+        set(ASSIMP_BUILD_SAMPLES            OFF CACHE BOOL "" FORCE)
+        set(ASSIMP_INSTALL                  OFF CACHE BOOL "" FORCE)
+        set(ASSIMP_NO_EXPORT                ON  CACHE BOOL "" FORCE)
+        set(ASSIMP_BUILD_ZLIB               ON  CACHE BOOL "" FORCE)
+        set(ASSIMP_WARNINGS_AS_ERRORS       OFF CACHE BOOL "" FORCE)
+        set(ASSIMP_INJECT_DEBUG_POSTFIX     OFF CACHE BOOL "" FORCE)
+        set(ASSIMP_INSTALL_PDB              OFF CACHE BOOL "" FORCE)
+        # Build a static Assimp regardless of the parent's BUILD_SHARED_LIBS.
+        set(_WINDOW_SAVED_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+        window_fetch_content(assimp
+            GIT_REPOSITORY https://github.com/assimp/assimp.git
+            GIT_TAG v5.4.3
+        )
+        FetchContent_MakeAvailable(assimp)
+
+        set(BUILD_SHARED_LIBS "${_WINDOW_SAVED_BUILD_SHARED_LIBS}" CACHE BOOL "" FORCE)
+
+        # Assimp is an internal implementation detail (no public header includes it)
+        # and ASSIMP_INSTALL is OFF, so link it build-only to keep it out of the
+        # exported `window` interface (install(EXPORT) would otherwise fail).
+        list(APPEND WINDOW_ASSET_PRIVATE_LIBS assimp)
+        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_MODEL_LOADER)
+        message(STATUS "Assets: 3D model loader enabled (Assimp)")
+    else()
+        message(STATUS "Assets: 3D model loader disabled (image loading only)")
+    endif()
+
+    message(STATUS "Asset system enabled")
+else()
+    message(STATUS "Asset system disabled")
 endif()
 
 #=============================================================================
@@ -1115,6 +1633,108 @@ if(WINDOW_AUDIO_DECODER_INCLUDES)
     target_include_directories(window PRIVATE ${WINDOW_AUDIO_DECODER_INCLUDES})
 endif()
 
+# Add asset system include directories (stb_image; Assimp comes via its target)
+if(WINDOW_ASSET_INCLUDES)
+    target_include_directories(window PRIVATE ${WINDOW_ASSET_INCLUDES})
+endif()
+
+# Link the asset system's private (build-only) libraries. Assimp is wrapped in
+# $<BUILD_INTERFACE:> so it is not part of window's exported/installed interface.
+foreach(_lib ${WINDOW_ASSET_PRIVATE_LIBS})
+    target_link_libraries(window PRIVATE $<BUILD_INTERFACE:${_lib}>)
+endforeach()
+
+# Link the shader compiler's fetched libs (glslang + SPIRV-Cross) build-only, for the same
+# reason as the asset libs above: they have no install export of their own.
+foreach(_lib ${WINDOW_SHADER_COMPILER_PRIVATE_LIBS})
+    target_link_libraries(window PRIVATE $<BUILD_INTERFACE:${_lib}>)
+endforeach()
+
+# Video renderer: hook in the from-source GStreamer build. The ExternalProject must
+# finish (headers + import libs installed) before window compiles video_renderer.cpp,
+# hence add_dependencies. Includes/libs are kept build-only (out of window's exported
+# interface) like the other fetched deps.
+if(WINDOW_VIDEO_ENABLED)
+    add_dependencies(window gstreamer_ext)
+    target_include_directories(window PRIVATE ${WINDOW_VIDEO_INCLUDES})
+    foreach(_lib ${WINDOW_VIDEO_LIBS})
+        target_link_libraries(window PRIVATE $<BUILD_INTERFACE:${_lib}>)
+    endforeach()
+endif()
+
+#=============================================================================
+# Offline shader-compiler tool + helper (the "build-time" half of the compiler)
+#=============================================================================
+if("WINDOW_SUPPORT_SHADER_COMPILER" IN_LIST WINDOW_DEFINES)
+    add_executable(shaderc tools/shader_compiler_cli.cpp)
+    target_link_libraries(shaderc PRIVATE window)
+
+    # window_compile_shader(<input.hlsl>
+    #     STAGE   <vs|ps|cs|gs|hs|ds>          (required)
+    #     ENTRY   <name>                       (default: main)
+    #     TARGETS <spirv glsl dxbc msl>        (default: all four)
+    #     OUTPUT_DIR <dir>                     (default: alongside the input)
+    #     INCLUDE <dir>                        (#include root)
+    #     DEFINES <NAME=VAL ...>
+    #     OUTPUT_VAR <var>)                    (set to the list of generated blob paths)
+    # Emits "<OUTPUT_DIR>/<basename>.<entry>.<suffix>" per target via the shaderc tool, so a
+    # single HLSL source is pre-baked for every backend at build time.
+    function(window_compile_shader input)
+        cmake_parse_arguments(SC "" "STAGE;ENTRY;OUTPUT_DIR;INCLUDE;OUTPUT_VAR" "TARGETS;DEFINES" ${ARGN})
+        if(NOT SC_STAGE)
+            message(FATAL_ERROR "window_compile_shader: STAGE is required")
+        endif()
+        if(NOT SC_ENTRY)
+            set(SC_ENTRY "main")
+        endif()
+        if(NOT SC_TARGETS)
+            set(SC_TARGETS spirv glsl dxbc msl)
+        endif()
+        get_filename_component(_abs "${input}" ABSOLUTE)
+        get_filename_component(_name "${input}" NAME_WE)
+        if(NOT SC_OUTPUT_DIR)
+            get_filename_component(SC_OUTPUT_DIR "${_abs}" DIRECTORY)
+        endif()
+        file(MAKE_DIRECTORY "${SC_OUTPUT_DIR}")
+
+        set(_define_args "")
+        foreach(_d ${SC_DEFINES})
+            list(APPEND _define_args -D ${_d})
+        endforeach()
+        set(_inc_args "")
+        if(SC_INCLUDE)
+            set(_inc_args --include "${SC_INCLUDE}")
+        endif()
+
+        set(_outputs "")
+        foreach(_t ${SC_TARGETS})
+            if(_t STREQUAL "spirv")
+                set(_suffix ".spv")
+            elseif(_t STREQUAL "glsl")
+                set(_suffix ".glsl")
+            elseif(_t STREQUAL "dxbc")
+                set(_suffix ".dxbc")
+            elseif(_t STREQUAL "msl")
+                set(_suffix ".msl")
+            else()
+                message(FATAL_ERROR "window_compile_shader: bad TARGET '${_t}'")
+            endif()
+            set(_out "${SC_OUTPUT_DIR}/${_name}.${SC_ENTRY}${_suffix}")
+            add_custom_command(
+                OUTPUT  "${_out}"
+                COMMAND shaderc "${_abs}" --stage ${SC_STAGE} --entry ${SC_ENTRY}
+                                --target ${_t} --out "${_out}" ${_inc_args} ${_define_args}
+                DEPENDS shaderc "${_abs}"
+                COMMENT "shaderc ${_name}.${SC_ENTRY} -> ${_t}"
+                VERBATIM)
+            list(APPEND _outputs "${_out}")
+        endforeach()
+        if(SC_OUTPUT_VAR)
+            set(${SC_OUTPUT_VAR} "${_outputs}" PARENT_SCOPE)
+        endif()
+    endfunction()
+endif()
+
 # Enable Objective-C++ for Apple platforms
 if(APPLE)
     set_source_files_properties(${WINDOW_SOURCES} PROPERTIES
@@ -1155,6 +1775,26 @@ if(WINDOW_BUILD_TESTS)
         target_link_libraries(test_gui PRIVATE window)
         add_test(NAME test_gui COMMAND test_gui)
     endif()
+
+    # Asset system unit tests (headless: image decode, model data, layout, cache keys)
+    if(WINDOW_ENABLE_ASSETS)
+        add_executable(test_assets tests/test_assets.cpp)
+        target_link_libraries(test_assets PRIVATE window)
+        add_test(NAME test_assets COMMAND test_assets)
+    endif()
+
+    # Scene-partition CPU unit tests (headless: grid/BVH/octree/quadtree/BSP queries vs brute force)
+    if("WINDOW_SUPPORT_RENDERER" IN_LIST WINDOW_DEFINES)
+        add_executable(test_space_partition tests/test_space_partition.cpp)
+        target_link_libraries(test_space_partition PRIVATE window)
+        add_test(NAME test_space_partition COMMAND test_space_partition)
+
+        # VideoPlayer API tests (headless: result strings + open() argument validation;
+        # works whether or not GStreamer was built in -- the stub reports ErrorUnsupported)
+        add_executable(test_video tests/test_video.cpp)
+        target_link_libraries(test_video PRIVATE window)
+        add_test(NAME test_video COMMAND test_video)
+    endif()
 endif()
 
 #=============================================================================
@@ -1166,9 +1806,76 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
     add_executable(example_basic examples/basic.cpp)
     target_link_libraries(example_basic PRIVATE window)
 
+    # Windowed swapchain present smoke test (set_render_target_backbuffer + present per backend)
+    add_executable(example_present examples/present.cpp)
+    target_link_libraries(example_present PRIVATE window)
+
+    # Present-mode + custom backbuffer-count matrix (every SwapMode x back_buffers per backend)
+    add_executable(example_present_modes examples/present_modes.cpp)
+    target_link_libraries(example_present_modes PRIVATE window)
+
     # Graphics pipeline conformance test (offscreen render + pixel readback over the RHI)
     add_executable(example_render_pipeline examples/render_pipeline.cpp)
     target_link_libraries(example_render_pipeline PRIVATE window)
+
+    # Common dialog demo (file open/save, folder, color, font)
+    add_executable(example_dialogs examples/dialogs.cpp)
+    target_link_libraries(example_dialogs PRIVATE window)
+
+    # VectorRenderer demo / cross-API smoke test (2D overlay + 3D debug geometry)
+    if("WINDOW_SUPPORT_RENDERER" IN_LIST WINDOW_DEFINES)
+        add_executable(example_vector_renderer examples/vector_renderer.cpp)
+        target_link_libraries(example_vector_renderer PRIVATE window)
+
+        # Buffer/texture wrapper demo + cross-API smoke test (typed buffers + views)
+        add_executable(example_buffer examples/buffer.cpp)
+        target_link_libraries(example_buffer PRIVATE window)
+
+        # Scene-partition demo + cross-API GPU/CPU verification (grid/BVH/octree/quadtree/BSP)
+        add_executable(example_space_partition examples/space_partition.cpp)
+        target_link_libraries(example_space_partition PRIVATE window)
+
+        # Light buffer demo + cross-API smoke test (pack all light types, upload, read back)
+        add_executable(example_light examples/light.cpp)
+        target_link_libraries(example_light PRIVATE window)
+
+        # Built-in shader compiler demo: HLSL -> all backends at runtime, then draw with it
+        if("WINDOW_SUPPORT_SHADER_COMPILER" IN_LIST WINDOW_DEFINES)
+            add_executable(example_shader_compiler examples/shader_compiler.cpp)
+            target_link_libraries(example_shader_compiler PRIVATE window)
+
+            # Slot-based binding cross-API check (UBO by slot, no explicit pipeline layout)
+            add_executable(example_slot_binding examples/slot_binding.cpp)
+            target_link_libraries(example_slot_binding PRIVATE window)
+
+            # GStreamer video playback demo (needs the video renderer + the shader compiler
+            # for the blit pipeline). Only built when WINDOW_ENABLE_VIDEO built GStreamer.
+            if("WINDOW_SUPPORT_VIDEO" IN_LIST WINDOW_DEFINES)
+                add_executable(example_video examples/video.cpp)
+                target_link_libraries(example_video PRIVATE window)
+            endif()
+        endif()
+
+        # GUI renderer offscreen pixel test (verification harness for the GUI shader migration)
+        if(WINDOW_ENABLE_GUI)
+            add_executable(example_gui_renderer examples/gui_renderer.cpp)
+            target_link_libraries(example_gui_renderer PRIVATE window)
+        endif()
+    endif()
+
+    # Asset loading & management demo (image + 3D model via AssetManager)
+    if(WINDOW_ENABLE_ASSETS)
+        add_executable(example_assets examples/assets.cpp)
+        target_link_libraries(example_assets PRIVATE window)
+    endif()
+
+    # PBR-via-Material demo (renderer/shaders/pbr.material + pbr.hlsl; no PBR C++ class)
+    if(WINDOW_ENABLE_RENDERER AND WINDOW_ENABLE_ASSETS)
+        add_executable(example_pbr examples/pbr.cpp)
+        target_link_libraries(example_pbr PRIVATE window)
+        target_compile_definitions(example_pbr PRIVATE
+            WINDOW_PBR_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/renderer/shaders")
+    endif()
 
     # OpenGL example
     if(WINDOW_ENABLE_OPENGL AND "WINDOW_SUPPORT_OPENGL" IN_LIST WINDOW_DEFINES)
@@ -1242,6 +1949,12 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
 
         add_executable(example_gui_serialization examples/gui_serialization.cpp)
         target_link_libraries(example_gui_serialization PRIVATE window)
+
+        # CSS-look theme showcase (needs the CssTheme presets compiled into the lib)
+        if("WINDOW_SUPPORT_CSS_THEME" IN_LIST WINDOW_DEFINES)
+            add_executable(example_css_theme examples/css_theme.cpp)
+            target_link_libraries(example_css_theme PRIVATE window)
+        endif()
     endif()
 
     # Metal example (macOS only)

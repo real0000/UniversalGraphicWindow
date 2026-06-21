@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(d:/project/UniversalGraphicWindow/build/Release/example_gui.exe:*)"
+    ]
+  }
+}

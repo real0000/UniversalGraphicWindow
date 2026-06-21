@@ -226,9 +226,17 @@ enum class TextureFormat : uint16_t {
 // TextureFormat utilities
 const char* texture_format_to_string(TextureFormat format);
 bool        parse_texture_format(const char* s, TextureFormat* out);
-int         texture_format_bytes_per_pixel(TextureFormat format);
-int         texture_format_block_size(TextureFormat format);     // Compressed block size in pixels (1 for non-compressed)
+int         texture_format_bytes_per_pixel(TextureFormat format);  // bytes per pixel (uncompressed) or per block (compressed)
+int         texture_format_block_size(TextureFormat format);     // Compressed block WIDTH in pixels (1 for non-compressed)
 bool        texture_format_is_compressed(TextureFormat format);
+
+// Memory layout of a region, correct for both uncompressed and block-compressed
+// (BC/ETC/EAC = 4x4, ASTC = its footprint) formats. Used by every backend's texture
+// upload/readback so compressed data is laid out by blocks, not by 4-byte pixels.
+void        texture_format_block_dims(TextureFormat format, int* out_w, int* out_h);  // 1x1 if uncompressed
+size_t      texture_format_row_pitch(TextureFormat format, int width);   // bytes per row of (blocks of) `width` px
+int         texture_format_row_count(TextureFormat format, int height);  // texel rows, or block-rows if compressed
+size_t      texture_format_image_size(TextureFormat format, int width, int height);  // = row_pitch * row_count
 bool        texture_format_is_depth_stencil(TextureFormat format);
 bool        texture_format_is_srgb(TextureFormat format);
 bool        texture_format_has_alpha(TextureFormat format);
@@ -589,6 +597,16 @@ public:
     // Vulkan-only: fill the full handle set for a Vulkan render device. Returns
     // false on non-Vulkan backends (default). Overridden by the Vulkan Graphics.
     virtual bool get_vulkan_info(VulkanGraphicsInfo* /*out*/) const { return false; }
+
+    // Actual swapchain configuration after creation -- the driver may clamp or substitute
+    // the requested Config values (back_buffers / swap_mode). get_backbuffer_count() returns
+    // the real number of swapchain images/buffers (so an app can size per-frame resource
+    // rings to the true swapchain length); 0 means not applicable / unknown. get_swap_mode()
+    // returns the present mode actually in effect (never SwapMode::Auto once resolved; on
+    // Vulkan this reflects any fallback when the requested mode is unsupported). Default
+    // implementations return 0 / Auto for backends that don't expose this.
+    virtual int      get_backbuffer_count() const { return 0; }
+    virtual SwapMode get_swap_mode()        const { return SwapMode::Auto; }
 
     // Query backend capabilities and hardware limits.
     // Fills *out_caps completely; any field that cannot be determined is left
@@ -1114,6 +1132,31 @@ struct TextureViewDesc {
     bool cube = false;         // view as a cubemap
 };
 
+// Wrap an EXISTING native GPU texture (created by another API user — e.g. a
+// GStreamer decoder/uploader sharing this device) as an RHI TextureHandle, with
+// no copy. Set the field matching the device's backend; the others stay null/0.
+// The wrapped handle is bindable as a sampled texture like any other; free it with
+// destroy_texture(). By default the RHI does NOT own the native object (the
+// producer keeps it alive) — set take_ownership to have destroy_texture() release
+// it. The caller must keep the native resource alive while the handle is in use.
+struct NativeTextureDesc {
+    int           width = 0;
+    int           height = 0;
+    TextureFormat format = TextureFormat::RGBA8_UNORM;  // how the RHI samples it (SRV/view format)
+    uint32_t      usage = TEXTURE_USAGE_SAMPLED;        // TextureUsage bits (usually just SAMPLED)
+    bool          take_ownership = false;               // destroy_texture() frees the native object if true
+
+    // --- Backend-specific native handle (set exactly the one for this backend) ---
+    void*       d3d_resource = nullptr;   // D3D11: ID3D11Texture2D*   | D3D12: ID3D12Resource*
+    uint64_t    gl_texture   = 0;         // OpenGL: GLuint texture name (0 = none)
+    uint32_t    gl_target    = 0;         // OpenGL: GL_TEXTURE_2D etc. (0 = GL_TEXTURE_2D)
+    void*       vk_image     = nullptr;   // Vulkan: VkImage
+    uint32_t    vk_format    = 0;         // Vulkan: VkFormat the image was created with (0 = derive from `format`)
+    uint32_t    vk_layout    = 0;         // Vulkan: current VkImageLayout for sampling (0 = SHADER_READ_ONLY_OPTIMAL)
+    void*       metal_texture = nullptr;  // Metal: id<MTLTexture> (bridged pointer)
+    const char* debug_name = nullptr;
+};
+
 struct ShaderDesc {
     ShaderStage    stage = ShaderStage::Vertex;
     ShaderLanguage language = ShaderLanguage::Auto; // Auto = pick the backend's native
@@ -1345,6 +1388,11 @@ public:
     // A reinterpreting view (format/mip/layer sub-range) onto a texture. Returns a
     // TextureHandle usable anywhere a texture is; free it with destroy_texture().
     virtual TextureHandle create_texture_view(const TextureViewDesc& desc) = 0;
+
+    // Wrap an existing native GPU texture as an RHI TextureHandle without copying
+    // (zero-copy interop — see NativeTextureDesc). Returns invalid on backends/handles
+    // that can't be wrapped. Free with destroy_texture().
+    virtual TextureHandle import_texture(const NativeTextureDesc& desc) = 0;
 
     // ---- Binding model: descriptor sets / pipeline layout (root signature) ---
     virtual DescriptorSetLayoutHandle create_descriptor_set_layout(const DescriptorSetLayoutDesc& desc) = 0;
