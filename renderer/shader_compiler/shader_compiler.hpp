@@ -80,6 +80,26 @@ struct ShaderCompileResult {
     }
 };
 
+// ---- Reflection (uniform / constant-buffer member layout) ------------------------------
+// Reflected so callers can address cbuffer fields by NAME — the byte offset is the shader's
+// own (HLSL cbuffer packing), so no one has to hand-pack a matching C++ struct. Always taken
+// from the SPIR-V (HLSL offsets baked in), so it is identical across backends.
+struct ShaderUniformMember {
+    std::string name;
+    uint32_t    offset = 0;   // byte offset within the block
+    uint32_t    size   = 0;   // byte size of the field (incl. array span)
+};
+struct ShaderUniformBlock {
+    std::string                      name;        // cbuffer name (may be empty; match by binding)
+    uint32_t                         set     = 0;
+    uint32_t                         binding = 0;
+    uint32_t                         size    = 0; // total block size in bytes
+    std::vector<ShaderUniformMember> members;
+};
+struct ShaderReflection {
+    std::vector<ShaderUniformBlock> uniform_blocks;
+};
+
 // The compiler is a stateless facade over glslang / SPIRV-Cross / d3dcompiler. glslang needs
 // a process-global init; it is reference-counted and taken lazily, but you may bracket heavy
 // use with initialize()/shutdown() to control when it happens.
@@ -99,6 +119,12 @@ public:
     static ShaderCompileResult compile(const void* source, size_t size,
                                        ShaderStage stage, const char* entry,
                                        const ShaderCompileOptions& opts = {});
+
+    // Reflect the uniform / constant-buffer member layout of `source` for `stage`/`entry`.
+    // Goes via SPIR-V so the offsets follow HLSL cbuffer packing and are backend-independent.
+    // Returns false (and leaves *out untouched) if the compiler is unavailable or parsing fails.
+    static bool reflect(const void* source, size_t size, ShaderStage stage, const char* entry,
+                        ShaderReflection* out, const ShaderCompileOptions& opts = {});
 
     // Convenience: compile for `device`'s backend (opts.target is overridden to it) and create
     // the shader. Returns an invalid handle on failure; pass `out` to inspect the log/blob.

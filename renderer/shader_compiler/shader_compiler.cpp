@@ -504,6 +504,47 @@ ShaderCompileResult ShaderCompiler::compile(const void* source, size_t size,
     }
 }
 
+bool ShaderCompiler::reflect(const void* source, size_t size, ShaderStage stage, const char* entry,
+                             ShaderReflection* out, const ShaderCompileOptions& opts) {
+    if (!out || !source) return false;
+    if (!entry || !*entry) entry = "main";
+    if (opts.source_lang != ShaderSourceLang::HLSL) return false;
+
+    const char* src = static_cast<const char*>(source);
+    const size_t len = size ? size : std::strlen(src);
+
+    GlslangScope gs;
+    if (!gs.ok) return false;
+    std::vector<uint32_t> spirv; std::string log;
+    if (!hlsl_to_spirv(src, (int)len, stage, entry, opts, spirv, log) || spirv.empty()) return false;
+
+    try {
+        spirv_cross::CompilerGLSL comp(std::move(spirv));
+        const spirv_cross::ShaderResources res = comp.get_shader_resources();
+        for (const auto& ub : res.uniform_buffers) {
+            const spirv_cross::SPIRType& type = comp.get_type(ub.base_type_id);
+            ShaderUniformBlock blk;
+            blk.name    = comp.get_name(ub.id);
+            if (blk.name.empty()) blk.name = comp.get_name(ub.base_type_id);
+            blk.set     = comp.get_decoration(ub.id, spv::DecorationDescriptorSet);
+            blk.binding = comp.get_decoration(ub.id, spv::DecorationBinding);
+            blk.size    = (uint32_t)comp.get_declared_struct_size(type);
+            for (uint32_t i = 0; i < (uint32_t)type.member_types.size(); ++i) {
+                ShaderUniformMember m;
+                m.name   = comp.get_member_name(ub.base_type_id, i);
+                m.offset = comp.type_struct_member_offset(type, i);
+                m.size   = (uint32_t)comp.get_declared_struct_member_size(type, i);
+                blk.members.push_back(std::move(m));
+            }
+            out->uniform_blocks.push_back(std::move(blk));
+        }
+        return true;
+    } catch (const std::exception& e) {
+        (void)e;
+        return false;
+    }
+}
+
 ShaderHandle ShaderCompiler::compile_and_create(GraphicDevice* device,
                                                 const void* source, size_t size,
                                                 ShaderStage stage, const char* entry,
@@ -578,6 +619,10 @@ ShaderCompileResult ShaderCompiler::compile(const void*, size_t, ShaderStage, co
     ShaderCompileResult r;
     r.log = "shader compiler not built (enable WINDOW_ENABLE_SHADER_COMPILER)\n";
     return r;
+}
+bool ShaderCompiler::reflect(const void*, size_t, ShaderStage, const char*,
+                             ShaderReflection*, const ShaderCompileOptions&) {
+    return false;
 }
 ShaderHandle ShaderCompiler::compile_and_create(GraphicDevice*, const void*, size_t,
                                                 ShaderStage, const char*,

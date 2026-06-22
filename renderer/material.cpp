@@ -241,13 +241,32 @@ Material* Material::create(GraphicDevice* device, const char* material_path, con
     }
     if (created == 0) { m->destroy(); if (out_result) *out_result = Result::ErrorInvalidParameter; return nullptr; }
 
-    // Descriptor set layout + pipeline layout from the declared bindings.
-    DescriptorSetLayoutDesc dl; dl.binding_count = 0;
-    for (const auto& p : m->desc_.params)
-        if (dl.binding_count < DescriptorSetLayoutDesc::MAX_BINDINGS)
-            dl.bindings[dl.binding_count++] = { p.binding, to_binding_type(p.type), 1, p.stages };
-    m->set_layout_ = device->create_descriptor_set_layout(dl);
-    PipelineLayoutDesc pl; pl.set_layout_count = 1; pl.set_layouts[0] = m->set_layout_;
+    // Descriptor set layouts + pipeline layout from the declared bindings. Params are
+    // grouped by their `set` index (one DescriptorSetLayout per set); the pipeline layout
+    // lists set 0..max contiguously (a gap set gets an empty, unbound layout). Sets beyond
+    // the backend's MAX_SETS are clamped into the last set (with a warning).
+    int max_set = 0;
+    for (const auto& p : m->desc_.params) {
+        int s = int(p.set); if (s >= MAX_SETS) { s = MAX_SETS - 1; }
+        if (s > max_set) max_set = s;
+        if (int(p.set) >= MAX_SETS)
+            std::fprintf(stderr, "[Material] binding '%s' set %u exceeds MAX_SETS=%d; clamped to %d\n",
+                         p.name.c_str(), p.set, MAX_SETS, MAX_SETS - 1);
+    }
+    m->set_count_ = m->desc_.params.empty() ? 0 : (max_set + 1);
+    for (int s = 0; s < m->set_count_; ++s) {
+        DescriptorSetLayoutDesc dl; dl.binding_count = 0;
+        for (const auto& p : m->desc_.params) {
+            int ps = int(p.set); if (ps >= MAX_SETS) ps = MAX_SETS - 1;
+            if (ps != s) continue;
+            if (dl.binding_count < DescriptorSetLayoutDesc::MAX_BINDINGS)
+                dl.bindings[dl.binding_count++] = { p.binding, to_binding_type(p.type), 1, p.stages };
+        }
+        m->set_used_[s]    = dl.binding_count > 0;
+        m->set_layouts_[s] = device->create_descriptor_set_layout(dl);
+    }
+    PipelineLayoutDesc pl; pl.set_layout_count = m->set_count_;
+    for (int s = 0; s < m->set_count_; ++s) pl.set_layouts[s] = m->set_layouts_[s];
     m->layout_ = device->create_pipeline_layout(pl);
 
     // Assemble the pipeline from whichever stages are present. compute_shader →
@@ -284,17 +303,22 @@ Material* Material::create(GraphicDevice* device, const char* material_path, con
         m->writes_[i].binding = m->desc_.params[i].binding;
         m->writes_[i].type    = to_binding_type(m->desc_.params[i].type);
     }
+    // Reflect uniform-block member layouts so uniform_block() can set fields by name.
+    m->reflect_blocks(shader_dir);
+
     if (out_result) *out_result = Result::Success;
     return m;
 }
 
 void Material::destroy() {
+    owned_buffers_.clear();   // free Material-owned buffers while device_ is still valid
+    blocks_.clear();          // free reflected-block GPU buffers (device_ still valid)
     if (device_) {
-        if (set_.valid())        device_->destroy_descriptor_set(set_);
-        if (pipeline_.valid())   device_->destroy_pipeline(pipeline_);
-        if (layout_.valid())     device_->destroy_pipeline_layout(layout_);
-        if (set_layout_.valid()) device_->destroy_descriptor_set_layout(set_layout_);
-        for (auto& s : shaders_) if (s.valid()) device_->destroy_shader(s);
+        for (auto& s : sets_)        if (s.valid()) device_->destroy_descriptor_set(s);
+        if (pipeline_.valid())       device_->destroy_pipeline(pipeline_);
+        if (layout_.valid())         device_->destroy_pipeline_layout(layout_);
+        for (auto& l : set_layouts_) if (l.valid()) device_->destroy_descriptor_set_layout(l);
+        for (auto& s : shaders_)     if (s.valid()) device_->destroy_shader(s);
     }
     delete this;
 }
@@ -307,21 +331,155 @@ void Material::set_uniform_buffer(const char* name, BufferHandle h, uint32_t off
     int i = find_param(name); if (i < 0) return;
     writes_[i].buffer = h; writes_[i].buffer_offset = offset; writes_[i].buffer_size = size; dirty_ = true;
 }
-void Material::set_texture(const char* name, TextureHandle h) { int i = find_param(name); if (i < 0) return; writes_[i].texture = h; dirty_ = true; }
+void Material::set_storage_buffer(const char* name, BufferHandle h, uint32_t offset, uint32_t size) {
+    int i = find_param(name); if (i < 0) return;
+    writes_[i].buffer = h; writes_[i].buffer_offset = offset; writes_[i].buffer_size = size; dirty_ = true;
+}
+void Material::set_texture(const char* name, TextureHandle h, int mip) {
+    int i = find_param(name); if (i < 0) return;
+    writes_[i].texture = h; writes_[i].texture_mip = mip; dirty_ = true;
+}
+void Material::set_storage_texture(const char* name, TextureHandle h, int mip, StorageAccess access) {
+    int i = find_param(name); if (i < 0) return;
+    writes_[i].texture = h; writes_[i].texture_mip = mip; writes_[i].storage_access = access; dirty_ = true;
+}
 void Material::set_sampler(const char* name, SamplerHandle h) { int i = find_param(name); if (i < 0) return; writes_[i].sampler = h; dirty_ = true; }
+void Material::set_combined_image_sampler(const char* name, TextureHandle tex, SamplerHandle samp) {
+    int i = find_param(name); if (i < 0) return;
+    writes_[i].texture = tex; writes_[i].sampler = samp; dirty_ = true;
+}
+
+ConstBuffer* Material::create_uniform_buffer(const char* name, uint32_t size, const void* initial, ResourceUsage usage) {
+    if (!device_ || find_param(name) < 0) return nullptr;
+    auto* b = new ConstBuffer();
+    if (!b->create(device_, size, usage, initial, name)) { delete b; return nullptr; }
+    set_uniform_buffer(name, b->handle(), 0, size);
+    own_(b);
+    return b;
+}
+StorageBuffer* Material::create_storage_buffer(const char* name, uint32_t size, uint32_t stride, const void* initial, ResourceUsage usage) {
+    if (!device_ || find_param(name) < 0) return nullptr;
+    auto* b = new StorageBuffer();
+    if (!b->create(device_, size, stride, usage, initial, name)) { delete b; return nullptr; }
+    set_storage_buffer(name, b->handle(), 0, 0);
+    own_(b);
+    return b;
+}
 
 void Material::bind(GraphicCommander* cmd) {
     if (!cmd || !device_) return;
     if (dirty_) {
-        if (set_.valid()) device_->destroy_descriptor_set(set_);
-        DescriptorSetDesc sd; sd.layout = set_layout_;
-        sd.write_count = int(writes_.size() < size_t(DescriptorSetDesc::MAX_WRITES) ? writes_.size() : DescriptorSetDesc::MAX_WRITES);
-        for (int i = 0; i < sd.write_count; ++i) sd.writes[i] = writes_[i];
-        set_ = device_->create_descriptor_set(sd);
+        // One descriptor set per used set index, each filled with that set's writes.
+        for (int s = 0; s < set_count_; ++s) {
+            if (!set_used_[s]) continue;
+            if (sets_[s].valid()) device_->destroy_descriptor_set(sets_[s]);
+            DescriptorSetDesc sd; sd.layout = set_layouts_[s]; sd.write_count = 0;
+            for (size_t i = 0; i < writes_.size(); ++i) {
+                int ps = int(desc_.params[i].set); if (ps >= MAX_SETS) ps = MAX_SETS - 1;
+                if (ps != s) continue;
+                if (sd.write_count < DescriptorSetDesc::MAX_WRITES) sd.writes[sd.write_count++] = writes_[i];
+            }
+            sets_[s] = device_->create_descriptor_set(sd);
+        }
         dirty_ = false;
     }
     cmd->set_pipeline(pipeline_);
-    if (set_.valid()) cmd->bind_descriptor_set(0, set_);
+    for (int s = 0; s < set_count_; ++s)
+        if (set_used_[s] && sets_[s].valid()) cmd->bind_descriptor_set(uint32_t(s), sets_[s]);
+}
+
+//=============================================================================
+// Reflected uniform blocks — set fields by name (offsets from the shader)
+//=============================================================================
+
+int Material::find_block(const char* name) const {
+    for (size_t i = 0; i < blocks_.size(); ++i) if (blocks_[i].name == name) return int(i);
+    return -1;
+}
+
+void Material::reflect_blocks(const char* shader_dir) {
+#ifdef WINDOW_SUPPORT_SHADER_COMPILER
+    if (!ShaderCompiler::available() || !device_) return;
+    const std::string src_path = std::string(shader_dir) + "/" + desc_.shader_source;
+    std::vector<uint8_t> src = read_file(src_path);
+    if (src.empty()) return;   // no HLSL on disk -> can't reflect (prebuilt-blob path)
+
+    ShaderCompileOptions o;
+    o.target      = device_->get_backend();
+    o.source_name = desc_.shader_source.c_str();
+    o.include_dir = shader_dir;
+    o.optimize    = false;   // reflection: keep every member
+    o.debug_info  = true;    // keep OpMemberName so field names survive
+
+    // Reflect every present stage, merging blocks by (set, binding) — a cbuffer used in two
+    // stages (e.g. Frame in VS+PS) reflects identically, so the first wins.
+    ShaderReflection merged;
+    auto seen = [&](uint32_t s, uint32_t b) {
+        for (auto& blk : merged.uniform_blocks) if (blk.set == s && blk.binding == b) return true;
+        return false;
+    };
+    for (int s = 0; s < MaterialDesc::STAGE_COUNT; ++s) {
+        const ShaderStage stage = ShaderStage(s);
+        if (!desc_.has(stage)) continue;
+        ShaderReflection refl;
+        if (!ShaderCompiler::reflect(src.data(), src.size(), stage, desc_.entry[s].c_str(), &refl, o)) continue;
+        for (auto& blk : refl.uniform_blocks) if (!seen(blk.set, blk.binding)) merged.uniform_blocks.push_back(blk);
+    }
+
+    // Attach each reflected block to the matching uniform-buffer binding (by set + binding).
+    for (const auto& p : desc_.params) {
+        if (p.type != MaterialParamType::UniformBuffer) continue;
+        const ShaderUniformBlock* found = nullptr;
+        for (auto& blk : merged.uniform_blocks) if (blk.set == p.set && blk.binding == p.binding) { found = &blk; break; }
+        if (!found) continue;
+        UniformBlockRec rec;
+        rec.name = p.name; rec.set = p.set; rec.binding = p.binding; rec.size = found->size;
+        for (auto& m : found->members) rec.fields.push_back({ m.name, m.offset, m.size });
+        blocks_.push_back(std::move(rec));
+    }
+#else
+    (void)shader_dir;
+#endif
+}
+
+UniformBlock Material::uniform_block(const char* name) {
+    const int i = find_block(name);
+    if (i < 0 || !device_) return UniformBlock();
+    UniformBlockRec& r = blocks_[size_t(i)];
+    if (!r.created) {
+        if (!r.buf.create(device_, r.size ? r.size : 16u, ResourceUsage::Dynamic, nullptr, r.name.c_str()))
+            return UniformBlock();
+        r.cpu.assign(r.size, 0);
+        set_uniform_buffer(r.name.c_str(), r.buf.handle(), 0, r.size);   // bind the block's buffer
+        r.created = true;
+    }
+    return UniformBlock(this, i);
+}
+
+//---- UniformBlock view ------------------------------------------------------
+
+bool UniformBlock::has(const char* field) const {
+    if (!valid()) return false;
+    for (const auto& f : mat_->blocks_[size_t(index_)].fields) if (f.name == field) return true;
+    return false;
+}
+uint32_t UniformBlock::size() const { return valid() ? mat_->blocks_[size_t(index_)].size : 0; }
+
+void UniformBlock::write(const char* field, const void* data, uint32_t size) {
+    if (!valid() || !data) return;
+    Material::UniformBlockRec& rec = mat_->blocks_[size_t(index_)];
+    for (const auto& f : rec.fields) {
+        if (f.name != field) continue;
+        const uint32_t n = size < f.size ? size : f.size;   // clamp to the field's reflected size
+        if ((size_t)f.offset + n <= rec.cpu.size()) std::memcpy(rec.cpu.data() + f.offset, data, n);
+        return;
+    }
+}
+
+void UniformBlock::flush() {
+    if (!valid()) return;
+    Material::UniformBlockRec& rec = mat_->blocks_[size_t(index_)];
+    if (rec.created && !rec.cpu.empty()) rec.buf.update(rec.cpu.data(), rec.size, 0);
 }
 
 } // namespace gfx

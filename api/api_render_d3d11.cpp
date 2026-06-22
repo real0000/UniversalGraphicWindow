@@ -19,6 +19,7 @@
 #if defined(WINDOW_SUPPORT_D3D11) && defined(_WIN32)
 
 #include <d3d11.h>
+#include <d3d11_1.h>   // ID3D11DeviceContext1 — offset (first-constant) CB binding
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -147,7 +148,7 @@ D3D11_COMPARISON_FUNC d11_compare(CompareFunc f) {
     return D3D11_COMPARISON_LESS;
 }
 
-struct D11Buffer  { ID3D11Buffer* buf = nullptr; UINT size = 0; UINT byte_width = 0; BufferType type = BufferType::Vertex; ID3D11UnorderedAccessView* uav = nullptr; ID3D11Buffer* map_staging = nullptr; };
+struct D11Buffer  { ID3D11Buffer* buf = nullptr; UINT size = 0; UINT byte_width = 0; UINT stride = 0; BufferType type = BufferType::Vertex; ID3D11UnorderedAccessView* uav = nullptr; ID3D11Buffer* map_staging = nullptr; };
 struct D11Texture { ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; ID3D11RenderTargetView* rtv = nullptr;
                     ID3D11DepthStencilView* dsv = nullptr; ID3D11UnorderedAccessView* uav = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
                     TextureFormat tf = TextureFormat::RGBA8_UNORM; int w = 0, h = 0;
@@ -170,14 +171,16 @@ class D11Device : public GraphicDevice {
 public:
     ID3D11Device* dev = nullptr;
     ID3D11DeviceContext* ctx = nullptr;
+    ID3D11DeviceContext1* ctx1 = nullptr;   // 11.1: offset (first-constant) CB binding; null pre-11.1
     IDXGISwapChain* swap_chain = nullptr;   // for set_render_target_backbuffer() (windowed present)
 
     explicit D11Device(Graphics* g) {
         dev = (ID3D11Device*)g->native_device();
         ctx = (ID3D11DeviceContext*)g->native_context();
+        if (ctx) ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&ctx1);
         swap_chain = (IDXGISwapChain*)g->native_swapchain();
     }
-    ~D11Device() override {}
+    ~D11Device() override { if (ctx1) ctx1->Release(); }
 
     Backend get_backend() const override { return Backend::D3D11; }
     void get_capabilities(GraphicsCapabilities* out) const override {
@@ -188,6 +191,7 @@ public:
         out->max_uniform_buffer_range = D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16;
         out->max_bound_descriptor_sets = 4;
         out->min_uniform_buffer_offset_alignment = 256;   // CB offset granularity (D3D11.1 VSSetConstantBuffers1)
+        out->min_storage_buffer_offset_alignment = 16;    // UAV FirstElement: raw=4B, structured=stride; 16 is a safe floor
         out->max_push_constant_size = 256;
         out->compute_shaders = true; out->instancing = true; out->indirect_draw = true; out->timestamp_query = true;
         // Highest MSAA sample count the default colour format supports.
@@ -200,15 +204,21 @@ public:
         D3D11_BUFFER_DESC bd = {};
         bd.ByteWidth = (b.size + 15) & ~15u;   // CBs need 16-byte multiples
         bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = bind_flags(d.type);
-        // Storage buffers are raw (ByteAddressBuffer) so one compute shader serves both
-        // D3D11 and D3D12 (raw UAV); a raw view needs a 4-byte-multiple width.
-        if (d.type == BufferType::Storage) { bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS; bd.ByteWidth = (b.size + 3) & ~3u; }
-        b.byte_width = bd.ByteWidth;
+        // Storage buffers: structured (RWStructuredBuffer<T>) when a stride is given, so the
+        // UAV's element stride matches the shader's structured access; raw (RWByteAddressBuffer)
+        // when stride==0 (one source serves D3D + VK/GL). A structured view needs a whole-element
+        // width; a raw view a 4-byte-multiple width.
+        if (d.type == BufferType::Storage) {
+            if (d.stride > 0) { bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED; bd.StructureByteStride = d.stride; bd.ByteWidth = ((b.size + d.stride - 1) / d.stride) * d.stride; }
+            else              { bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS; bd.ByteWidth = (b.size + 3) & ~3u; }
+        }
+        b.byte_width = bd.ByteWidth; b.stride = d.stride;
         D3D11_SUBRESOURCE_DATA srd = {}; srd.pSysMem = d.initial_data;
         dev->CreateBuffer(&bd, d.initial_data ? &srd : nullptr, &b.buf);
         if (d.type == BufferType::Storage && b.buf) {
-            D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {}; ud.Format = DXGI_FORMAT_R32_TYPELESS; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-            ud.Buffer.NumElements = bd.ByteWidth / 4; ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {}; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            if (d.stride > 0) { ud.Format = DXGI_FORMAT_UNKNOWN;      ud.Buffer.NumElements = bd.ByteWidth / d.stride; }
+            else              { ud.Format = DXGI_FORMAT_R32_TYPELESS; ud.Buffer.NumElements = bd.ByteWidth / 4; ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW; }
             dev->CreateUnorderedAccessView(b.buf, &ud, &b.uav);
         }
         return { buffers_.alloc(b) };
@@ -512,14 +522,44 @@ public:
     void bind_index_buffer(BufferHandle h, IndexFormat fmt, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (b) ctx_->IASetIndexBuffer(b->buf, fmt == IndexFormat::UInt16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT, offset); }
     void bind_texture(uint32_t slot, TextureHandle h) override { auto* t = dev_->texture(h.id); if (t) { ctx_->PSSetShaderResources(slot, 1, &t->srv); ctx_->VSSetShaderResources(slot, 1, &t->srv); } }
     void bind_sampler(uint32_t slot, SamplerHandle h) override { auto* s = dev_->sampler(h.id); if (s) ctx_->PSSetSamplers(slot, 1, &s->s); }
-    void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t, uint32_t) override { auto* b = dev_->buffer(h.id); if (b) { ctx_->VSSetConstantBuffers(slot, 1, &b->buf); ctx_->PSSetConstantBuffers(slot, 1, &b->buf); ctx_->CSSetConstantBuffers(slot, 1, &b->buf); } }
+    void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override {
+        auto* b = dev_->buffer(h.id); if (!b) return;
+        if (offset == 0) {   // whole buffer (size is just an upper bound); D3D11.0-safe
+            ctx_->VSSetConstantBuffers(slot, 1, &b->buf); ctx_->PSSetConstantBuffers(slot, 1, &b->buf); ctx_->CSSetConstantBuffers(slot, 1, &b->buf); return;
+        }
+        // Sub-range bind needs D3D11.1 first-constant binding. Units are 16-byte constants and
+        // both FirstConstant and NumConstants must be multiples of 16 (== 256-byte granularity,
+        // the reported min_uniform_buffer_offset_alignment).
+        if (dev_->ctx1) {
+            UINT first = offset / 16;
+            UINT num   = (((size ? size : (b->byte_width - offset)) + 255) & ~255u) / 16;
+            ID3D11Buffer* bufs[1] = { b->buf }; UINT f[1] = { first }; UINT n[1] = { num };
+            dev_->ctx1->VSSetConstantBuffers1(slot, 1, bufs, f, n);
+            dev_->ctx1->PSSetConstantBuffers1(slot, 1, bufs, f, n);
+            dev_->ctx1->CSSetConstantBuffers1(slot, 1, bufs, f, n);
+        } else {   // pre-11.1: can't offset a CB binding
+            ctx_->VSSetConstantBuffers(slot, 1, &b->buf); ctx_->PSSetConstantBuffers(slot, 1, &b->buf); ctx_->CSSetConstantBuffers(slot, 1, &b->buf);
+        }
+    }
     void push_constants(uint32_t, const void*, uint32_t) override { d11_unsupported("push_constants (use a constant buffer)"); }
-    void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t, uint32_t) override { auto* b = dev_->buffer(h.id); if (b && b->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &b->uav, nullptr); }
+    void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override {
+        auto* b = dev_->buffer(h.id); if (!b) return;
+        if (offset == 0) { if (b->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &b->uav, nullptr); return; }   // whole-buffer UAV
+        // Sub-range: a transient UAV at the element (structured) / 4-byte (raw) offset. The
+        // context AddRefs on bind, so we release our reference immediately after.
+        const UINT span = size ? size : (b->byte_width - offset);
+        D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {}; ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        if (b->stride) { ud.Format = DXGI_FORMAT_UNKNOWN;      ud.Buffer.FirstElement = offset / b->stride; ud.Buffer.NumElements = span / b->stride; }
+        else           { ud.Format = DXGI_FORMAT_R32_TYPELESS; ud.Buffer.FirstElement = offset / 4;         ud.Buffer.NumElements = span / 4; ud.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW; }
+        ID3D11UnorderedAccessView* uav = nullptr; dev_->dev->CreateUnorderedAccessView(b->buf, &ud, &uav);
+        if (uav) { ctx_->CSSetUnorderedAccessViews(slot, 1, &uav, nullptr); uav->Release(); }
+    }
     void bind_storage_texture(uint32_t slot, TextureHandle h, int, StorageAccess) override { auto* t = dev_->texture(h.id); if (t && t->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &t->uav, nullptr); }
     void bind_descriptor_set(uint32_t, DescriptorSetHandle h, const uint32_t*, int) override {
         auto* s = dev_->descriptor_set(h.id); if (!s) return;
         for (const auto& w : s->writes) {
-            if (w.type == BindingType::UniformBuffer) bind_uniform_buffer(w.binding, w.buffer, 0, 0);
+            if (w.type == BindingType::UniformBuffer) bind_uniform_buffer(w.binding, w.buffer, w.buffer_offset, w.buffer_size);
+            else if (w.type == BindingType::StorageBuffer) bind_storage_buffer(w.binding, w.buffer, w.buffer_offset, w.buffer_size);
             else if (w.type == BindingType::SampledTexture || w.type == BindingType::CombinedImageSampler) { bind_texture(w.binding, w.texture); if (w.type == BindingType::CombinedImageSampler) bind_sampler(w.binding, w.sampler); }
             else if (w.type == BindingType::Sampler) bind_sampler(w.binding, w.sampler);
             else if (w.type == BindingType::StorageTexture) bind_storage_texture(w.binding, w.texture, w.texture_mip, w.storage_access);

@@ -118,7 +118,7 @@ D3D12_COMPARISON_FUNC d12_compare(CompareFunc f) {
     return D3D12_COMPARISON_FUNC_LESS;
 }
 
-struct D12Buffer  { ID3D12Resource* res = nullptr; UINT64 size = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; ID3D12Resource* map_upload = nullptr; };
+struct D12Buffer  { ID3D12Resource* res = nullptr; UINT64 size = 0; UINT stride = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON; ID3D12Resource* map_upload = nullptr; };
 struct D12Texture { ID3D12Resource* res = nullptr; DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN; TextureFormat tf = TextureFormat::RGBA8_UNORM; int w = 0, h = 0; D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
                    bool owns_res = true; };   // false for imported resources we must not Release
 struct D12Sampler { D3D12_SAMPLER_DESC desc{}; };
@@ -242,6 +242,7 @@ public:
         out->max_texture_size = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
         out->max_color_attachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT;
         out->max_bound_descriptor_sets = 8; out->min_uniform_buffer_offset_alignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+        out->min_storage_buffer_offset_alignment = 16;    // UAV FirstElement: raw=4B, structured=stride; 16 is a safe floor
         out->max_push_constant_size = 256; out->compute_shaders = true; out->indirect_draw = true; out->mesh_shaders = true; out->timestamp_query = true;
         // Highest MSAA sample count the default colour format supports.
         for (UINT n = 8; n >= 2; n >>= 1) { D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q{ DXGI_FORMAT_R8G8B8A8_UNORM, n, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0 };
@@ -256,7 +257,7 @@ public:
     void flush() { const UINT64 v = ++imm_value; queue->Signal(imm_fence, v); if (imm_fence->GetCompletedValue() < v) { imm_fence->SetEventOnCompletion(v, imm_event); WaitForSingleObject(imm_event, INFINITE); } }
 
     BufferHandle create_buffer(const BufferDesc& d) override {
-        D12Buffer b; b.size = d.size ? d.size : 16;
+        D12Buffer b; b.size = d.size ? d.size : 16; b.stride = d.stride;
         D3D12_RESOURCE_DESC rd = {}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = (b.size + 255) & ~255ull; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         if (d.type == BufferType::Storage) rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         b.state = D3D12_RESOURCE_STATE_COMMON;
@@ -664,13 +665,30 @@ public:
                 D3D12_CPU_DESCRIPTOR_HANDLE dst = cpu; dst.ptr += SIZE_T(i++) * dev_->gpu_size;
                 if (w.type == BindingType::UniformBuffer) {
                     if (auto* b = dev_->buffer(w.buffer.id)) {
+                        // BufferLocation (GPU VA + offset) must be 256-byte aligned; SizeInBytes
+                        // describes only the bound range (rounded up to 256), not the whole
+                        // resource — otherwise a sub-range bind over-reads past the buffer end.
+                        const UINT64 range = w.buffer_size ? w.buffer_size : (b->size - w.buffer_offset);
                         D3D12_CONSTANT_BUFFER_VIEW_DESC cv{}; cv.BufferLocation = b->res->GetGPUVirtualAddress() + w.buffer_offset;
-                        cv.SizeInBytes = (UINT)((b->size + 255) & ~255ull); dev_->dev->CreateConstantBufferView(&cv, dst);
+                        cv.SizeInBytes = (UINT)((range + 255) & ~255ull); dev_->dev->CreateConstantBufferView(&cv, dst);
                     }
                 } else if (w.type == BindingType::StorageBuffer) {
                     if (auto* b = dev_->buffer(w.buffer.id)) {
-                        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{}; uv.Format = DXGI_FORMAT_R32_TYPELESS; uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-                        uv.Buffer.FirstElement = w.buffer_offset / 4; uv.Buffer.NumElements = (UINT)((w.buffer_size ? w.buffer_size : b->size) / 4); uv.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                        // Structured UAV (RWStructuredBuffer<T>) when the buffer carries a stride,
+                        // so element addressing matches the shader; raw UAV (RWByteAddressBuffer)
+                        // otherwise. FirstElement/NumElements are in element units for structured.
+                        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{}; uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                        if (b->stride) {
+                            uv.Format = DXGI_FORMAT_UNKNOWN;
+                            uv.Buffer.FirstElement = w.buffer_offset / b->stride;
+                            uv.Buffer.NumElements  = (UINT)((w.buffer_size ? w.buffer_size : b->size) / b->stride);
+                            uv.Buffer.StructureByteStride = b->stride;
+                        } else {
+                            uv.Format = DXGI_FORMAT_R32_TYPELESS;
+                            uv.Buffer.FirstElement = w.buffer_offset / 4;
+                            uv.Buffer.NumElements  = (UINT)((w.buffer_size ? w.buffer_size : b->size) / 4);
+                            uv.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                        }
                         dev_->dev->CreateUnorderedAccessView(b->res, nullptr, &uv, dst);
                     }
                 } else { // SampledTexture / CombinedImageSampler -> SRV (sampled in the shader stages)

@@ -770,6 +770,23 @@ if(WINDOW_ENABLE_VIDEO AND WINDOW_ENABLE_RENDERER)
 
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+    # Python 3.12+ removed distutils (PEP 632), but GStreamer 1.24's bundled GLib
+    # (gdbus-codegen) still does `import distutils.version`. Ensure it resolves by
+    # installing setuptools (ships a distutils shim) into the meson interpreter when
+    # missing -- otherwise the GLib codegen step fails on modern Pythons.
+    execute_process(COMMAND ${Python3_EXECUTABLE} -c "import distutils.version"
+                    RESULT_VARIABLE _distutils_missing OUTPUT_QUIET ERROR_QUIET)
+    if(_distutils_missing)
+        message(STATUS "Video: distutils missing on ${Python3_EXECUTABLE} (Python 3.12+); installing setuptools shim")
+        execute_process(COMMAND ${Python3_EXECUTABLE} -m pip install --user "setuptools>=69"
+                        RESULT_VARIABLE _pip_rc OUTPUT_QUIET ERROR_QUIET)
+        if(_pip_rc)
+            message(WARNING "Video: failed to install setuptools; the GLib codegen step may fail "
+                            "with 'No module named distutils'. Install it manually: "
+                            "${Python3_EXECUTABLE} -m pip install setuptools")
+        endif()
+    endif()
+
     # --- Ninja: reuse a system binary, else build from source via CMake ---
     set(_video_dep_targets "")
     find_program(NINJA_EXECUTABLE NAMES ninja ninja-build)
@@ -803,8 +820,12 @@ if(WINDOW_ENABLE_VIDEO AND WINDOW_ENABLE_RENDERER)
 
     # Enable only what the video renderer needs: core + app/video/audio (appsink,
     # video frame map, audio caps) + playback (playbin) + typefind/codecs, and the
-    # GPU-interop plugins (gl always; d3d11 on Windows) for zero-copy. Everything
-    # else stays disabled (auto_features=disabled) to keep the build minimal.
+    # Enable only what the video renderer needs. The GPU zero-copy plugin differs per
+    # platform: D3D11 on Windows (no extra winsys deps), GstGL on Linux (uses the EGL/
+    # GLX that ship there). We deliberately do NOT force GStreamer's GL integration on
+    # Windows -- with auto_features=disabled meson can't find a GL window-system
+    # (WGL/EGL) and `gl=enabled` then hard-errors. D3D11 covers Windows zero-copy;
+    # everything else is the CPU-upload fallback. auto_features=disabled keeps it minimal.
     set(GST_MESON_ARGS
         --prefix=${GST_INSTALL}
         --buildtype=release
@@ -826,10 +847,15 @@ if(WINDOW_ENABLE_VIDEO AND WINDOW_ENABLE_RENDERER)
         -Dgst-plugins-base:videoconvertscale=enabled
         -Dgst-plugins-base:audioconvert=enabled
         -Dgst-plugins-base:audioresample=enabled
-        -Dgst-plugins-base:gl=enabled
-        -Dgst-plugins-bad:gl=enabled)
-    if(WIN32)
-        list(APPEND GST_MESON_ARGS -Dgst-plugins-bad:d3d11=enabled)
+        -Dgst-plugins-base:videotestsrc=enabled   # synthetic source for the no-file demo/test
+        -Dgst-plugins-base:audiotestsrc=enabled
+        -Dglib:tests=false)               # GLib's test suite isn't needed and fails to build (gresource helper)
+    if(WINDOW_VIDEO_ZERO_COPY)
+        if(WIN32)
+            list(APPEND GST_MESON_ARGS -Dgst-plugins-bad:d3d11=enabled)   # ID3D11Texture2D zero-copy
+        elseif(UNIX AND NOT APPLE)
+            list(APPEND GST_MESON_ARGS -Dgst-plugins-base:gl=enabled -Dgst-plugins-bad:gl=enabled)  # GstGLMemory zero-copy
+        endif()
     endif()
 
     # Drive the build entirely through Meson (which invokes Ninja for us). The
@@ -863,7 +889,8 @@ if(WINDOW_ENABLE_VIDEO AND WINDOW_ENABLE_RENDERER)
     set(GST_INCLUDE_DIRS
         ${GST_INSTALL}/include/gstreamer-1.0
         ${GST_INSTALL}/include/glib-2.0
-        ${GST_INSTALL}/lib/glib-2.0/include)
+        ${GST_INSTALL}/lib/glib-2.0/include
+        ${GST_INSTALL}/lib/gstreamer-1.0/include)   # generated config headers (gstconfig.h, gstd3d11config.h, ...)
     if(WIN32)
         set(GST_LIB_DIR "${GST_INSTALL}/lib")
         set(GST_LIBS
@@ -888,15 +915,15 @@ if(WINDOW_ENABLE_VIDEO AND WINDOW_ENABLE_RENDERER)
     list(APPEND WINDOW_VIDEO_LIBS     ${GST_LIBS})
     list(APPEND WINDOW_DEFINES        WINDOW_SUPPORT_VIDEO)
 
-    # Per-backend zero-copy interop (needs the gl/d3d11 plugin dev headers, which the
-    # above Meson config builds). gl is enabled everywhere; d3d11 only on Windows.
+    # Per-backend zero-copy interop, matched to the plugin actually built above:
+    # D3D11 (gstd3d11) on Windows, GstGL (gstgl) on Linux. Defining the matching
+    # WINDOW_SUPPORT_VIDEO_* gates the corresponding code path in video_renderer.cpp.
     if(WINDOW_VIDEO_ZERO_COPY)
-        list(APPEND WINDOW_VIDEO_INCLUDES ${GST_INSTALL}/include/gstreamer-1.0)  # gst/gl, gst/d3d11
-        list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VIDEO_GL)
         if(WIN32)
             list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VIDEO_D3D11)
-            list(APPEND WINDOW_VIDEO_LIBS ${GST_LIB_DIR}/gstd3d11-1.0.lib ${GST_LIB_DIR}/gstgl-1.0.lib)
-        else()
+            list(APPEND WINDOW_VIDEO_LIBS ${GST_LIB_DIR}/gstd3d11-1.0.lib)
+        elseif(UNIX AND NOT APPLE)
+            list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_VIDEO_GL)
             list(APPEND WINDOW_VIDEO_LIBS ${GST_LIB_DIR}/libgstgl-1.0.so)
         endif()
     endif()
@@ -1875,6 +1902,13 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
         target_link_libraries(example_pbr PRIVATE window)
         target_compile_definitions(example_pbr PRIVATE
             WINDOW_PBR_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/renderer/shaders")
+    endif()
+
+    # Material binding/creation/editing demo (storage+uniform binders, Material-owned
+    # buffers, typed CPU-mirror editing, multi-descriptor-set layouts; runtime-compiled)
+    if(WINDOW_ENABLE_RENDERER)
+        add_executable(example_material_resources examples/material_resources.cpp)
+        target_link_libraries(example_material_resources PRIVATE window)
     endif()
 
     # OpenGL example

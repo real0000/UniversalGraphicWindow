@@ -85,6 +85,7 @@ float         VideoPlayer::volume() const                   { return 0.0f; }
 #include <gst/video/video.h>
 
 #if defined(WINDOW_SUPPORT_VIDEO_D3D11)
+#define GST_USE_UNSTABLE_API           // gst-plugins-bad d3d11 is "unstable API"; opt in to silence the warning
 #include <d3d11.h>
 #include <gst/d3d11/gstd3d11.h>
 #endif
@@ -357,64 +358,89 @@ VideoPlayer* VideoPlayer::open(const char* uri_or_path, const VideoPlayerDesc& d
 
     ensure_gst_init();
 
-    GstElement* pipeline = gst_element_factory_make("playbin", "ugw_player");
-    if (!pipeline) return fail(VideoResult::ErrorGStreamer);
-
-    // Resolve a local path to a file:// URI; pass through anything already a URI.
-    gchar* uri = nullptr;
-    if (gst_uri_is_valid(uri_or_path)) {
-        uri = g_strdup(uri_or_path);
-    } else {
-        uri = gst_filename_to_uri(uri_or_path, nullptr);
-    }
-    if (!uri) { gst_object_unref(pipeline); return fail(VideoResult::ErrorInvalidParameter); }
-    g_object_set(pipeline, "uri", uri, nullptr);
-    g_free(uri);
-
     auto* impl = new VideoPlayer::Impl();
     impl->desc    = desc;
     impl->device  = desc.device;
     impl->backend = desc.device->get_backend();
-    impl->pipeline = pipeline;
 
-    // ---- video appsink -----------------------------------------------------
-    GstElement* vsink = gst_element_factory_make("appsink", "ugw_vsink");
-    if (!vsink) { impl->shutdown(); delete impl; return fail(VideoResult::ErrorGStreamer); }
-    {
+    // "test"/"videotestsrc://" plays a synthetic SMPTE pattern (+ tone) via a manual
+    // pipeline, so the decode->texture->present path runs with no media file. Anything
+    // else goes through playbin (local file paths and real URIs).
+    const bool is_test = (std::strcmp(uri_or_path, "test") == 0 ||
+                          std::strcmp(uri_or_path, "videotestsrc://") == 0 ||
+                          std::strncmp(uri_or_path, "test://", 7) == 0);
+
+    GstElement* pipeline = nullptr;
+    GstElement* vsink = nullptr;   // owned ref -> impl->video_sink
+    GstElement* asink = nullptr;   // owned ref -> impl->audio_sink (or null)
+
+    if (is_test) {
+        std::string adesc;
+#if defined(WINDOW_SUPPORT_AUDIO)
+        if (desc.enable_audio)
+            adesc = " audiotestsrc is-live=true ! audioconvert ! audioresample ! "
+                    "audio/x-raw,format=F32LE,layout=interleaved,channels=2,rate=48000 ! "
+                    "appsink name=asink max-buffers=8 drop=false sync=true emit-signals=true";
+#endif
+        std::string ldesc =
+            "videotestsrc is-live=true pattern=smpte ! videoconvert ! video/x-raw,format=RGBA ! "
+            "appsink name=vsink max-buffers=1 drop=true sync=true" + adesc;
+        GError* perr = nullptr;
+        pipeline = gst_parse_launch(ldesc.c_str(), &perr);
+        if (perr) g_error_free(perr);
+        if (!pipeline) { impl->shutdown(); delete impl; return fail(VideoResult::ErrorGStreamer); }
+        vsink = gst_bin_get_by_name(GST_BIN(pipeline), "vsink");      // returns an owned ref
+        asink = gst_bin_get_by_name(GST_BIN(pipeline), "asink");      // null if absent
+        if (!vsink) { gst_object_unref(pipeline); impl->shutdown(); delete impl; return fail(VideoResult::ErrorGStreamer); }
+    } else {
+        pipeline = gst_element_factory_make("playbin", "ugw_player");
+        if (!pipeline) { impl->shutdown(); delete impl; return fail(VideoResult::ErrorGStreamer); }
+        gchar* uri = gst_uri_is_valid(uri_or_path) ? g_strdup(uri_or_path)
+                                                   : gst_filename_to_uri(uri_or_path, nullptr);
+        if (!uri) { gst_object_unref(pipeline); impl->shutdown(); delete impl; return fail(VideoResult::ErrorInvalidParameter); }
+        g_object_set(pipeline, "uri", uri, nullptr);
+        g_free(uri);
+
+        vsink = gst_element_factory_make("appsink", "ugw_vsink");
+        if (!vsink) { gst_object_unref(pipeline); impl->shutdown(); delete impl; return fail(VideoResult::ErrorGStreamer); }
         std::string caps_str = video_caps_string(impl->backend, desc.prefer_zero_copy);
         GstCaps* caps = gst_caps_from_string(caps_str.c_str());
-        g_object_set(vsink, "caps", caps, "max-buffers", 1, "drop", TRUE, "sync", TRUE,
-                     "emit-signals", FALSE, nullptr);
+        g_object_set(vsink, "caps", caps, "max-buffers", 1, "drop", TRUE, "sync", TRUE, "emit-signals", FALSE, nullptr);
         gst_caps_unref(caps);
-    }
-    impl->video_sink = GST_ELEMENT(gst_object_ref(vsink));
-    g_object_set(pipeline, "video-sink", vsink, nullptr);
-
-    // ---- audio appsink -> UGW AudioStream ----------------------------------
+        gst_object_ref(vsink);                            // keep our own ref past the set into playbin
+        g_object_set(pipeline, "video-sink", vsink, nullptr);
 #if defined(WINDOW_SUPPORT_AUDIO)
-    if (desc.enable_audio) {
-        GstElement* asink = gst_element_factory_make("appsink", "ugw_asink");
-        if (asink) {
-            GstCaps* acaps = gst_caps_from_string(
-                "audio/x-raw, format=F32LE, layout=interleaved, rate=48000, channels=2");
-            g_object_set(asink, "caps", acaps, "max-buffers", 8, "drop", FALSE, "sync", TRUE,
-                         "emit-signals", TRUE, nullptr);
-            gst_caps_unref(acaps);
-            GstAppSinkCallbacks cbs = {};
-            cbs.new_sample = on_audio_new_sample;
-            gst_app_sink_set_callbacks(GST_APP_SINK(asink), &cbs, impl, nullptr);
-            impl->audio_sink = GST_ELEMENT(gst_object_ref(asink));
-            g_object_set(pipeline, "audio-sink", asink, nullptr);
-
-            // Create (but don't start) a UGW playback stream fed by the bridge.
-            window::audio::AudioManager::initialize(window::audio::AudioBackend::Auto);
-            window::audio::AudioStreamConfig sc;
-            sc.format = window::audio::AudioFormat::default_format();  // F32, 48k, stereo
-            sc.mode = window::audio::AudioStreamMode::Playback;
-            sc.output_device_index = desc.audio_device_index;
-            impl->audio_stream = window::audio::AudioStream::create(sc, nullptr);
-            if (impl->audio_stream) impl->audio_stream->set_callback(&impl->audio_bridge);
+        if (desc.enable_audio) {
+            asink = gst_element_factory_make("appsink", "ugw_asink");
+            if (asink) {
+                GstCaps* acaps = gst_caps_from_string("audio/x-raw, format=F32LE, layout=interleaved, rate=48000, channels=2");
+                g_object_set(asink, "caps", acaps, "max-buffers", 8, "drop", FALSE, "sync", TRUE, "emit-signals", TRUE, nullptr);
+                gst_caps_unref(acaps);
+                gst_object_ref(asink);                    // keep our own ref
+                g_object_set(pipeline, "audio-sink", asink, nullptr);
+            }
         }
+#endif
+    }
+
+    impl->pipeline   = pipeline;
+    impl->video_sink = vsink;     // one owned ref in all paths
+    impl->audio_sink = asink;     // one owned ref, or null
+
+    // ---- audio appsink -> UGW AudioStream (shared by both source kinds) -----
+#if defined(WINDOW_SUPPORT_AUDIO)
+    if (asink) {
+        GstAppSinkCallbacks cbs = {};
+        cbs.new_sample = on_audio_new_sample;
+        gst_app_sink_set_callbacks(GST_APP_SINK(asink), &cbs, impl, nullptr);
+        // Create (but don't start) a UGW playback stream fed by the bridge.
+        window::audio::AudioManager::initialize(window::audio::AudioBackend::Auto);
+        window::audio::AudioStreamConfig sc;
+        sc.format = window::audio::AudioFormat::default_format();  // F32, 48k, stereo
+        sc.mode = window::audio::AudioStreamMode::Playback;
+        sc.output_device_index = desc.audio_device_index;
+        impl->audio_stream = window::audio::AudioStream::create(sc, nullptr);
+        if (impl->audio_stream) impl->audio_stream->set_callback(&impl->audio_bridge);
     }
 #endif
 

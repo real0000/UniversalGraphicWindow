@@ -63,8 +63,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const char* source  = (argc > 1) ? argv[1] : "videotestsrc://";   // playbin test pattern
+    const char* source  = (argc > 1) ? argv[1] : "test";   // "test" = built-in videotestsrc pattern
     Backend     backend = pick_backend(argc > 2 ? argv[2] : nullptr);
+    const int   max_frames = (argc > 3) ? std::atoi(argv[3]) : 0;   // 0 = until window closed
 
     Config c;
     c.backend = backend;
@@ -128,10 +129,12 @@ int main(int argc, char** argv) {
 
     int w, h; win->get_size(&w, &h);
     uint64_t frames = 0;
-    while (!win->should_close()) {
+    uint64_t presented = 0;   // frames where a valid video texture was drawn
+    while (!win->should_close() && (max_frames <= 0 || (int)frames < max_frames)) {
         win->poll_events();
         player->update();                 // pull newest decoded frame -> texture()
         TextureHandle vtex = player->texture();
+        if (vtex.valid()) ++presented;
 
         cmd->begin();
         cmd->set_render_target_backbuffer();
@@ -168,6 +171,13 @@ int main(int argc, char** argv) {
                             fi.pts_seconds, (int)fi.zero_copy, player->position(), player->duration());
         }
     }
+
+    video::VideoFrameInfo last{};
+    player->get_frame_info(&last);
+    std::printf("done: looped %llu frames, %llu with a video texture; last frame %dx%d zero_copy=%d\n",
+                (unsigned long long)frames, (unsigned long long)presented,
+                last.width, last.height, (int)last.zero_copy);
+    std::fflush(stdout);
 
     player->destroy();
     if (use_desc) { dev->destroy_pipeline(pipe); dev->destroy_pipeline_layout(pll); dev->destroy_descriptor_set_layout(dsl); }
