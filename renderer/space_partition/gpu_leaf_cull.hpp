@@ -33,6 +33,7 @@ namespace gfx {
 class GpuLeafCuller {
 public:
     struct Desc {
+        Desc() {}   // empty user-provided default ctor: GCC will not brace-init this nested aggregate (math::AABB member) in a `const Desc&={}` default arg
         int vis_capacity = 0;   // max items the cull records (0 = size to the item count)
     };
 

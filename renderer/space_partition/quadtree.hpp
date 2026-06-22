@@ -35,6 +35,7 @@ struct QuadNode {
 class Quadtree {
 public:
     struct Desc {
+        Desc() {}   // empty user-provided default ctor: GCC will not brace-init this nested aggregate (math::AABB member) in a `const Desc&={}` default arg
         int        max_leaf_size = 4;
         int        max_depth     = 16;
         math::AABB region;            // root region; empty (default) = fit to the items

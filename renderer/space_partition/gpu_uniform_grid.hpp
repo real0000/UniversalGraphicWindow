@@ -37,6 +37,7 @@ namespace gfx {
 class GpuUniformGrid {
 public:
     struct Desc {
+        Desc() {}   // empty user-provided default ctor: GCC will not brace-init this nested aggregate (math::AABB member) in a `const Desc&={}` default arg
         int bucket_capacity = 64;  // max items stored per cell (overflow is counted but dropped)
         int vis_capacity    = 0;   // max items the cull pass records (0 = size to the item count)
     };
