@@ -104,9 +104,10 @@ enum class TextDirection : uint8_t {
 
 enum class AntiAliasMode : uint8_t {
     None = 0,           // No anti-aliasing (1-bit)
-    Grayscale,          // 8-bit grayscale
+    Grayscale,          // 8-bit grayscale coverage
     Subpixel,           // LCD subpixel (RGB/BGR)
-    SubpixelBGR         // LCD subpixel BGR order
+    SubpixelBGR,        // LCD subpixel BGR order
+    SDF                 // 8-bit signed distance field (scale-independent; thresholded in the shader)
 };
 
 enum class HintingMode : uint8_t {
@@ -193,11 +194,12 @@ struct GlyphMetrics {
 
 struct GlyphBitmap {
     void* pixels = nullptr;         // Pixel data (owned by font system)
-    int width = 0;                  // Bitmap width in pixels
+    int width = 0;                  // Bitmap width in pixels (native; for colour strikes, the strike size)
     int height = 0;                 // Bitmap height in pixels
     int pitch = 0;                  // Bytes per row
     PixelFormat format = PixelFormat::A8;
-    GlyphMetrics metrics;
+    GlyphMetrics metrics;           // in display space (already scaled for fixed-size strikes)
+    float scale = 1.0f;             // pixels→display scale (1 except for colour bitmap strikes)
 };
 
 // ============================================================================
@@ -288,6 +290,10 @@ public:
 
     // Check if glyph exists
     virtual bool has_glyph(uint32_t codepoint) const = 0;
+
+    // True if this face carries embedded colour glyphs (e.g. a CBDT/COLR emoji font).
+    // The renderer routes such glyphs to its RGBA colour atlas instead of the SDF one.
+    virtual bool has_color() const { return false; }
 
     // Get number of glyphs in font
     virtual int get_glyph_count() const = 0;
@@ -688,19 +694,29 @@ struct GlyphAtlasConfig {
     int    layer_height    = 4096;   // per-layer height (user-settable)
     int    initial_layers  = 1;      // layers allocated up front
     int    max_layers      = 256;    // N grows up to here
+    bool   color           = false;  // false = R8 coverage (text); true = RGBA8 (colour emoji).
+                                      // A colour atlas stores each glyph's own pixels; the GPU
+                                      // shader samples them directly instead of tinting coverage.
+    bool   sdf             = false;  // R8 atlases only: store glyphs as signed distance fields
+                                      // (FT_RENDER_MODE_SDF) rather than plain coverage, so the
+                                      // shader can threshold them crisply at any scale.
     int    padding         = 1;      // cleared border (px) on every side of each glyph
                                      // (prevents bilinear sampling from bleeding in a neighbour)
     int    gc_idle_frames  = 600;    // glyph untouched this many frames => GC-eligible
     size_t gc_budget_bytes = 0;      // 0 = grow to max_layers; else GC LRU over budget
 };
 
-// One packed glyph within the RAM atlas (single-channel coverage).
+// One packed glyph within the RAM atlas (single-channel coverage, or RGBA when the
+// atlas is a colour atlas — see GlyphAtlasConfig::color).
 struct GlyphSlot {
     int   layer = -1;                       // atlas layer (-1 = invalid)
     int   px = 0, py = 0, pw = 0, ph = 0;   // pixel rect within the layer
     int   bearing_x = 0, bearing_y = 0;     // FreeType bitmap_left / bitmap_top
     float advance_x = 0.0f;                 // horizontal advance at this size
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;   // normalised UVs within the layer
+    bool  color = false;                    // true = RGBA colour glyph (emoji); sample directly
+    float scale = 1.0f;                     // bitmap→display scale. Colour emoji are packed at
+                                            // their native bitmap-strike size; the quad is pw*scale.
     bool  valid() const { return layer >= 0; }
 };
 

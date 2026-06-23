@@ -47,6 +47,7 @@ public:
                         GlyphBitmap* out_bitmap) override;
 
     bool has_glyph(uint32_t codepoint) const override;
+    bool has_color() const override { return face_ && FT_HAS_COLOR(face_); }
     int get_glyph_count() const override;
 
     Result set_size(float size) override;
@@ -68,6 +69,7 @@ private:
     std::vector<uint8_t> font_data_;  // Keep font data alive
     std::vector<uint8_t> glyph_buffer_;
     bool has_kerning_ = false;
+    float bitmap_scale_ = 1.0f;        // fixed-strike (CBDT emoji) → display-size scale; 1 otherwise
 };
 
 FreeTypeFontFace::FreeTypeFontFace(FT_Library library, FT_Face face,
@@ -99,8 +101,9 @@ FreeTypeFontFace::~FreeTypeFontFace() {
 void FreeTypeFontFace::update_metrics() {
     if (!face_) return;
 
-    // FreeType metrics are in 26.6 fixed-point format (1/64 pixels)
-    float scale = 1.0f / 64.0f;
+    // FreeType metrics are in 26.6 fixed-point format (1/64 pixels). For a fixed-size
+    // strike face, bitmap_scale_ maps the strike's metrics to the requested size.
+    float scale = bitmap_scale_ / 64.0f;
 
     metrics_.ascender = face_->size->metrics.ascender * scale;
     metrics_.descender = face_->size->metrics.descender * scale;
@@ -137,7 +140,9 @@ bool FreeTypeFontFace::get_glyph_metrics(uint32_t glyph_index, GlyphMetrics* out
     FT_Error error = FT_Load_Glyph(face_, glyph_index, FT_LOAD_NO_BITMAP);
     if (error) return false;
 
-    float scale = 1.0f / 64.0f;
+    // bitmap_scale_ maps a fixed-size colour strike's metrics back to the requested
+    // display size, so the shaper lays emoji out at text size (not the 128px strike).
+    float scale = bitmap_scale_ / 64.0f;
     FT_GlyphSlot slot = face_->glyph;
 
     out_metrics->width = slot->metrics.width * scale;
@@ -162,6 +167,12 @@ float FreeTypeFontFace::get_kerning(uint32_t left_glyph, uint32_t right_glyph) c
 }
 
 int FreeTypeFontFace::get_load_flags(const RenderOptions& options) const {
+    // Colour output requested → load the glyph's embedded colour bitmap (e.g. a CBDT
+    // emoji). This only *decodes* the pixels; the actual colouring is done later by
+    // the GPU glyph shader when it samples the colour atlas.
+    if (options.output_format == PixelFormat::RGBA8 || options.output_format == PixelFormat::BGRA8)
+        return FT_LOAD_COLOR | FT_LOAD_DEFAULT;
+
     int flags = FT_LOAD_DEFAULT;
 
     switch (options.hinting) {
@@ -196,6 +207,8 @@ int FreeTypeFontFace::get_render_mode(const RenderOptions& options) const {
         case AntiAliasMode::Subpixel:
         case AntiAliasMode::SubpixelBGR:
             return FT_RENDER_MODE_LCD;
+        case AntiAliasMode::SDF:
+            return FT_RENDER_MODE_SDF;   // 8-bit signed distance field (FreeType 'sdf' module)
         default:
             return FT_RENDER_MODE_NORMAL;
     }
@@ -215,11 +228,16 @@ Result FreeTypeFontFace::render_glyph(uint32_t glyph_index, const RenderOptions&
         FT_Library_SetLcdFilter(library_, FT_LCD_FILTER_DEFAULT);
     }
 
-    int render_mode = get_render_mode(options);
-    error = FT_Render_Glyph(face_->glyph, static_cast<FT_Render_Mode>(render_mode));
-    if (error) return Result::ErrorRenderFailed;
-
     FT_GlyphSlot slot = face_->glyph;
+    // A colour glyph loaded with FT_LOAD_COLOR (CBDT/sbix emoji) is ALREADY a BGRA
+    // bitmap — calling FT_Render_Glyph again would convert it to grayscale and lose the
+    // colour. Only rasterise outline glyphs; leave an already-decoded bitmap untouched.
+    if (slot->format != FT_GLYPH_FORMAT_BITMAP) {
+        int render_mode = get_render_mode(options);
+        error = FT_Render_Glyph(slot, static_cast<FT_Render_Mode>(render_mode));
+        if (error) return Result::ErrorRenderFailed;
+    }
+
     FT_Bitmap* bitmap = &slot->bitmap;
 
     // Handle empty glyphs (spaces, etc.)
@@ -229,14 +247,15 @@ Result FreeTypeFontFace::render_glyph(uint32_t glyph_index, const RenderOptions&
         out_bitmap->pixels = nullptr;
         out_bitmap->pitch = 0;
 
-        // Still fill metrics
-        float scale = 1.0f / 64.0f;
+        // Still fill metrics (display space via bitmap_scale_).
+        float scale = bitmap_scale_ / 64.0f;
         out_bitmap->metrics.width = slot->metrics.width * scale;
         out_bitmap->metrics.height = slot->metrics.height * scale;
         out_bitmap->metrics.bearing_x = slot->metrics.horiBearingX * scale;
         out_bitmap->metrics.bearing_y = slot->metrics.horiBearingY * scale;
         out_bitmap->metrics.advance_x = slot->metrics.horiAdvance * scale;
         out_bitmap->metrics.advance_y = 0.0f;
+        out_bitmap->scale = bitmap_scale_;
 
         return Result::Success;
     }
@@ -312,6 +331,19 @@ Result FreeTypeFontFace::render_glyph(uint32_t glyph_index, const RenderOptions&
             break;
         }
 
+        case FT_PIXEL_MODE_BGRA: {
+            // Embedded colour bitmap (CBDT/sbix emoji) — premultiplied BGRA. Decode
+            // verbatim at the strike's native size; un-premultiply + BGRA→RGBA happen
+            // when packing into the colour atlas. The shader does the actual colouring.
+            out_format = PixelFormat::BGRA8;
+            out_pitch = width * 4;
+            glyph_buffer_.resize(static_cast<size_t>(out_pitch) * height);
+            for (int y = 0; y < height; ++y)
+                memcpy(glyph_buffer_.data() + static_cast<size_t>(y) * out_pitch,
+                       bitmap->buffer + static_cast<size_t>(y) * src_pitch, out_pitch);
+            break;
+        }
+
         default:
             return Result::ErrorRenderFailed;
     }
@@ -321,13 +353,15 @@ Result FreeTypeFontFace::render_glyph(uint32_t glyph_index, const RenderOptions&
     out_bitmap->height = height;
     out_bitmap->pitch = out_pitch;
     out_bitmap->format = out_format;
+    out_bitmap->scale = bitmap_scale_;
 
-    // Fill metrics
-    float scale = 1.0f / 64.0f;
+    // Fill metrics — mapped to display space (bitmap_scale_ = 1 for scalable faces;
+    // < 1 for a colour bitmap strike rendered larger than the requested size).
+    float scale = bitmap_scale_ / 64.0f;
     out_bitmap->metrics.width = slot->metrics.width * scale;
     out_bitmap->metrics.height = slot->metrics.height * scale;
-    out_bitmap->metrics.bearing_x = static_cast<float>(slot->bitmap_left);
-    out_bitmap->metrics.bearing_y = static_cast<float>(slot->bitmap_top);
+    out_bitmap->metrics.bearing_x = slot->bitmap_left * bitmap_scale_;
+    out_bitmap->metrics.bearing_y = slot->bitmap_top * bitmap_scale_;
     out_bitmap->metrics.advance_x = slot->metrics.horiAdvance * scale;
     out_bitmap->metrics.advance_y = 0.0f;
 
@@ -346,6 +380,31 @@ int FreeTypeFontFace::get_glyph_count() const {
 Result FreeTypeFontFace::set_size(float size) {
     if (size <= 0.0f) return Result::ErrorInvalidParameter;
     if (!face_) return Result::ErrorNotInitialized;
+
+    bitmap_scale_ = 1.0f;
+
+    // Bitmap-strike (fixed-size) faces — e.g. a CBDT colour-emoji font — have no
+    // scalable outlines. FT_Set_Char_Size can "succeed" on them without selecting a
+    // usable strike, after which FT_LOAD_COLOR finds no bitmap. So for a non-scalable
+    // face, always pick the strike nearest the requested size and remember the
+    // strike→size ratio so reported metrics map back to display space.
+    if (face_->num_fixed_sizes > 0 && !FT_IS_SCALABLE(face_)) {
+        const int target = static_cast<int>(size + 0.5f);
+        int best = 0, best_d = 1 << 30;
+        for (int i = 0; i < face_->num_fixed_sizes; ++i) {
+            int ph = face_->available_sizes[i].height;
+            int d = ph > target ? ph - target : target - ph;
+            if (d < best_d) { best_d = d; best = i; }
+        }
+        if (FT_Select_Size(face_, best) == 0) {
+            int sh = face_->available_sizes[best].height;
+            if (sh > 0) bitmap_scale_ = size / static_cast<float>(sh);
+            descriptor_.size = size;
+            update_metrics();
+            return Result::Success;
+        }
+        // fall through to scalable sizing if strike selection failed
+    }
 
     // FreeType wants size in 26.6 fixed-point format
     FT_Error error = FT_Set_Char_Size(face_, 0, static_cast<FT_F26Dot6>(size * 64), 72, 72);

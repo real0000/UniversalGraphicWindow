@@ -1690,6 +1690,7 @@ public:
         if (cfg_.max_layers   < 1) cfg_.max_layers   = 1;
         if (cfg_.initial_layers < 0) cfg_.initial_layers = 0;
         if (cfg_.padding < 0) cfg_.padding = 0;
+        bpp_ = cfg_.color ? 4 : 1;   // RGBA colour atlas vs R8 coverage atlas
         for (int i = 0; i < cfg_.initial_layers && i < cfg_.max_layers; ++i) add_layer();
     }
 
@@ -1769,20 +1770,33 @@ public:
             return &it->second.slot;
         }
 
-        // Rasterise the glyph as 8-bit coverage.
+        // Rasterise the glyph. A colour atlas asks the face for the glyph's own
+        // pixels (RGBA, e.g. a CBDT emoji); a coverage atlas asks for 8-bit alpha.
+        // The face only *decodes* — no colouring happens here; the GPU shader does
+        // the actual 染色 when sampling the colour atlas.
         fe.face->set_size(size);
         RenderOptions ropts;
-        ropts.antialias     = AntiAliasMode::Grayscale;
-        ropts.hinting       = HintingMode::Normal;
-        ropts.output_format = PixelFormat::A8;
+        ropts.antialias     = cfg_.color ? AntiAliasMode::Grayscale
+                            : cfg_.sdf   ? AntiAliasMode::SDF
+                                         : AntiAliasMode::Grayscale;
+        ropts.hinting       = cfg_.sdf ? HintingMode::None : HintingMode::Normal;
+        ropts.output_format = cfg_.color ? PixelFormat::RGBA8 : PixelFormat::A8;
         GlyphBitmap bmp;
         if (fe.face->render_glyph(glyph_id, ropts, &bmp) != Result::Success) return nullptr;
+
+        const int bpp = bpp_;
+        // A colour atlas only keeps glyphs the face actually rendered in colour; a
+        // plain-coverage glyph routed here would have no colour to show.
+        const bool is_color = (bmp.format == PixelFormat::RGBA8 || bmp.format == PixelFormat::BGRA8);
+        if (cfg_.color && !is_color) return nullptr;
 
         Record rec;
         rec.last_frame      = frame_;
         rec.slot.bearing_x  = static_cast<int>(std::lround(bmp.metrics.bearing_x));
         rec.slot.bearing_y  = static_cast<int>(std::lround(bmp.metrics.bearing_y));
         rec.slot.advance_x  = bmp.metrics.advance_x;
+        rec.slot.color      = cfg_.color;
+        rec.slot.scale      = bmp.scale;   // colour strikes pack at native size; quad = pw*scale
 
         // Empty glyph (space, etc.): no pixels, advance only.
         if (!bmp.pixels || bmp.width <= 0 || bmp.height <= 0) {
@@ -1792,21 +1806,41 @@ public:
             return &ins.first->second.slot;
         }
 
-        // Tight-copy the coverage immediately (the FreeType backend reuses its buffer).
+        // Tight-copy the pixels immediately (the FreeType backend reuses its buffer).
         int cw = bmp.width, ch = bmp.height;
-        std::vector<uint8_t> cov(static_cast<size_t>(cw) * ch);
-        for (int y = 0; y < ch; ++y)
-            memcpy(cov.data() + static_cast<size_t>(y) * cw,
-                   static_cast<const uint8_t*>(bmp.pixels) + static_cast<size_t>(y) * bmp.pitch,
-                   cw);
+        std::vector<uint8_t> cov(static_cast<size_t>(cw) * ch * bpp);
+        if (bpp == 4) {
+            // Colour glyph: normalise to straight RGBA. FreeType BGRA is premultiplied.
+            const bool bgra = (bmp.format == PixelFormat::BGRA8);
+            for (int y = 0; y < ch; ++y) {
+                const uint8_t* src = static_cast<const uint8_t*>(bmp.pixels) + static_cast<size_t>(y) * bmp.pitch;
+                uint8_t* dst = cov.data() + static_cast<size_t>(y) * cw * 4;
+                for (int x = 0; x < cw; ++x) {
+                    uint8_t b0 = src[x * 4 + 0], b1 = src[x * 4 + 1], b2 = src[x * 4 + 2], a = src[x * 4 + 3];
+                    uint8_t r = bgra ? b2 : b0, g = b1, b = bgra ? b0 : b2;
+                    if (a != 0 && a != 255) {   // un-premultiply (alpha-blend expects straight RGBA)
+                        r = static_cast<uint8_t>(std::min(255, r * 255 / a));
+                        g = static_cast<uint8_t>(std::min(255, g * 255 / a));
+                        b = static_cast<uint8_t>(std::min(255, b * 255 / a));
+                    }
+                    dst[x * 4 + 0] = r; dst[x * 4 + 1] = g; dst[x * 4 + 2] = b; dst[x * 4 + 3] = a;
+                }
+            }
+        } else {
+            for (int y = 0; y < ch; ++y)
+                memcpy(cov.data() + static_cast<size_t>(y) * cw,
+                       static_cast<const uint8_t*>(bmp.pixels) + static_cast<size_t>(y) * bmp.pitch,
+                       cw);
+        }
 
-        // Synthetic bold / italic on the coverage bitmap.
-        if (synth & kSynthBold) {
+        // Synthetic bold / italic only apply to plain single-channel coverage glyphs
+        // (an SDF or colour bitmap would be corrupted by pixel dilation/shear).
+        if (bpp == 1 && !cfg_.sdf && (synth & kSynthBold)) {
             int strength = std::max(1, static_cast<int>(std::lround(size / 24.0f)));
             synth_embolden(cov, cw, ch, strength);
             rec.slot.advance_x += strength;
         }
-        if (synth & kSynthItalic) synth_oblique(cov, cw, ch, 0.2f);
+        if (bpp == 1 && !cfg_.sdf && (synth & kSynthItalic)) synth_oblique(cov, cw, ch, 0.2f);
 
         // Pack into a layer; one GC retry if the atlas is full.
         Placement pl;
@@ -1827,7 +1861,7 @@ public:
         rec.slot.v1 = static_cast<float>(cy + ch) / cfg_.layer_height;
         rec.layer = pl.layer; rec.shelf_idx = pl.shelf_idx;
         rec.cell_x = pl.x;    rec.cell_w = pl.cell_w;   // cell origin/width for freeing
-        rec.bytes = static_cast<size_t>(cw) * ch;
+        rec.bytes = static_cast<size_t>(cw) * ch * bpp;
         memory_usage_ += rec.bytes;
 
         auto ins = glyphs_.emplace(key, rec);
@@ -1963,7 +1997,7 @@ private:
     struct Placement { int layer, x, y, shelf_idx, cell_w; };
 
     void add_layer() {
-        layers_.emplace_back(static_cast<size_t>(cfg_.layer_width) * cfg_.layer_height, 0);
+        layers_.emplace_back(static_cast<size_t>(cfg_.layer_width) * cfg_.layer_height * bpp_, 0);
         packs_.emplace_back();
     }
 
@@ -2027,20 +2061,24 @@ private:
         return false;
     }
 
+    // `cov` holds cw*ch pixels of bpp_ bytes each (1 = coverage, 4 = RGBA colour).
     void blit(const Placement& pl, const std::vector<uint8_t>& cov, int cw, int ch) {
         std::vector<uint8_t>& layer = layers_[pl.layer];
         const int W   = cfg_.layer_width;
         const int pad = cfg_.padding;
+        const int bpp = bpp_;
         // Clear the whole cell (content + its border) so the gutter is zeroed.
         int clear_w = std::min(pl.cell_w, W - pl.x);
         int clear_h = std::min(ch + 2 * pad, cfg_.layer_height - pl.y);
         for (int y = 0; y < clear_h; ++y)
-            memset(layer.data() + static_cast<size_t>(pl.y + y) * W + pl.x, 0, clear_w);
+            memset(layer.data() + (static_cast<size_t>(pl.y + y) * W + pl.x) * bpp, 0,
+                   static_cast<size_t>(clear_w) * bpp);
         // Copy the glyph inset by `pad` so it is surrounded by cleared pixels.
         const int cx = pl.x + pad, cy = pl.y + pad;
         for (int y = 0; y < ch; ++y)
-            memcpy(layer.data() + static_cast<size_t>(cy + y) * W + cx,
-                   cov.data() + static_cast<size_t>(y) * cw, cw);
+            memcpy(layer.data() + (static_cast<size_t>(cy + y) * W + cx) * bpp,
+                   cov.data() + static_cast<size_t>(y) * cw * bpp,
+                   static_cast<size_t>(cw) * bpp);
         dirty_.push_back(GlyphDirtyRegion{pl.layer, pl.x, pl.y, clear_w, clear_h});
     }
 
@@ -2114,7 +2152,8 @@ private:
     size_t user_tried_ = 0;
     int    plat_tried_ = 0;
 
-    std::vector<std::vector<uint8_t>> layers_;   // each cfg_.layer_width*height bytes
+    int bpp_ = 1;                                // 1 = R8 coverage, 4 = RGBA colour
+    std::vector<std::vector<uint8_t>> layers_;   // each cfg_.layer_width*height*bpp_ bytes
     std::vector<LayerPack>            packs_;
     std::vector<GlyphDirtyRegion>     dirty_;
 

@@ -48,9 +48,11 @@ public:
     // texture array (pass an invalid handle when there is no text). `proj` is a
     // 16-float column-major orthographic matrix mapping UI pixels → clip space.
     // fb_w/fb_h are framebuffer pixels (for scissor); `scale` is UI→pixel.
+    // `color_atlas` is the RGBA colour-emoji glyph atlas (GpuTextRasterizer::color_atlas());
+    // pass an invalid handle when there are no colour glyphs (a 1x1 dummy is bound instead).
     void render(GraphicCommander* cmd, WidgetRenderInfo& info,
                 TextureHandle atlas, const float proj[16],
-                int fb_w, int fb_h, float scale = 1.0f);
+                int fb_w, int fb_h, float scale = 1.0f, TextureHandle color_atlas = {});
 
 private:
     void emit_quad(float x, float y, float w, float h,
@@ -94,7 +96,9 @@ private:
     static const uint32_t     kUboSlots = 64;
     BufferHandle              proj_ubo_[kUboSlots];   // 16-float projection per slot
     uint32_t                  ubo_slot_ = 0;
-    TextureHandle             dummy_atlas_;   // 1x1 atlas so solid-only draws still bind a set
+    TextureHandle             dummy_atlas_;        // 1x1 R8 atlas so solid-only draws bind a set
+    TextureHandle             dummy_color_atlas_;  // 1x1 RGBA so the colour binding is always complete
+    TextureHandle             cur_color_atlas_;    // colour atlas bound this render() (or the dummy)
     SamplerHandle             sampler_;
     DescriptorSetLayoutHandle set_layout_;
     PipelineLayoutHandle      pipe_layout_;

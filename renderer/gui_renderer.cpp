@@ -35,14 +35,22 @@ VSOut vs_main(VSIn i) {
     return o;
 }
 
-Texture2DArray uAtlas : register(t1);
-SamplerState   uSamp  : register(s2);
+Texture2DArray uAtlas      : register(t1);   // R8 signed-distance-field glyph atlas (text)
+SamplerState   uSamp       : register(s2);
+Texture2DArray uColorAtlas : register(t3);   // RGBA colour-emoji glyph atlas
 float4 ps_atlas(VSOut i) : SV_Target {
-    if (i.uvw.z >= 0.0) {                                  // glyph: R8 atlas as an alpha mask
-        float a = uAtlas.Sample(uSamp, i.uvw).r;
-        return float4(i.color.rgb, i.color.a * a);
+    if (i.uvw.z < 0.0) return i.color;                    // solid colour quad
+    if (i.uvw.z >= 4096.0) {                              // colour emoji: sample RGBA directly
+        float3 cuvw = float3(i.uvw.xy, i.uvw.z - 4096.0);
+        float4 c = uColorAtlas.Sample(uSamp, cuvw);
+        return float4(c.rgb, c.a * i.color.a);
     }
-    return i.color;                                        // solid colour
+    // SDF text glyph: 0.5 = the glyph edge. Threshold with screen-space-derivative AA,
+    // so the same atlas stays crisp at any scale; tint by the vertex colour (the 染色).
+    float d  = uAtlas.Sample(uSamp, i.uvw).r;
+    float aa = fwidth(d);
+    float a  = aa > 0.0 ? smoothstep(0.5 - aa, 0.5 + aa, d) : step(0.5, d);
+    return float4(i.color.rgb, i.color.a * a);
 }
 )";
 
@@ -90,14 +98,22 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     TextureDesc dt; dt.width = 1; dt.height = 1; dt.array_layers = 1; dt.array_texture = true;
     dt.format = TextureFormat::R8_UNORM; dt.usage = TEXTURE_USAGE_SAMPLED; dt.initial_data = &white;
     dummy_atlas_ = device_->create_texture(dt);
+    // 1x1 transparent RGBA so the colour-emoji binding (3) is always complete, even when
+    // a frame draws no colour glyphs.
+    uint8_t clear4[4] = { 0, 0, 0, 0 };
+    TextureDesc dtc; dtc.width = 1; dtc.height = 1; dtc.array_layers = 1; dtc.array_texture = true;
+    dtc.format = TextureFormat::RGBA8_UNORM; dtc.usage = TEXTURE_USAGE_SAMPLED; dtc.initial_data = clear4;
+    dummy_color_atlas_ = device_->create_texture(dtc);
+    cur_color_atlas_ = dummy_color_atlas_;
 
-    // One descriptor set per draw: UBO (binding 0, vertex) + texture (1) + sampler (2, fragment).
-    // The RHI emulates this on GL/D3D11 as slot binds, so it works on every backend uniformly.
+    // One descriptor set per draw: UBO (binding 0, vertex) + glyph atlas (1) + sampler (2) +
+    // colour-emoji atlas (3, fragment). The RHI emulates this on GL/D3D11 as slot binds.
     SamplerState ss; sampler_ = device_->create_sampler(ss);
-    DescriptorSetLayoutDesc dl; dl.binding_count = 3;
+    DescriptorSetLayoutDesc dl; dl.binding_count = 4;
     dl.bindings[0] = { 0, BindingType::UniformBuffer,  1, STAGE_VERTEX };
     dl.bindings[1] = { 1, BindingType::SampledTexture, 1, STAGE_FRAGMENT };
     dl.bindings[2] = { 2, BindingType::Sampler,        1, STAGE_FRAGMENT };
+    dl.bindings[3] = { 3, BindingType::SampledTexture, 1, STAGE_FRAGMENT };
     set_layout_ = device_->create_descriptor_set_layout(dl);
     PipelineLayoutDesc pll; pll.set_layout_count = 1; pll.set_layouts[0] = set_layout_;
     pipe_layout_ = device_->create_pipeline_layout(pll);
@@ -129,13 +145,18 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
 // by (slot,texture) keeps each pair created once -- the slot ring cycles deterministically and the
 // texture set is small, so the cache stays bounded with no per-frame churn.
 DescriptorSetHandle GpuGuiRenderer::desc_set_for(TextureHandle tex, uint32_t ubo_slot) {
-    const uint64_t key = (uint64_t(ubo_slot) << 32) | uint32_t(tex.id);
+    // Key on (slot, glyph atlas, colour atlas): the colour atlas handle changes when the
+    // emoji atlas grows, which must mint a fresh set rather than reuse a stale binding.
+    const uint64_t key = (uint64_t(ubo_slot) * 1000003ull)
+                       ^ (uint64_t(tex.id) * 19349663ull)
+                       ^ (uint64_t(cur_color_atlas_.id) * 83492791ull);
     auto it = desc_sets_.find(key);
     if (it != desc_sets_.end()) return it->second;
-    DescriptorSetDesc d; d.layout = set_layout_; d.write_count = 3;
+    DescriptorSetDesc d; d.layout = set_layout_; d.write_count = 4;
     d.writes[0].binding = 0; d.writes[0].type = BindingType::UniformBuffer;  d.writes[0].buffer = proj_ubo_[ubo_slot]; d.writes[0].buffer_size = 16 * sizeof(float);
     d.writes[1].binding = 1; d.writes[1].type = BindingType::SampledTexture; d.writes[1].texture = tex;
     d.writes[2].binding = 2; d.writes[2].type = BindingType::Sampler;        d.writes[2].sampler = sampler_;
+    d.writes[3].binding = 3; d.writes[3].type = BindingType::SampledTexture; d.writes[3].texture = cur_color_atlas_;
     DescriptorSetHandle set = device_->create_descriptor_set(d);
     desc_sets_.emplace(key, set);
     return set;
@@ -146,7 +167,8 @@ void GpuGuiRenderer::shutdown() {
     if (vbo_.valid())            device_->destroy_buffer(vbo_);
     for (uint32_t i = 0; i < kUboSlots; ++i)
         if (proj_ubo_[i].valid()) device_->destroy_buffer(proj_ubo_[i]);
-    if (dummy_atlas_.valid())    device_->destroy_texture(dummy_atlas_);
+    if (dummy_atlas_.valid())       device_->destroy_texture(dummy_atlas_);
+    if (dummy_color_atlas_.valid()) device_->destroy_texture(dummy_color_atlas_);
     if (pipeline_.valid())       device_->destroy_pipeline(pipeline_);
     if (image_pipeline_.valid()) device_->destroy_pipeline(image_pipeline_);
     if (vs_.valid())             device_->destroy_shader(vs_);
@@ -252,8 +274,11 @@ TextureHandle GpuGuiRenderer::resolve_texture(const WidgetRenderInfo::TextureCmd
 
 void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
                             TextureHandle atlas, const float proj[16],
-                            int fb_w, int fb_h, float scale) {
+                            int fb_w, int fb_h, float scale, TextureHandle color_atlas) {
     if (!device_ || !cmd) return;
+
+    // The colour-emoji atlas bound at binding 3 for every draw this pass.
+    cur_color_atlas_ = color_atlas.valid() ? color_atlas : dummy_color_atlas_;
 
     // Expand text + 9-slice → Color + Texture quads (idempotent).
     info.flatten(rasterizer_);

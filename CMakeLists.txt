@@ -315,6 +315,50 @@ if(WINDOW_ENABLE_FREETYPE AND WINDOW_ENABLE_FONT)
         set(FREETYPE_AVAILABLE TRUE)
     else()
         message(STATUS "FreeType not found - fetching from GitHub...")
+
+        # zlib + libpng, built from source like the other deps, so FreeType can decode
+        # PNG-compressed colour bitmaps (CBDT/sbix emoji such as Noto Color Emoji).
+        # No system libpng/zlib dev packages are required.
+        set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        window_fetch_content(zlib
+            GIT_REPOSITORY https://github.com/madler/zlib.git
+            GIT_TAG v1.3.1
+        )
+        FetchContent_MakeAvailable(zlib)   # → target zlibstatic (+ generated zconf.h)
+
+        # libpng: build a minimal static target straight from its sources (skip its own
+        # CMake to avoid find_package(ZLIB) friction — we link the fetched zlibstatic).
+        window_fetch_content(libpng
+            GIT_REPOSITORY https://github.com/pnggroup/libpng.git
+            GIT_TAG v1.6.43
+        )
+        FetchContent_GetProperties(libpng)
+        if(NOT libpng_POPULATED)
+            FetchContent_Populate(libpng)
+        endif()
+        configure_file(${libpng_SOURCE_DIR}/scripts/pnglibconf.h.prebuilt
+                       ${libpng_BINARY_DIR}/pnglibconf.h COPYONLY)
+        add_library(png_static STATIC
+            ${libpng_SOURCE_DIR}/png.c       ${libpng_SOURCE_DIR}/pngerror.c
+            ${libpng_SOURCE_DIR}/pngget.c    ${libpng_SOURCE_DIR}/pngmem.c
+            ${libpng_SOURCE_DIR}/pngpread.c  ${libpng_SOURCE_DIR}/pngread.c
+            ${libpng_SOURCE_DIR}/pngrio.c    ${libpng_SOURCE_DIR}/pngrtran.c
+            ${libpng_SOURCE_DIR}/pngrutil.c  ${libpng_SOURCE_DIR}/pngset.c
+            ${libpng_SOURCE_DIR}/pngtrans.c  ${libpng_SOURCE_DIR}/pngwio.c
+            ${libpng_SOURCE_DIR}/pngwrite.c  ${libpng_SOURCE_DIR}/pngwtran.c
+            ${libpng_SOURCE_DIR}/pngwutil.c
+        )
+        target_include_directories(png_static PUBLIC
+            ${libpng_SOURCE_DIR} ${libpng_BINARY_DIR}
+            ${zlib_SOURCE_DIR}   ${zlib_BINARY_DIR}
+        )
+        target_link_libraries(png_static PUBLIC zlibstatic)
+        # The prebuilt config has no hardware-accel sources, so disable those paths.
+        target_compile_definitions(png_static PRIVATE
+            PNG_ARM_NEON_OPT=0 PNG_INTEL_SSE_OPT=0 PNG_POWERPC_VSX_OPT=0 PNG_MIPS_MSA_OPT=0)
+
+        # FreeType: keep FT_DISABLE_PNG ON so its CMake skips find_package(PNG); we wire
+        # PNG support onto the target ourselves, linking the libpng we just built.
         set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
         set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
         set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
@@ -325,7 +369,16 @@ if(WINDOW_ENABLE_FREETYPE AND WINDOW_ENABLE_FONT)
             GIT_TAG VER-2-13-3
         )
         FetchContent_MakeAvailable(freetype)
-        message(STATUS "FreeType fetched: 2.13.3")
+        # Enable PNG colour-bitmap decoding in the fetched FreeType + link our libpng.
+        # png_static is build-tree-only ($<BUILD_INTERFACE:>) so it stays out of
+        # FreeType's (and window's) exported interface — install(EXPORT) would
+        # otherwise fail; same treatment as the glslang/SPIRV-Cross static libs above.
+        target_compile_definitions(freetype PRIVATE FT_CONFIG_OPTION_USE_PNG)
+        target_include_directories(freetype PRIVATE
+            ${libpng_SOURCE_DIR} ${libpng_BINARY_DIR}
+            ${zlib_SOURCE_DIR}   ${zlib_BINARY_DIR})
+        target_link_libraries(freetype PRIVATE $<BUILD_INTERFACE:png_static>)
+        message(STATUS "FreeType fetched: 2.13.3 (+ libpng 1.6.43 / zlib 1.3.1 for colour emoji)")
         set(FREETYPE_AVAILABLE TRUE)
         set(FREETYPE_FETCHED TRUE)
     endif()
