@@ -19,6 +19,7 @@ class GuiMenu : public WidgetBase<IGuiMenu, WidgetType::Custom> {
     std::vector<Item> items_;
     int next_id_=0;
     bool open_=false;
+    int hovered_=-1;   // item index under the cursor (-1 = none), for hover highlight
     MenuStyle style_=MenuStyle::default_style();
     IMenuEventHandler* handler_=nullptr;
     mutable WidgetRenderInfo ri_;
@@ -47,6 +48,25 @@ public:
         float h = total_height();
         auto drop = math::make_box(bx, by, w, h);
         return math::box_contains(drop, p);
+    }
+    // Track the hovered item so the renderer can highlight it (parity with the
+    // immediate-mode popup this replaced; the base widget had no hover tracking).
+    bool handle_mouse_move(const math::Vec2& p) override {
+        if (!open_) { hovered_ = -1; return false; }
+        hovered_ = -1;
+        if (hit_test(p)) {
+            float by = math::y(math::box_min(base_.get_bounds()));
+            float rel_y = math::y(p) - by, y = 0;
+            for (int i = 0; i < (int)items_.size(); i++) {
+                float ih = (items_[i].type == MenuItemType::Separator) ? style_.separator_height : style_.item_height;
+                if (rel_y >= y && rel_y < y + ih) {
+                    if (items_[i].type != MenuItemType::Separator && items_[i].enabled) hovered_ = i;
+                    break;
+                }
+                y += ih;
+            }
+        }
+        return hovered_ >= 0;
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!open_) return false;
@@ -130,7 +150,7 @@ public:
     void show_at(const math::Vec2& pos) override {
         auto b=base_.get_bounds(); float w=math::box_width(b),h=math::box_height(b);
         base_.set_bounds(math::make_box(math::x(pos),math::y(pos),w,h));
-        open_=true; if(handler_) handler_->on_menu_opened();
+        open_=true; hovered_=-1; if(handler_) handler_->on_menu_opened();
     }
     void show_relative_to(const IGuiWidget* anchor, PopupPlacement placement) override {
         if(!anchor){show_at(math::Vec2());return;}
@@ -184,15 +204,17 @@ public:
                               s.separator_color, d++, noclip);
                 ry += s.separator_height;
             } else {
-                math::Vec4 item_bg = items_[i].enabled ? s.background_color : s.background_color;
-                // Highlight hovered - no hover tracking in this widget, skip
+                bool hov = (i == hovered_) && items_[i].enabled;
+                if (hov)
+                    ri_.push_rect(bx, ry, menu_w, s.item_height, s.item_hover_background, d++, noclip);
                 if (items_[i].type == MenuItemType::Checkbox || items_[i].type == MenuItemType::Radio) {
                     if (items_[i].checked) {
                         float cx = bx+4, cy = ry + s.item_height*0.5f - 4;
                         ri_.push_rect(cx, cy, 8, 8, s.check_color, d++, noclip);
                     }
                 }
-                math::Vec4 tc = items_[i].enabled ? s.item_text_color : s.item_disabled_text_color;
+                math::Vec4 tc = !items_[i].enabled ? s.item_disabled_text_color
+                                                   : (hov ? s.item_hover_text_color : s.item_text_color);
                 if (!items_[i].text.empty())
                     ri_.push_text(items_[i].text.c_str(), bx+20, ry, menu_w-50, s.item_height,
                                   tc, s.font_size, Alignment::CenterLeft, d++, noclip);

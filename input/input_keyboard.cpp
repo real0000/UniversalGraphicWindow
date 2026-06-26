@@ -757,10 +757,10 @@ bool KeyboardEventDispatcher::dispatch_char(const CharEvent& event) {
     return false;
 }
 
-void KeyboardEventDispatcher::dispatch_preedit(const std::string& text) {
+void KeyboardEventDispatcher::dispatch_preedit(const std::string& text, int cursor_codepoints) {
     if (needs_sort_) sort_handlers();
     for (int i = 0; i < handler_count_; i++)
-        if (handlers_[i]) handlers_[i]->on_preedit(text);
+        if (handlers_[i]) handlers_[i]->on_preedit(text, cursor_codepoints);
 }
 
 //=============================================================================
@@ -835,8 +835,8 @@ void DefaultKeyboardDevice::inject_key_up(Key key, KeyMod modifiers, int scancod
     }
 }
 
-void DefaultKeyboardDevice::inject_preedit(const std::string& text) {
-    if (dispatcher_) dispatcher_->dispatch_preedit(text);
+void DefaultKeyboardDevice::inject_preedit(const std::string& text, int cursor_codepoints) {
+    if (dispatcher_) dispatcher_->dispatch_preedit(text, cursor_codepoints);
 }
 
 void DefaultKeyboardDevice::inject_char(uint32_t codepoint, KeyMod modifiers, double timestamp) {

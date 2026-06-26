@@ -12,6 +12,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/cursorfont.h>
 #include <X11/Xatom.h>
 #include <X11/Xresource.h>
 #include <clocale>
@@ -26,6 +27,10 @@
 #ifdef Success
 #undef Success
 #endif
+
+// The raw values behind X11's None / Success macros (undef'd just above).
+static constexpr unsigned long kX11None    = 0UL;   // X11 None (e.g. an empty Atom/property)
+static constexpr int           kX11Success = 0;     // X11 Success (XGetWindowProperty status)
 
 #include <cstring>
 #include <cstdlib>
@@ -217,6 +222,17 @@ struct Window::Impl {
     int screen = 0;
     Atom wm_delete_window = 0;
     Atom wm_protocols = 0;
+    // CLIPBOARD selection support. We hold the copied text and serve it to
+    // requesters via SelectionRequest; get_clipboard_text() converts the other way.
+    Atom a_clipboard = 0;   // CLIPBOARD
+    Atom a_targets   = 0;   // TARGETS
+    Atom a_utf8      = 0;   // UTF8_STRING
+    Atom a_text      = 0;   // TEXT
+    Atom a_clip_prop = 0;   // our transfer property (UGW_CLIPBOARD)
+    std::string clipboard_text;
+    // Mouse-cursor shapes, created lazily and cached by CursorType.
+    ::Cursor x_cursors[static_cast<int>(CursorType::Count)] = {};
+    CursorType cur_cursor = CursorType::Arrow;
     bool should_close_flag = false;
     bool visible = false;
     int width = 0;        // physical (framebuffer) pixels
@@ -485,8 +501,8 @@ Window* create_window_impl(const Config& config, Result* out_result) {
             if (keyval >= 0x20 && keyval < 0x7f)        // a key ibus handed back
                 w->impl->keyboard_device.inject_char(keyval, get_x11_modifiers(0), get_event_timestamp());
         };
-        w->impl->ibus.on_preedit = [w](const std::string& text) {  // composing text → inline display
-            w->impl->keyboard_device.inject_preedit(text);
+        w->impl->ibus.on_preedit = [w](const std::string& text, int cursor) {  // composing text → inline
+            w->impl->keyboard_device.inject_preedit(text, cursor);
         };
         window->impl->use_ibus = window->impl->ibus.connect("aiwrapper");
     }
@@ -516,6 +532,13 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     window->impl->wm_protocols = XInternAtom(display, "WM_PROTOCOLS", False);
     window->impl->wm_delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
     XSetWMProtocols(display, xwindow, &window->impl->wm_delete_window, 1);
+
+    // CLIPBOARD selection atoms
+    window->impl->a_clipboard = XInternAtom(display, "CLIPBOARD", False);
+    window->impl->a_targets   = XInternAtom(display, "TARGETS", False);
+    window->impl->a_utf8      = XInternAtom(display, "UTF8_STRING", False);
+    window->impl->a_text      = XInternAtom(display, "TEXT", False);
+    window->impl->a_clip_prop = XInternAtom(display, "UGW_CLIPBOARD", False);
 
     WindowStyle effective_style = win_cfg.style;
     window->impl->style = effective_style;
@@ -913,6 +936,43 @@ void Window::poll_events() {
                          (event.type == FocusIn || event.type == FocusOut) ? event.xfocus.mode : -1);
 
         switch (event.type) {
+            case SelectionClear:
+                // Another app took CLIPBOARD ownership; drop our cached text.
+                if (event.xselectionclear.selection == impl->a_clipboard)
+                    impl->clipboard_text.clear();
+                break;
+
+            case SelectionRequest: {
+                // Serve our copied text to a requester (paste in another app).
+                const XSelectionRequestEvent& req = event.xselectionrequest;
+                XSelectionEvent notify{};
+                notify.type      = SelectionNotify;
+                notify.display   = req.display;
+                notify.requestor = req.requestor;
+                notify.selection = req.selection;
+                notify.target    = req.target;
+                notify.property  = req.property ? req.property : req.target;
+                notify.time      = req.time;
+                if (req.target == impl->a_targets) {
+                    Atom targets[] = {impl->a_targets, impl->a_utf8, impl->a_text, XA_STRING};
+                    XChangeProperty(impl->display, req.requestor, notify.property, XA_ATOM, 32,
+                                    PropModeReplace, reinterpret_cast<unsigned char*>(targets),
+                                    static_cast<int>(sizeof(targets) / sizeof(targets[0])));
+                } else if (req.target == impl->a_utf8 || req.target == XA_STRING ||
+                           req.target == impl->a_text) {
+                    XChangeProperty(impl->display, req.requestor, notify.property, req.target, 8,
+                                    PropModeReplace,
+                                    reinterpret_cast<const unsigned char*>(impl->clipboard_text.data()),
+                                    static_cast<int>(impl->clipboard_text.size()));
+                } else {
+                    notify.property = kX11None;   // unsupported target
+                }
+                XSendEvent(impl->display, req.requestor, False, 0,
+                           reinterpret_cast<XEvent*>(&notify));
+                XFlush(impl->display);
+                break;
+            }
+
             case ClientMessage:
                 if ((Atom)event.xclient.data.l[0] == impl->wm_delete_window) {
                     impl->should_close_flag = true;
@@ -1131,12 +1191,75 @@ Graphics* Window::graphics() const {
     return impl ? impl->gfx : nullptr;
 }
 
+void Window::set_cursor(CursorType cursor) {
+    if (!impl || !impl->display || cursor == impl->cur_cursor) return;
+    impl->cur_cursor = cursor;
+    unsigned int shape = XC_left_ptr;   // Arrow / default
+    switch (cursor) {
+        case CursorType::IBeam:      shape = XC_xterm;              break;
+        case CursorType::Hand:       shape = XC_hand2;              break;
+        case CursorType::Crosshair:  shape = XC_crosshair;          break;
+        case CursorType::ResizeH:    shape = XC_sb_h_double_arrow;  break;
+        case CursorType::ResizeV:    shape = XC_sb_v_double_arrow;  break;
+        case CursorType::ResizeAll:  shape = XC_fleur;              break;
+        case CursorType::Wait:
+        case CursorType::WaitArrow:  shape = XC_watch;              break;
+        case CursorType::NotAllowed: shape = XC_X_cursor;           break;
+        case CursorType::Help:       shape = XC_question_arrow;     break;
+        default:                     shape = XC_left_ptr;           break;
+    }
+    const int idx = static_cast<int>(cursor);
+    if (idx < 0 || idx >= static_cast<int>(CursorType::Count)) return;
+    if (!impl->x_cursors[idx])
+        impl->x_cursors[idx] = XCreateFontCursor(impl->display, shape);
+    XDefineCursor(impl->display, impl->xwindow, impl->x_cursors[idx]);
+    XFlush(impl->display);
+}
+
 void* Window::native_handle() const {
     return impl ? reinterpret_cast<void*>(impl->xwindow) : nullptr;
 }
 
 void* Window::native_display() const {
     return impl ? impl->display : nullptr;
+}
+
+void Window::set_clipboard_text(const char* utf8) {
+    if (!impl || !impl->display) return;
+    impl->clipboard_text = utf8 ? utf8 : "";
+    // Own CLIPBOARD; requesters are served from the event loop (SelectionRequest).
+    XSetSelectionOwner(impl->display, impl->a_clipboard, impl->xwindow, CurrentTime);
+    XFlush(impl->display);
+}
+
+std::string Window::get_clipboard_text() {
+    if (!impl || !impl->display) return {};
+    // Fast path: we own the selection — no round-trip needed.
+    if (XGetSelectionOwner(impl->display, impl->a_clipboard) == impl->xwindow)
+        return impl->clipboard_text;
+    // Ask the current owner to write UTF8_STRING into our property, then wait
+    // briefly for the SelectionNotify (bounded so we never stall the UI).
+    XConvertSelection(impl->display, impl->a_clipboard, impl->a_utf8, impl->a_clip_prop,
+                      impl->xwindow, CurrentTime);
+    XFlush(impl->display);
+    XEvent ev;
+    for (int spins = 0; spins < 100; ++spins) {   // ~100ms budget
+        if (XCheckTypedWindowEvent(impl->display, impl->xwindow, SelectionNotify, &ev)) {
+            if (ev.xselection.property == kX11None) return {};
+            Atom actual_type = 0; int actual_fmt = 0;
+            unsigned long nitems = 0, bytes_after = 0; unsigned char* prop = nullptr;
+            if (XGetWindowProperty(impl->display, impl->xwindow, impl->a_clip_prop, 0, (~0L), True,
+                                   AnyPropertyType, &actual_type, &actual_fmt, &nitems,
+                                   &bytes_after, &prop) == kX11Success && prop) {
+                std::string out(reinterpret_cast<char*>(prop), nitems);
+                XFree(prop);
+                return out;
+            }
+            return {};
+        }
+        usleep(1000);
+    }
+    return {};
 }
 
 float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }

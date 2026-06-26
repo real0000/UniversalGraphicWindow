@@ -45,9 +45,9 @@ public:
 // ============================================================================
 
 class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput> {
-    std::string text_, placeholder_;
+    std::string text_, placeholder_, preedit_;
     LabelStyle label_style_ = LabelStyle::default_style();
-    int cursor_ = 0, sel_start_ = 0, sel_len_ = 0, max_length_ = 0;
+    int cursor_ = 0, sel_start_ = 0, sel_len_ = 0, max_length_ = 0, preedit_cursor_ = 0;
     bool password_ = false, read_only_ = false;
     mutable WidgetRenderInfo ri_;
     // Key codes from window::Key enum
@@ -108,6 +108,9 @@ public:
     void set_read_only(bool r) override { read_only_ = r; }
     int get_max_length() const override { return max_length_; }
     void set_max_length(int m) override { max_length_ = m; }
+    void set_preedit(const char* t, int c) override { preedit_ = t ? t : ""; preedit_cursor_ = c; }
+    void clear_preedit() override { preedit_.clear(); preedit_cursor_ = 0; }
+    const char* get_preedit() const override { return preedit_.c_str(); }
 
     const WidgetRenderInfo& get_render_info(Window*) const override {
         ri_.invalidate();
@@ -120,9 +123,17 @@ public:
         ri_.push_outline(bx, by, bw, bh, math::Vec4(0.25f,0.25f,0.27f,1.0f), d, noclip);
         if (base_.has_focus())
             ri_.push_outline(bx-1, by-1, bw+2, bh+2, math::Vec4(0,0.48f,0.8f,1), d, noclip);
-        if (!text_.empty() || base_.has_focus()) {
+        if (!text_.empty() || !preedit_.empty() || base_.has_focus()) {
+            // Inline IME preedit: show the composing text at the caret (the caret
+            // lands inside it). Single colour for now — composition still appears.
+            std::string disp = text_;
+            int caret = cursor_;
+            if (!preedit_.empty()) {
+                disp.insert(std::min(cursor_, (int)disp.size()), preedit_);
+                caret = cursor_ + preedit_cursor_;
+            }
             WidgetRenderInfo::TextCmd tc;
-            tc.text      = text_;
+            tc.text      = disp;
             tc.dest      = math::make_box(bx+6, by, bw-12, bh);
             tc.color     = math::Vec4(0.94f,0.94f,0.94f,1.0f);
             tc.font_size = label_style_.font_size;
@@ -131,7 +142,7 @@ public:
             tc.clip      = noclip;
             if (base_.has_focus()) {
                 tc.show_cursor  = true;
-                tc.cursor_pos   = cursor_;
+                tc.cursor_pos   = caret;
                 tc.cursor_color = math::Vec4(0.94f,0.94f,0.94f,1.0f);
             }
             ri_.texts.push_back(tc);

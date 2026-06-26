@@ -165,25 +165,43 @@ class GuiScrollView : public WidgetBase<IGuiScrollView, WidgetType::ScrollArea> 
     bool inertia_=true;
     ScrollViewSize size_preset_=ScrollViewSize::Medium;
     ScrollViewSizeParams size_params_=ScrollViewSizeParams::from_size(ScrollViewSize::Medium);
+    // Lay out the single content child to fill the viewport width × content height,
+    // translated up by the scroll offset, and clip descendants to the viewport. Called
+    // whenever bounds / content size / scroll offset change (never per frame).
+    void relayout_content() {
+        auto b = base_.get_bounds();
+        base_.set_clip_enabled(true);
+        base_.set_clip_rect(b);
+        if (base_.get_child_count() <= 0) return;
+        IGuiWidget* c = base_.get_child(0);
+        if (!c) return;
+        float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        float vw = math::box_width(b);
+        float ch = math::y(content_size_);
+        c->set_bounds(math::make_box(bx, by - math::y(scroll_offset_), vw,
+                                     ch > 0.0f ? ch : math::box_height(b)));
+    }
 public:
+    void set_bounds(const math::Box& b) override { base_.set_bounds(b); relayout_content(); }
     bool handle_mouse_scroll(float dx,float dy) override {
         auto mx=get_max_scroll_offset();
         scroll_offset_=math::Vec2(
             std::max(0.0f,std::min(math::x(scroll_offset_)-dx*scroll_speed_,math::x(mx))),
             std::max(0.0f,std::min(math::y(scroll_offset_)-dy*scroll_speed_,math::y(mx))));
+        relayout_content();
         return true;
     }
     int get_child_count() const override { return base_.get_child_count(); }
     IGuiWidget* get_child(int i) const override { return base_.get_child(i); }
-    bool add_child(IGuiWidget* c) override { return base_.add_child(c); }
+    bool add_child(IGuiWidget* c) override { bool r=base_.add_child(c); relayout_content(); return r; }
     bool insert_child_before(IGuiWidget* c, IGuiWidget* before) override { return base_.insert_child_before(c, before); }
     bool remove_child(IGuiWidget* c) override { return base_.remove_child(c); }
     bool remove_child_at(int i) override { return base_.remove_child_at(i); }
     void clear_children() override { base_.clear_children(); }
     math::Vec2 get_scroll_offset() const override { return scroll_offset_; }
-    void set_scroll_offset(const math::Vec2& o) override { scroll_offset_=o; }
+    void set_scroll_offset(const math::Vec2& o) override { scroll_offset_=o; relayout_content(); }
     math::Vec2 get_content_size() const override { return content_size_; }
-    void set_content_size(const math::Vec2& s) override { content_size_=s; }
+    void set_content_size(const math::Vec2& s) override { content_size_=s; relayout_content(); }
     math::Vec2 get_viewport_size() const override {
         auto b=base_.get_bounds(); return math::Vec2(math::box_width(b),math::box_height(b));
     }

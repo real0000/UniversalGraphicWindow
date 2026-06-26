@@ -33,7 +33,7 @@ option(WINDOW_ENABLE_FLAC_DECODER "Enable FLAC decoder (dr_flac)" OFF)
 # GUI options
 option(WINDOW_ENABLE_GUI "Enable GUI interface support" ON)
 option(WINDOW_ENABLE_RENDERER "Build the optional GPU GUI renderer (renderer/, uses the graphics abstraction)" ON)
-option(WINDOW_ENABLE_CSS_THEME "Build the CSS-look GUI theme (renderer/css/, style presets only, no graphics backend needed)" ON)
+option(WINDOW_ENABLE_CSS_THEME "Build the CSS-look GUI theme (renderer/style/, style presets only, no graphics backend needed)" ON)
 option(WINDOW_ENABLE_SHADER_COMPILER "Build the built-in runtime shader compiler (renderer/shader_compiler/, HLSL->SPIR-V/GLSL/DXBC via glslang+SPIRV-Cross+d3dcompiler; fetched by CMake)" ON)
 
 # Video renderer (renderer/video/). OFF by default: turning it on makes CMake fetch
@@ -1060,7 +1060,7 @@ endif()
 
 if(WINDOW_ENABLE_CSS_THEME AND WINDOW_ENABLE_GUI)
     list(APPEND WINDOW_SOURCES
-        renderer/css/css_theme.cpp
+        renderer/style/css_theme.cpp
     )
     list(APPEND WINDOW_DEFINES WINDOW_SUPPORT_CSS_THEME)
     message(STATUS "CSS GUI theme enabled")

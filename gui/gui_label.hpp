@@ -62,6 +62,13 @@ public:
     virtual void set_read_only(bool read_only) = 0;
     virtual int get_max_length() const = 0;
     virtual void set_max_length(int max_length) = 0;
+
+    // IME composition (preedit): in-progress, not-yet-committed text shown inline at
+    // the caret (accent colour). `cursor` is the caret within the preedit. Cleared on
+    // commit. Lets a custom IME (e.g. ibus) drive a retained text input.
+    virtual void set_preedit(const char* text, int cursor) = 0;
+    virtual void clear_preedit() = 0;
+    virtual const char* get_preedit() const = 0;
 };
 
 // ============================================================================

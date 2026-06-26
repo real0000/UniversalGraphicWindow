@@ -162,12 +162,20 @@ void IBusClient::dispatch(int type, const std::string& member, uint32_t reply_se
         size_t i = 0; std::string t = parse_ibustext(body, i);
         if (!t.empty() && on_commit) on_commit(t);
     } else if (member == "UpdatePreeditText" || member == "UpdatePreeditTextWithMode") {
+        // Signature (v u b) — IBusText variant, uint32 cursor_pos, bool visible — or
+        // (v u b u) for *WithMode. parse_ibustext only reads up to the text and leaves
+        // `i` inside the variant (IBusText has a trailing attribute list), so the cursor
+        // is NOT at `i`. It IS the first fixed word after the variant, i.e. read it from
+        // the TAIL: the body ends with [cursor u][visible b] (+ [mode u] for WithMode),
+        // each a 4-byte word. (cursor is in codepoints → caret position within preedit.)
         size_t i = 0; std::string t = parse_ibustext(body, i);
-        if (on_preedit) on_preedit(t);
+        const size_t trail = (member == "UpdatePreeditTextWithMode") ? 12u : 8u;
+        int cursor = (body.size() >= trail) ? static_cast<int>(rd_u32(body, body.size() - trail)) : 0;
+        if (on_preedit) on_preedit(t, cursor);
     } else if (member == "ShowPreeditText") {
         // nothing extra; last UpdatePreeditText already carried the text
     } else if (member == "HidePreeditText") {
-        if (on_preedit) on_preedit(std::string());
+        if (on_preedit) on_preedit(std::string(), 0);
     } else if (member == "ForwardKeyEvent") {            // (u keyval, u keycode, u state)
         if (body.size() >= 12 && on_forward)
             on_forward(rd_u32(body, 0), rd_u32(body, 4), rd_u32(body, 8));

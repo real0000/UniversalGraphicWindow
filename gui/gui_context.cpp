@@ -98,7 +98,25 @@ class GuiContext : public IGuiContext {
     Window* attached_window_=nullptr;
     float window_dpi_scale_=1.0f;  // Mirror of attached window's DPI scale
 
-    static void collect_recursive(IGuiWidget* w, WidgetRenderInfo& out, int32_t& depth) {
+    // Intersect two clip rects. An empty (zero-area) box means "no clip", so it is the
+    // identity — intersecting with it returns the other.
+    static math::Box clip_isect(const math::Box& a, const math::Box& b) {
+        if (math::box_is_empty(a)) return b;
+        if (math::box_is_empty(b)) return a;
+        float ax0 = math::x(math::box_min(a)), ay0 = math::y(math::box_min(a));
+        float ax1 = ax0 + math::box_width(a),  ay1 = ay0 + math::box_height(a);
+        float bx0 = math::x(math::box_min(b)), by0 = math::y(math::box_min(b));
+        float bx1 = bx0 + math::box_width(b),  by1 = by0 + math::box_height(b);
+        float ix0 = std::max(ax0, bx0), iy0 = std::max(ay0, by0);
+        float ix1 = std::min(ax1, bx1), iy1 = std::min(ay1, by1);
+        if (ix1 <= ix0 || iy1 <= iy0) return math::make_box(ix0, iy0, 0, 0);  // empty → fully clipped
+        return math::make_box(ix0, iy0, ix1 - ix0, iy1 - iy0);
+    }
+    // `parent_clip` is the clip imposed by clip-enabled ancestors (empty = none). A
+    // widget's own commands are clamped to it; clip-enabled widgets (e.g. ScrollView)
+    // tighten the clip handed to their descendants — so scrolled content stays bounded.
+    static void collect_recursive(IGuiWidget* w, WidgetRenderInfo& out, int32_t& depth,
+                                  const math::Box& parent_clip) {
         if (!w || !w->is_visible()) return;
         if (math::box_is_empty(w->get_bounds())) return;
         const WidgetRenderInfo& ri = w->get_render_info(nullptr);
@@ -107,13 +125,14 @@ class GuiContext : public IGuiContext {
         for (const auto& ref : ri.get_draw_order())
             if (ref.depth > local_max) local_max = ref.depth;
         int32_t base = depth;
-        for (auto cmd : ri.colors)   { cmd.depth += base; out.colors.push_back(cmd); }
-        for (auto cmd : ri.textures) { cmd.depth += base; out.textures.push_back(cmd); }
-        for (auto cmd : ri.slices)   { cmd.depth += base; out.slices.push_back(cmd); }
-        for (auto cmd : ri.texts)    { cmd.depth += base; out.texts.push_back(cmd); }
+        for (auto cmd : ri.colors)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.colors.push_back(cmd); }
+        for (auto cmd : ri.textures) { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.textures.push_back(cmd); }
+        for (auto cmd : ri.slices)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.slices.push_back(cmd); }
+        for (auto cmd : ri.texts)    { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.texts.push_back(cmd); }
         if (!ri.get_draw_order().empty()) depth = base + local_max + 1;
+        const math::Box child_clip = w->is_clip_enabled() ? clip_isect(parent_clip, w->get_clip_rect()) : parent_clip;
         for (int i = 0; i < w->get_child_count(); ++i)
-            collect_recursive(w->get_child(i), out, depth);
+            collect_recursive(w->get_child(i), out, depth, child_clip);
     }
 
     // Find the deepest visible focusable widget at pos within the given subtree
@@ -305,8 +324,9 @@ public:
     const WidgetRenderInfo& get_render_info() override {
         frame_ri_.invalidate();
         int32_t depth = 0;
-        collect_recursive(&root_, frame_ri_, depth);
-        for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth);
+        const math::Box noclip = math::make_box(0, 0, 0, 0);   // top level: no ancestor clip
+        collect_recursive(&root_, frame_ri_, depth, noclip);
+        for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth, noclip);
         frame_ri_.finalize();
         if (text_rasterizer_)
             frame_ri_.flatten(text_rasterizer_);

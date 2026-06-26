@@ -792,6 +792,14 @@ public:
     // Graphics
     Graphics* graphics() const;
 
+    // System clipboard (UTF-8 text). Implemented on X11; other platforms are
+    // currently no-op / return empty until wired up.
+    void        set_clipboard_text(const char* utf8);
+    std::string get_clipboard_text();
+
+    // Mouse cursor shape (e.g. IBeam over selectable text). Implemented on X11.
+    void set_cursor(CursorType cursor);
+
     // Native handles
     void* native_handle() const;    // HWND, Window, NSWindow*, etc.
     void* native_display() const;   // Display*, wl_display*, etc.

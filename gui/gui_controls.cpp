@@ -175,8 +175,12 @@ public:
             }
             math::Vec4 bg = {base_bg.x*ts.tint.x, base_bg.y*ts.tint.y,
                              base_bg.z*ts.tint.z, base_bg.w*ts.tint.w};
-            ri_.push_rect(rx, ry, rw, rh, bg, d++, noclip);
-            ri_.push_outline(rx, ry, rw, rh, s.border_color, d, noclip);
+            if (s.corner_radius > 0.0f)
+                ri_.push_round_rect(rx, ry, rw, rh, s.corner_radius, bg, d++, noclip);
+            else
+                ri_.push_rect(rx, ry, rw, rh, bg, d++, noclip);
+            if (s.border_color.w > 0.0f)   // skip the outline for borderless (transparent) buttons
+                ri_.push_outline(rx, ry, rw, rh, s.border_color, d, noclip);
             if (base_.has_focus())
                 ri_.push_outline(rx-1, ry-1, rw+2, rh+2, s.focus_border_color, d, noclip);
             if (!text_.empty())

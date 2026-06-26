@@ -48,9 +48,10 @@ public:
 
     // Committed UTF-8 text (insert into the focused field).
     std::function<void(const std::string&)>                          on_commit;
-    // Current composing/preedit UTF-8 text (empty = nothing composing). The
-    // caller renders this inline; ibus does not draw it when its panel is off.
-    std::function<void(const std::string&)>                          on_preedit;
+    // Current composing/preedit UTF-8 text (empty = nothing composing) + the IME's
+    // own cursor within it (in codepoints). The caller renders this inline; ibus does
+    // not draw it when its panel is off.
+    std::function<void(const std::string& text, int cursor_codepoints)> on_preedit;
     // A key ibus chose not to use and handed back (treat as a normal keypress).
     std::function<void(uint32_t keyval, uint32_t keycode, uint32_t state)> on_forward;
 

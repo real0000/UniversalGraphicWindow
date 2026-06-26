@@ -3,6 +3,7 @@
  */
 
 #include "gui_widget_base.hpp"
+#include <algorithm>   // std::remove (remove_node parent-unlink)
 
 namespace window {
 namespace gui {
@@ -232,7 +233,17 @@ public:
         if(parent_id>=0){int pi=find_idx(parent_id);if(pi>=0)nodes_[pi].children.push_back(id);}
         return id;
     }
-    bool remove_node(int id) override { int i=find_idx(id); if(i<0)return false; nodes_.erase(nodes_.begin()+i); return true; }
+    bool remove_node(int id) override {
+        int i=find_idx(id); if(i<0)return false;
+        std::vector<int> kids=nodes_[i].children;          // copy: vector mutates during recursion
+        for(int c:kids) remove_node(c);
+        i=find_idx(id); if(i<0)return false;               // re-find (erase shifted indices)
+        int pid=nodes_[i].parent_id;
+        if(pid>=0){int pi=find_idx(pid); if(pi>=0){auto& ch=nodes_[pi].children; ch.erase(std::remove(ch.begin(),ch.end(),id),ch.end());}}
+        nodes_.erase(nodes_.begin()+i);
+        if(selected_==id) selected_=-1;
+        return true;
+    }
     void clear_nodes() override { nodes_.clear(); selected_=-1; next_id_=0; }
     int get_node_count() const override { return (int)nodes_.size(); }
     const char* get_node_text(int id) const override { int i=find_idx(id); return i>=0?nodes_[i].text.c_str():""; }
@@ -354,31 +365,35 @@ public:
                           is_sel ? s.selected_background : s.row_background, d++, clip);
 
             float indent = bx + depth * s.indent_width + 4;
-            // Expand/collapse indicator
+            // Expand/collapse indicator — scaled off font_size so it stays
+            // proportional on HiDPI (13 = TreeViewStyle default font_size).
+            const float k = s.font_size / 13.0f;
             if (!nodes_[idx].children.empty()) {
-                float ex = indent, ey = ry + row_h/2 - 3;
+                float ex = indent, ey = ry + row_h/2 - 3*k;
                 if (nodes_[idx].expanded) {
-                    ri_.push_rect(ex,   ey,   6, 2, s.icon_color, d++, clip);
-                    ri_.push_rect(ex+1, ey+2, 4, 2, s.icon_color, d++, clip);
-                    ri_.push_rect(ex+2, ey+4, 2, 2, s.icon_color, d++, clip);
+                    ri_.push_rect(ex,     ey,     6*k, 2*k, s.icon_color, d++, clip);
+                    ri_.push_rect(ex+1*k, ey+2*k, 4*k, 2*k, s.icon_color, d++, clip);
+                    ri_.push_rect(ex+2*k, ey+4*k, 2*k, 2*k, s.icon_color, d++, clip);
                 } else {
-                    ri_.push_rect(ex,   ey,   2, 6, s.icon_color, d++, clip);
-                    ri_.push_rect(ex+2, ey+1, 2, 4, s.icon_color, d++, clip);
-                    ri_.push_rect(ex+4, ey+2, 2, 2, s.icon_color, d++, clip);
+                    ri_.push_rect(ex,     ey,     2*k, 6*k, s.icon_color, d++, clip);
+                    ri_.push_rect(ex+2*k, ey+1*k, 2*k, 4*k, s.icon_color, d++, clip);
+                    ri_.push_rect(ex+4*k, ey+2*k, 2*k, 2*k, s.icon_color, d++, clip);
                 }
             }
-            // Icon placeholder
-            math::Vec4 icon_col(s.icon_color.x, s.icon_color.y, s.icon_color.z, 0.5f);
-            ri_.push_rect(indent+12, ry+row_h/2-4, 8, 8, icon_col, d++, clip);
             // Drag source: dim it
             if (dragging_ && nodes_[idx].id == drag_node_id_)
                 ri_.push_rect(bx, ry, bw, row_h, math::Vec4(0,0,0,0.4f), d++, clip);
 
-            // Node text
+            // Node text — render at the style font size (not a hardcoded px) so it
+            // scales with DPI; leave room for the expander arrow.
+            float text_x = indent + s.font_size + 4.0f*k;
             if (!nodes_[idx].text.empty()) {
-                math::Vec4 tc = is_sel ? math::Vec4(1,1,1,1) : s.text_color;
-                ri_.push_text(nodes_[idx].text.c_str(), indent+24, ry, bw-(indent+24-bx)-12, row_h,
-                              tc, 11.0f, Alignment::CenterLeft, d++, clip);
+                // folders may use a distinct color (folder_text_color w/ alpha>0)
+                bool is_folder = (nodes_[idx].icon == "folder") && (s.folder_text_color.w > 0.0f);
+                math::Vec4 tc = is_sel ? math::Vec4(1,1,1,1)
+                                       : (is_folder ? s.folder_text_color : s.text_color);
+                ri_.push_text(nodes_[idx].text.c_str(), text_x, ry, bw-(text_x-bx)-12*k, row_h,
+                              tc, s.font_size, Alignment::CenterLeft, d++, clip);
             }
 
             // Drop indicator line

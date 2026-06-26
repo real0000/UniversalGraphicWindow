@@ -1,7 +1,7 @@
 /*
  * css_theme.cpp - CSS-look GUI theme showcase (OpenGL)
  *
- * Demonstrates renderer/css CssTheme: a "looks like a web page" skin made of
+ * Demonstrates renderer/style CssTheme: a "looks like a web page" skin made of
  * style presets. The same widget set is built twice, side by side:
  *
  *   - Whole tree   : CssTheme::light().apply(root)  -> the page-white CSS look
@@ -17,7 +17,7 @@
 #include "window.hpp"
 #include "gui/gui.hpp"
 #include "gui/font/font.hpp"
-#include "renderer/css/css_theme.hpp"
+#include "renderer/style/css_theme.hpp"
 
 #include <cstdio>
 #include <cmath>

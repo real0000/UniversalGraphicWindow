@@ -469,8 +469,8 @@ struct TextEditState {
     int caret = 0;     // byte offset of the caret
     int anchor = 0;    // selection anchor; == caret when there is no selection
 
-    void reset(std::string s) { text = std::move(s); caret = anchor = static_cast<int>(text.size()); }
-    void clear() { text.clear(); caret = anchor = 0; }
+    void reset(std::string s) { text = std::move(s); caret = anchor = static_cast<int>(text.size()); preedit.clear(); preedit_caret = 0; }
+    void clear() { text.clear(); caret = anchor = 0; preedit.clear(); preedit_caret = 0; }
     bool has_sel() const { return caret != anchor; }
     int  sel_lo() const { return caret < anchor ? caret : anchor; }
     int  sel_hi() const { return caret < anchor ? anchor : caret; }
@@ -495,6 +495,30 @@ struct TextEditState {
     void to_home(bool extend) { set_caret(0, extend); }
     void to_end(bool extend)  { set_caret(static_cast<int>(text.size()), extend); }
     void select_all() { anchor = 0; caret = static_cast<int>(text.size()); }
+
+    // ── IME composing (preedit) + caret blink — shared so every text field gets
+    //    correct CJK editing and a blinking cursor without re-rolling it. ──────────
+    std::string preedit;            // IME composing text, shown inline at `caret`
+    int         preedit_caret = 0;  // byte offset of the IME's own cursor within `preedit`
+    float       blink_base = 0.0f;  // time of the last edit/move; caret stays solid for a beat after
+
+    // Set the composing text + the IME cursor (given in codepoints, as ibus reports it).
+    void set_preedit(std::string p, int cursor_codepoints) {
+        preedit = std::move(p);
+        int b = 0;
+        for (int c = 0; c < cursor_codepoints && b < static_cast<int>(preedit.size()); ++c) {
+            ++b; while (b < static_cast<int>(preedit.size()) && (static_cast<unsigned char>(preedit[b]) & 0xC0) == 0x80) ++b;
+        }
+        preedit_caret = b;
+    }
+    bool composing() const { return !preedit.empty(); }
+    // Call on any edit/caret move so the caret shows immediately (then blinks).
+    void touch(float now) { blink_base = now; }
+    // Whether the caret should be drawn this frame: solid while composing, else ~2 Hz.
+    bool caret_on(float now) const { return composing() || (static_cast<int>((now - blink_base) * 2.0f) & 1) == 0; }
+
+    // Internal (non-OS) clipboard shared by every text field — copy here, paste there.
+    static std::string& clipboard() { static std::string c; return c; }
 };
 
 // ============================================================================
@@ -693,6 +717,133 @@ private:
     std::vector<BatchSpan> batch_spans_;
     bool valid_ = false;
 };
+
+// ============================================================================
+// Single-line editable text — renders text + selection + blinking caret + IME
+// preedit inside the content rect. ALL cursor positioning lives here, so callers
+// never compute caret pixels: hand it the TextEditState + rect and forward
+// key/char/preedit events to the state. `now` (seconds) drives the blink; the IME
+// caret moves WITHIN the composing string via TextEditState::preedit_caret.
+// ============================================================================
+inline void draw_text_edit(WidgetRenderInfo& ri, ITextMeasurer& tm, int32_t& depth,
+                           const TextEditState& st, float x, float y, float w, float line_h,
+                           float font, bool focused, float now, const math::Box& clip,
+                           const math::Vec4& text_col, const math::Vec4& sel_col,
+                           const math::Vec4& caret_col, const math::Vec4& preedit_col,
+                           const char* placeholder = nullptr,
+                           const math::Vec4& placeholder_col = math::Vec4(0.47f, 0.47f, 0.49f, 1.0f)) {
+    auto width_to = [&](const std::string& s, int n) -> float {
+        if (n <= 0 || s.empty()) return 0.0f;
+        const std::string sub = s.substr(0, static_cast<std::size_t>(n > static_cast<int>(s.size()) ? s.size() : n));
+        return sub.empty() ? 0.0f : math::x(tm.measure_text(sub.c_str(), font));
+    };
+    const std::string& t = st.text;
+    if (t.empty() && st.preedit.empty() && placeholder && placeholder[0])
+        ri.push_text(placeholder, x, y, w, line_h, placeholder_col, font, Alignment::TopLeft, depth++, clip);
+
+    float caret_x = x;
+    if (st.preedit.empty()) {
+        if (focused && st.has_sel()) {
+            const float a = x + width_to(t, st.sel_lo()), b = x + width_to(t, st.sel_hi());
+            ri.push_rect(a, y, std::max(1.0f, b - a), line_h, sel_col, depth++, clip);
+        }
+        if (!t.empty())
+            ri.push_text(t.c_str(), x, y, w, line_h, text_col, font, Alignment::TopLeft, depth++, clip);
+        caret_x = x + width_to(t, st.caret);
+    } else {
+        // text[..caret] · preedit · text[caret..]; the caret sits inside the preedit.
+        const std::string before = t.substr(0, static_cast<std::size_t>(st.caret));
+        const std::string after  = t.substr(static_cast<std::size_t>(st.caret));
+        float cx = x;
+        if (!before.empty()) { ri.push_text(before.c_str(), cx, y, w, line_h, text_col, font, Alignment::TopLeft, depth++, clip);
+                               cx += math::x(tm.measure_text(before.c_str(), font)); }
+        ri.push_text(st.preedit.c_str(), cx, y, w, line_h, preedit_col, font, Alignment::TopLeft, depth++, clip);
+        const float pw = math::x(tm.measure_text(st.preedit.c_str(), font));
+        ri.push_rect(cx, y + line_h - 1.0f, pw, 1.0f, preedit_col, depth++, clip);   // underline
+        caret_x = cx + width_to(st.preedit, st.preedit_caret);
+        cx += pw;
+        if (!after.empty()) ri.push_text(after.c_str(), cx, y, w, line_h, text_col, font, Alignment::TopLeft, depth++, clip);
+    }
+    if (focused && st.caret_on(now)) {
+        float c = caret_x; if (c > x + w) c = x + w;
+        ri.push_rect(c + 1.0f, y, 2.0f, line_h, caret_col, depth++, clip);
+    }
+}
+
+// Byte offset within `text` whose caret position is nearest `local_x` (0 = the
+// start of the text). Codepoint-aware (never lands inside a UTF-8 sequence).
+// Shared so callers map a click to a character without re-rolling glyph metrics.
+inline int index_at_x(ITextMeasurer& tm, const char* text, float font, float local_x) {
+    if (!text || !text[0] || local_x <= 0.0f) return 0;
+    const std::string s(text);
+    const int n = static_cast<int>(s.size());
+    int best = 0; float best_d = local_x;   // distance to offset 0
+    for (int i = 0; i <= n;) {
+        const float w = (i == 0) ? 0.0f : math::x(tm.measure_text(s.substr(0, i).c_str(), font));
+        const float d = local_x > w ? local_x - w : w - local_x;
+        if (d < best_d) { best_d = d; best = i; }
+        if (i == n) break;
+        int j = i + 1;   // advance one codepoint
+        while (j < n && (static_cast<unsigned char>(s[j]) & 0xC0) == 0x80) ++j;
+        i = j;
+    }
+    return best;
+}
+
+// ── Popup menu (reusable immediate-mode dropdown / context menu) ─────────────
+// One row of a popup. id is the caller's action id (echoed back via the hit list).
+struct MenuItem {
+    std::string label;
+    int   id        = 0;
+    bool  enabled   = true;
+    bool  separator = false;
+    bool  checked   = false;   // optional leading ✓
+};
+struct MenuHit { math::Box box; int id; };
+// Draw a popup anchored top-left at (ax, ay), auto-sized to the widest label and
+// clamped inside [0,W]×[0,H]. `hover_id` highlights a row; `out` gets one hit-rect
+// per clickable item so the caller routes clicks without re-deriving geometry.
+// Sizing + clamping + row drawing live here so call sites stop hand-rolling popups.
+inline void draw_popup_menu(WidgetRenderInfo& ri, ITextMeasurer& tm, int32_t& depth,
+                            const std::vector<MenuItem>& items, float ax, float ay,
+                            float W, float H, float dpi, float font, float line_h,
+                            int hover_id, const math::Box& clip, std::vector<MenuHit>& out) {
+    const float pad = 5.0f * dpi, ih = line_h + 8.0f * dpi, sep = 7.0f * dpi;
+    const float lpad = 12.0f * dpi, rpad = 14.0f * dpi;
+    float iw = 120.0f * dpi;
+    for (const auto& it : items)
+        if (!it.separator) {
+            const float w = lpad + rpad + math::x(tm.measure_text(it.label.c_str(), font));
+            if (w > iw) iw = w;
+        }
+    float total = 2.0f * pad;
+    for (const auto& it : items) total += it.separator ? sep : ih;
+    float mx = ax, my = ay;
+    if (mx + iw > W) mx = W - iw - 2.0f * dpi;
+    if (my + total > H) my = H - total - 2.0f * dpi;
+    if (mx < 0.0f) mx = 0.0f;
+    if (my < 0.0f) my = 0.0f;
+    ri.push_round_rect(mx, my, iw, total, 5.0f * dpi, color_rgba8(46, 48, 54), depth++, clip);
+    float iy = my + pad;
+    for (const auto& it : items) {
+        if (it.separator) {
+            ri.push_rect(mx + 8.0f * dpi, iy + sep * 0.5f, iw - 16.0f * dpi, 1.0f,
+                         color_rgba8(70, 72, 78), depth++, clip);
+            iy += sep; continue;
+        }
+        if (it.enabled && hover_id == it.id)
+            ri.push_round_rect(mx + 3.0f * dpi, iy, iw - 6.0f * dpi, ih, 4.0f * dpi,
+                               color_rgba8(64, 96, 150), depth++, clip);
+        const math::Vec4 col = it.enabled ? color_rgba8(224, 226, 232) : color_rgba8(120, 122, 128);
+        if (it.checked)
+            ri.push_text("\xE2\x9C\x93", mx + 3.0f * dpi, iy + (ih - line_h) * 0.5f, lpad, line_h,
+                         col, font, Alignment::TopLeft, depth++, clip);      // ✓
+        ri.push_text(it.label.c_str(), mx + lpad, iy + (ih - line_h) * 0.5f, iw - lpad - 4.0f * dpi,
+                     line_h, col, font, Alignment::TopLeft, depth++, clip);
+        if (it.enabled) out.push_back({ math::make_box(mx + 3.0f * dpi, iy, iw - 6.0f * dpi, ih), it.id });
+        iy += ih;
+    }
+}
 
 // ============================================================================
 // Widget Interface (Abstract) - Base for all widgets

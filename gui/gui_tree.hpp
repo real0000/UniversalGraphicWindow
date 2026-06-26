@@ -26,6 +26,7 @@ struct TreeViewStyle {
     math::Vec4 selected_background;
     math::Vec4 hover_background;
     math::Vec4 text_color;
+    math::Vec4 folder_text_color;   // text color for nodes with icon "folder" (0 alpha → use text_color)
     math::Vec4 icon_color;
     math::Vec4 line_color;          // Indent guide lines
     float row_height = 22.0f;
@@ -42,6 +43,7 @@ struct TreeViewStyle {
         s.selected_background = color_rgba8(0, 122, 204);
         s.hover_background = color_rgba8(62, 62, 66);
         s.text_color = color_rgba8(241, 241, 241);
+        s.folder_text_color = math::Vec4(0,0,0,0);   // default: fall back to text_color
         s.icon_color = color_rgba8(200, 200, 200);
         s.line_color = color_rgba8(80, 80, 80);
         return s;
