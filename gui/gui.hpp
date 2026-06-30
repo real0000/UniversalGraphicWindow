@@ -33,6 +33,8 @@ namespace gui {
 // Forward declarations
 class IGuiContext;
 class IGuiWidget;
+class ISizer;            // gui_sizer.hpp (included at end of this header)
+class ITextMeasurer;     // defined below
 
 // ============================================================================
 // Enums
@@ -975,6 +977,23 @@ public:
     virtual float get_spacing() const = 0;
     virtual void set_spacing(float spacing) = 0;
     virtual void layout_children() = 0;
+
+    // -----------------------------------------------------------------------
+    // Optional sizer-driven layout (containers)
+    // -----------------------------------------------------------------------
+    // When a sizer is attached, the widget delegates all child positioning to
+    // it: set_bounds() lays the sizer out over the new bounds (instead of the
+    // default translate-only cascade), and get_preferred_size() returns the
+    // sizer's get_min_size(). This lets a whole subtree size itself bottom-up
+    // (height-for-width included) with no caller-side geometry arithmetic.
+    // Ownership of the sizer stays with the caller. Default: no-op (leaf).
+    virtual void set_sizer(ISizer* sizer) { (void)sizer; }
+    virtual ISizer* get_sizer() const { return nullptr; }
+
+    // Optional text measurer for self-sizing text widgets (label/button). When
+    // set, get_preferred_size() reports the text's measured extent + one line
+    // height instead of a fixed default. Default: no-op (non-text widgets).
+    virtual void set_text_measurer(ITextMeasurer* measurer) { (void)measurer; }
 };
 
 } // namespace gui

@@ -56,7 +56,8 @@ struct SizerItem {
     int         proportion = 0;                // 0 = fixed size, >0 = proportional share of free space
     SizerFlag   flags      = SizerFlag::None;  // Layout hints
     float       border     = 0.0f;             // Border width applied to sides selected by flags
-    math::Vec2  fixed_size;                    // For spacers: size; for widgets: 0 = use get_preferred_size()
+    math::Vec2  fixed_size = math::Vec2(0.0f, 0.0f);  // spacers: size; widgets: 0 = use get_preferred_size()
+                                               // (Boost points aren't auto-zeroed — must init or add() leaks garbage)
     bool        visible    = true;
 };
 

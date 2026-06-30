@@ -222,10 +222,10 @@ public:
     void set_scroll_speed(float s) override { scroll_speed_=s; }
     bool is_scroll_inertia_enabled() const override { return inertia_; }
     void set_scroll_inertia_enabled(bool e) override { inertia_=e; }
-    void scroll_to(const math::Vec2& o,bool) override { scroll_offset_=o; }
+    void scroll_to(const math::Vec2& o,bool) override { scroll_offset_=o; relayout_content(); }
     void scroll_to_widget(const IGuiWidget*,bool) override {}
-    void scroll_to_top(bool) override { scroll_offset_=math::Vec2(math::x(scroll_offset_),0); }
-    void scroll_to_bottom(bool) override { auto mx=get_max_scroll_offset(); scroll_offset_=math::Vec2(math::x(scroll_offset_),math::y(mx)); }
+    void scroll_to_top(bool) override { scroll_offset_=math::Vec2(math::x(scroll_offset_),0); relayout_content(); }
+    void scroll_to_bottom(bool) override { auto mx=get_max_scroll_offset(); scroll_offset_=math::Vec2(math::x(scroll_offset_),math::y(mx)); relayout_content(); }
     bool is_scrolling() const override { return false; }
     bool can_scroll_horizontal() const override { return math::x(content_size_)>math::x(get_viewport_size()); }
     bool can_scroll_vertical() const override { return math::y(content_size_)>math::y(get_viewport_size()); }

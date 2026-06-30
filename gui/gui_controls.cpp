@@ -19,6 +19,7 @@ class GuiButton : public WidgetBase<IGuiButton, WidgetType::Button> {
     ButtonStyle style_ = ButtonStyle::default_style();
     ButtonTransition transition_;
     IButtonEventHandler* handler_ = nullptr;
+    ITextMeasurer* measurer_ = nullptr;
     mutable WidgetRenderInfo ri_;
 
     // Transition animation state
@@ -100,6 +101,17 @@ public:
     void clear_radio_peers() override { radio_peers_.clear(); }
     const ButtonStyle& get_button_style() const override { return style_; }
     void set_button_style(const ButtonStyle& s) override { style_ = s; }
+    void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
+
+    // Self-size to its label (measured) + style padding when a measurer is set,
+    // so a sizer can place the button without a caller-supplied height.
+    math::Vec2 get_preferred_size() const override {
+        if (!measurer_) return base_.get_preferred_size();
+        float h  = measurer_->get_line_height(style_.font_size, nullptr);
+        float tw = text_.empty() ? 0.0f
+                 : measurer_->measure_text(text_.c_str(), style_.font_size, nullptr).x();
+        return math::Vec2(tw + 2.0f * style_.padding, h);
+    }
     const ButtonTransition& get_button_transition() const override { return transition_; }
     void set_button_transition(const ButtonTransition& t) override { transition_ = t; }
     void set_button_event_handler(IButtonEventHandler* h) override { handler_ = h; }
@@ -184,8 +196,15 @@ public:
             if (base_.has_focus())
                 ri_.push_outline(rx-1, ry-1, rw+2, rh+2, s.focus_border_color, d, noclip);
             if (!text_.empty())
-                ri_.push_text(text_.c_str(), rx, ry, rw, rh,
-                              s.text_color, s.font_size, Alignment::Center, d++, noclip);
+            {
+                bool left = (s.text_alignment == Alignment::CenterLeft ||
+                             s.text_alignment == Alignment::TopLeft ||
+                             s.text_alignment == Alignment::BottomLeft);
+                float tx  = left ? rx + s.padding : rx;
+                float tw2 = left ? rw - s.padding : rw;
+                ri_.push_text(text_.c_str(), tx, ry, tw2, rh,
+                              s.text_color, s.font_size, s.text_alignment, d++, noclip);
+            }
         }
         ri_.finalize();
         base_.clear_dirty();

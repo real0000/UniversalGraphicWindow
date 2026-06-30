@@ -51,11 +51,17 @@ public:
         // bounds_), so any bounds change must invalidate the cache or the
         // widget will keep rendering at its old position even though
         // hit-tests already use the new bounds.
-        if (std::abs(dx) > 0.001f || std::abs(dy) > 0.001f ||
-            std::abs(dw) > 0.001f || std::abs(dh) > 0.001f) {
-            mark_dirty();
-        }
-        if ((std::abs(dx) > 0.001f || std::abs(dy) > 0.001f) && !children_.empty()) {
+        bool moved   = std::abs(dx) > 0.001f || std::abs(dy) > 0.001f;
+        bool resized = std::abs(dw) > 0.001f || std::abs(dh) > 0.001f;
+        if (moved || resized) mark_dirty();
+        if (sizer_) {
+            // Sizer owns child placement: re-flow over the new bounds on EVERY
+            // call (not just on change). Callers may drive the sizer directly to
+            // measure (desyncing it from these bounds), or change child content
+            // without moving the container — both must be corrected here. Skips
+            // the translate cascade below entirely.
+            sizer_->set_bounds(bounds_); sizer_->layout();
+        } else if (moved && !children_.empty()) {
             for (auto* c : children_) {
                 auto cb = c->get_bounds();
                 c->set_bounds(math::make_box(
@@ -67,7 +73,15 @@ public:
             }
         }
     }
-    math::Vec2 get_preferred_size() const override { return preferred_size_; }
+    // Sizer-driven container hooks (see IGuiWidget docs).
+    void set_sizer(ISizer* s) override {
+        sizer_ = s;
+        if (sizer_) { sizer_->set_bounds(bounds_); sizer_->layout(); mark_dirty(); }
+    }
+    ISizer* get_sizer() const override { return sizer_; }
+    math::Vec2 get_preferred_size() const override {
+        return sizer_ ? sizer_->get_min_size() : preferred_size_;
+    }
     math::Vec2 get_min_size() const override { return min_size_; }
     math::Vec2 get_max_size() const override { return max_size_; }
     void set_min_size(const math::Vec2& s) override { min_size_ = s; }
@@ -189,11 +203,14 @@ protected:
     WidgetType type_;
     std::string name_;
     IGuiWidget* parent_ = nullptr;
-    math::Box bounds_;
+    // Boost.Geometry points are NOT default-initialized, so an unset box is
+    // garbage (~1e23). Zero it: a never-laid-out widget then reads as empty
+    // (skipped by render/sizer measure) instead of a wild rectangle.
+    math::Box bounds_ = math::make_box(0.0f, 0.0f, 0.0f, 0.0f);
     math::Vec2 preferred_size_ = math::Vec2(100.0f, 30.0f);
     math::Vec2 min_size_ = math::Vec2(0.0f, 0.0f);
     math::Vec2 max_size_ = math::Vec2(1e12f, 1e12f);
-    math::Box clip_rect_;
+    math::Box clip_rect_ = math::make_box(0.0f, 0.0f, 0.0f, 0.0f);
     bool clip_enabled_ = false;
     bool visible_ = true, enabled_ = true, focusable_ = false, focused_ = false;
     WidgetState state_ = WidgetState::Normal;
@@ -204,6 +221,7 @@ protected:
     float spacing_ = 0.0f;
     IGuiEventHandler* event_handler_ = nullptr;
     std::vector<IGuiWidget*> children_;
+    ISizer* sizer_ = nullptr;       // optional: drives child layout + preferred size
     mutable WidgetRenderInfo render_info_;
     mutable bool dirty_ = true;
 };

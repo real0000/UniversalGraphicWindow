@@ -59,6 +59,7 @@ inline EditBoxStyle preview_style(float dpi, float font_px) {
     s.selection_color  = color_rgba8(54, 80, 130);
     s.font_size        = font_px;
     s.padding          = 12.0f * dpi;
+    s.text_alignment   = Alignment::TopLeft;   // a document reads top-down, not centred
     return s;
 }
 

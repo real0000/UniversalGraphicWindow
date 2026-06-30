@@ -98,6 +98,7 @@ struct EditBoxStyle {
     float padding = 4.0f;
     float cursor_width = 2.0f;
     float tab_width = 4.0f;             // Tab width in spaces
+    Alignment text_alignment = Alignment::CenterLeft;   // vertical placement of each line's text
 
     static EditBoxStyle default_style() {
         EditBoxStyle s;

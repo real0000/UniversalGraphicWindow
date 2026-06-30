@@ -58,7 +58,7 @@ static void item_set_bounds(SizerItem& item, const math::Box& bounds) {
 class SizerBase : public ISizer {
 protected:
     std::vector<SizerItem> items_;
-    math::Box   bounds_;
+    math::Box   bounds_ = math::make_box(0.0f, 0.0f, 0.0f, 0.0f);  // BG points aren't auto-zeroed
     math::Vec4  padding_;   // x=left, y=top, z=right, w=bottom
     float       gap_ = 4.0f;
 
@@ -231,6 +231,33 @@ public:
         float ch   = math::box_height(cr);
         float area_main  = horiz ? cw : ch;
         float area_cross = horiz ? ch : cw;
+
+        // Pass 0: pre-assign each item's CROSS size (width for a vertical sizer)
+        // so height-for-width widgets — and nested sizer-backed containers —
+        // re-flow at their final cross size before Pass 1 reads their main-axis
+        // preferred size. Without this, an editbox/paragraph would report a
+        // height computed against a stale width. Cross size never depends on the
+        // main size, so a single forward pass converges.
+        for (auto& item : items_) {
+            if (!item.visible || (!item.widget && !item.sizer)) continue;
+            auto b = resolve_border(item);
+            float cross_b_lo = horiz ? b.top    : b.left;
+            float cross_b_hi = horiz ? b.bottom : b.right;
+            float avail_cross = std::max(0.0f, area_cross - cross_b_lo - cross_b_hi);
+            float wcross;
+            if (has_flag(item.flags, SizerFlag::Expand)) {
+                wcross = avail_cross;
+            } else {
+                float pref_cross = horiz ? math::y(item_pref_size(item))
+                                         : math::x(item_pref_size(item));
+                wcross = std::min(pref_cross, avail_cross);
+            }
+            math::Box cur = item.widget ? item.widget->get_bounds() : item.sizer->get_bounds();
+            float cur_main = horiz ? math::box_width(cur) : math::box_height(cur);
+            float wx = math::x(math::box_min(cur)), wy = math::y(math::box_min(cur));
+            item_set_bounds(item, horiz ? math::make_box(wx, wy, cur_main, wcross)
+                                        : math::make_box(wx, wy, wcross, cur_main));
+        }
 
         // Pass 1: measure fixed items, accumulate proportions
         int   n_visible       = 0;

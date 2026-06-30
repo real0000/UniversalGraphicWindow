@@ -16,12 +16,25 @@ namespace gui {
 class GuiLabel : public WidgetBase<IGuiLabel, WidgetType::Label> {
     std::string text_;
     LabelStyle label_style_ = LabelStyle::default_style();
+    ITextMeasurer* measurer_ = nullptr;
     mutable WidgetRenderInfo ri_;
 public:
     const char* get_text() const override { return text_.c_str(); }
     void set_text(const char* t) override { text_ = t ? t : ""; }
     const LabelStyle& get_label_style() const override { return label_style_; }
     void set_label_style(const LabelStyle& s) override { label_style_ = s; }
+    void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
+
+    // Self-size to one line of text (measured) when a measurer is attached, so a
+    // sizer can place the label with no caller-side height. render() insets text
+    // by +4 on the left (see below); mirror that as horizontal padding.
+    math::Vec2 get_preferred_size() const override {
+        if (!measurer_) return base_.get_preferred_size();
+        float h  = measurer_->get_line_height(label_style_.font_size, label_style_.font_name);
+        float tw = text_.empty() ? 0.0f
+                 : measurer_->measure_text(text_.c_str(), label_style_.font_size, label_style_.font_name).x();
+        return math::Vec2(tw + 8.0f, h);
+    }
 
     const WidgetRenderInfo& get_render_info(Window*) const override {
         ri_.invalidate();
@@ -163,6 +176,49 @@ public:
 
 class GuiEditBox : public WidgetBase<IGuiEditBox, WidgetType::Custom> {
     std::vector<std::string> lines_{""};
+    // Word-wrap: visual display lines derived from lines_ + width (cached). When
+    // wrap_ != None each logical line is greedily split to fit the content width
+    // (same algorithm the immediate-mode chat used) so rendering matches exactly.
+    mutable std::vector<std::string> disp_lines_;
+    mutable float disp_w_ = -1.0f;
+    mutable EditBoxWordWrap disp_wrap_cached_ = EditBoxWordWrap::None;
+    mutable bool disp_dirty_ = true;
+    void rewrap(float content_w) const {
+        if (!disp_dirty_ && content_w == disp_w_ && wrap_ == disp_wrap_cached_) return;
+        disp_dirty_ = false; disp_w_ = content_w; disp_wrap_cached_ = wrap_;
+        disp_lines_.clear();
+        if (wrap_ == EditBoxWordWrap::None || !measurer_ || content_w <= 0.0f) {
+            disp_lines_ = lines_; if (disp_lines_.empty()) disp_lines_.push_back(""); return;
+        }
+        for (const auto& para : lines_) {
+            if (para.empty()) { disp_lines_.push_back(""); continue; }
+            std::string line; size_t i = 0, len = para.size();
+            while (i < len) {
+                size_t ws = i; while (ws < len && para[ws] == ' ') ++ws;
+                size_t we = ws; while (we < len && para[we] != ' ') ++we;
+                std::string word = para.substr(i, we - i), cand = line + word;
+                if (!line.empty() && measurer_->measure_text(cand.c_str(), style_.font_size, style_.font_name).x() > content_w) {
+                    disp_lines_.push_back(line); line = para.substr(ws, we - ws);
+                } else line = cand;
+                i = we;
+            }
+            disp_lines_.push_back(line);
+        }
+        if (disp_lines_.empty()) disp_lines_.push_back("");
+    }
+    // Height-for-width preferred size: the editbox is as tall as its wrapped
+    // content at the width it has been assigned. A sizer that Expands this
+    // widget on the cross axis (width) assigns the width first (see BoxSizer's
+    // cross pre-pass), then reads this height — so a paragraph stacks to exactly
+    // the number of visual lines it wraps to, with no caller-side arithmetic.
+    math::Vec2 pref_size_for_width(float bw) const {
+        const auto& s = style_;
+        float text_x_off = (line_nums_ ? s.gutter_width + s.padding : s.padding);
+        float content_w  = bw - text_x_off - s.padding;
+        rewrap(content_w);
+        float line_h = s.font_size * s.line_height;
+        return math::Vec2(bw, (float)disp_lines_.size() * line_h);
+    }
     mutable std::string cached_text_, cached_sel_;
     TextPosition cursor_{0,0};
     TextRange selection_{{0,0},{0,0}};
@@ -348,7 +404,7 @@ public:
         return cached_text_.c_str();
     }
     void set_text(const char* t) override {
-        lines_.clear();
+        lines_.clear(); disp_dirty_ = true;
         if(!t||!*t){lines_.push_back("");return;}
         std::istringstream ss(t); std::string l;
         while(std::getline(ss,l)) lines_.push_back(l);
@@ -471,7 +527,7 @@ public:
         return cnt;
     }
     EditBoxWordWrap get_word_wrap() const override { return wrap_; }
-    void set_word_wrap(EditBoxWordWrap w) override { wrap_=w; }
+    void set_word_wrap(EditBoxWordWrap w) override { wrap_=w; disp_dirty_=true; }
     bool is_line_numbers_visible() const override { return line_nums_; }
     void set_line_numbers_visible(bool v) override { line_nums_=v; }
     bool is_current_line_highlighted() const override { return hl_line_; }
@@ -497,6 +553,10 @@ public:
     void set_editbox_event_handler(IEditBoxEventHandler* h) override { handler_=h; }
     void set_text_measurer(ITextMeasurer* m) override { measurer_=m; }
 
+    math::Vec2 get_preferred_size() const override {
+        return pref_size_for_width(math::box_width(base_.get_bounds()));
+    }
+
     const WidgetRenderInfo& get_render_info(Window*) const override {
         ri_.invalidate();
         auto b = base_.get_bounds();
@@ -507,8 +567,10 @@ public:
         int32_t d = 0;
         const auto& s = style_;
         float line_h = s.font_size * s.line_height;
-        int lc = (int)lines_.size();
         float text_x = bx + (line_nums_ ? s.gutter_width + s.padding : s.padding);
+        const float content_w = bw - (text_x - bx) - s.padding;
+        rewrap(content_w);
+        int lc = (int)disp_lines_.size();
 
         // Background
         ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
@@ -538,8 +600,8 @@ public:
                               s.line_number_color, s.font_size, Alignment::CenterLeft, d++, clip);
             }
 
-            const char* lt = lines_[i].c_str();
-            int ll = (int)lines_[i].size();
+            const char* lt = disp_lines_[i].c_str();
+            int ll = (int)disp_lines_[i].size();
 
             // Selection highlight (approximate - full-line or partial)
             if (has_sel && i >= sel.start.line && i <= sel.end.line) {
@@ -554,10 +616,10 @@ public:
             if (lt && lt[0]) {
                 WidgetRenderInfo::TextCmd tc;
                 tc.text      = lt;
-                tc.dest      = math::make_box(text_x, ly, bw - (text_x - bx) - 12, line_h);
+                tc.dest      = math::make_box(text_x, ly, content_w, line_h);
                 tc.color     = s.text_color;
                 tc.font_size = s.font_size;
-                tc.alignment = Alignment::CenterLeft;
+                tc.alignment = s.text_alignment;
                 tc.depth     = d++;
                 tc.clip      = clip;
                 if (base_.has_focus() && i == cursor_.line) {

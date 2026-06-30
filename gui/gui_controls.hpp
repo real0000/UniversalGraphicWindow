@@ -47,6 +47,7 @@ struct ButtonStyle {
     float icon_size = 16.0f;
     float icon_text_spacing = 6.0f;
     float font_size = 13.0f;
+    Alignment text_alignment = Alignment::Center;   // label placement within the button
 
     static ButtonStyle default_style() {
         ButtonStyle s;
