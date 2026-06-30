@@ -178,18 +178,43 @@ class GuiComboBox : public WidgetBase<IGuiComboBox, WidgetType::ComboBox> {
     ComboBoxStyle style_=ComboBoxStyle::default_style();
     IComboBoxEventHandler* handler_=nullptr;
     mutable WidgetRenderInfo ri_;
+    mutable float drop_scroll_=0.0f;   // vertical scroll within the dropdown (px), when it can't fit
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
+    // Where the open dropdown is placed: below the box when there's room, otherwise
+    // flipped above; height clamped to the available space (the widget's clip rect,
+    // which the host sets to the window — so it never spills off-screen). When it
+    // still can't fit, the list scrolls (drop_scroll_) with a scrollbar.
+    struct DropGeom { float dy, h, full; bool up, scroll; };
+    DropGeom drop_geom() const {
+        auto b = base_.get_bounds();
+        float by = math::y(math::box_min(b)), bh = math::box_height(b);
+        float full = (float)items_.size() * style_.item_height;
+        bool bounded = base_.is_clip_enabled();
+        math::Box area = base_.get_clip_rect();
+        float top = bounded ? math::y(math::box_min(area)) : by + bh - full;
+        float bot = bounded ? math::y(math::box_min(area)) + math::box_height(area) : by + bh + full;
+        float below = bot - (by + bh), above = by - top;
+        bool up = (full <= below) ? false : (full <= above) ? true : (above > below);
+        float avail = up ? above : below;
+        float h = std::min(style_.dropdown_max_height, std::min(full, std::max(0.0f, avail)));
+        return { up ? by - h : by + bh, h, full, up, full > h + 0.5f };
+    }
+    float max_drop_scroll() const { auto g = drop_geom(); return std::max(0.0f, g.full - g.h); }
 public:
+    bool handle_mouse_scroll(float, float dy) override {
+        if (!open_) return false;
+        drop_scroll_ = std::max(0.0f, std::min(drop_scroll_ - dy * style_.item_height, max_drop_scroll()));
+        base_.mark_dirty();
+        return true;
+    }
     bool hit_test(const math::Vec2& p) const override {
-        // When open, hit test includes the dropdown area
+        // When open, hit test includes the dropdown area (above or below the box).
         if (base_.hit_test(p)) return true;
         if (open_) {
             auto b = base_.get_bounds();
-            float bx = math::x(math::box_min(b)), by = math::y(math::box_max(b));
-            float bw = math::box_width(b);
-            float dh = std::min(style_.dropdown_max_height, (float)items_.size() * style_.item_height);
-            auto drop_box = math::make_box(bx, by, bx + bw, by + dh);
-            if (math::box_contains(drop_box, p)) return true;
+            float bx = math::x(math::box_min(b)), bw = math::box_width(b);
+            auto g = drop_geom();
+            if (math::box_contains(math::make_box(bx, g.dy, bw, g.h), p)) return true;
         }
         return false;
     }
@@ -197,13 +222,12 @@ public:
         if (!base_.is_enabled()) return false;
         if (btn == MouseButton::Left && pressed) {
             if (open_) {
-                // Check if click is in dropdown area
                 auto b = base_.get_bounds();
-                float drop_y = math::y(math::box_max(b));
-                float bx = math::x(math::box_min(b));
-                float bw = math::box_width(b);
-                float rel_y = math::y(p) - drop_y;
-                if (rel_y >= 0 && math::x(p) >= bx && math::x(p) <= bx + bw) {
+                float bx = math::x(math::box_min(b)), bw = math::box_width(b);
+                auto g = drop_geom();
+                float rel_y = math::y(p) - g.dy + drop_scroll_;   // account for flip + scroll
+                if (rel_y >= 0 && math::y(p) >= g.dy && math::y(p) <= g.dy + g.h &&
+                    math::x(p) >= bx && math::x(p) <= bx + bw) {
                     int row = (style_.item_height > 0) ? (int)(rel_y / style_.item_height) : -1;
                     if (row >= 0 && row < (int)items_.size()) {
                         selected_ = items_[row].id;
@@ -238,7 +262,7 @@ public:
     const char* get_placeholder() const override { return placeholder_.c_str(); }
     void set_placeholder(const char* t) override { placeholder_=t?t:""; }
     bool is_open() const override { return open_; }
-    void open() override { open_=true; if(handler_) handler_->on_dropdown_opened(); }
+    void open() override { open_=true; drop_scroll_=0.0f; if(handler_) handler_->on_dropdown_opened(); }
     void close() override { open_=false; if(handler_) handler_->on_dropdown_closed(); }
     void toggle() override { if(open_) close(); else open(); }
     void set_item_user_data(int id,void* d) override { int i=find_idx(id); if(i>=0)items_[i].user_data=d; }
@@ -288,25 +312,37 @@ public:
         // Arrow (▾ glyph, not a block) at the right, matching a text-drawn chevron.
         ri_.push_text("\xE2\x96\xBE", bx + bw - s.item_padding - s.arrow_size, by,
                       s.arrow_size, bh, s.arrow_color, s.font_size, Alignment::Center, d++, noclip);
-        // Dropdown list
+        // Dropdown list — placed by drop_geom() (below or flipped above, clamped to
+        // the available area), scrolled by drop_scroll_ with a scrollbar when clamped.
         if (open_) {
             int count = (int)items_.size();
-            float drop_h = std::min(s.dropdown_max_height, (float)count * s.item_height);
-            float dy = by + bh;
-            ri_.push_rect(bx, dy, bw, drop_h, s.dropdown_background, d++, noclip);
+            auto g = drop_geom();
+            float dy = g.dy, drop_h = g.h;
+            drop_scroll_ = std::max(0.0f, std::min(drop_scroll_, std::max(0.0f, g.full - drop_h)));
             math::Box drop_clip = math::make_box(bx, dy, bw, drop_h);
-            for (int i = 0; i < count && i*s.item_height < drop_h; i++) {
-                float ry = dy + i * s.item_height;
+            float sb_w = g.scroll ? 6.0f : 0.0f;
+            ri_.push_rect(bx, dy, bw, drop_h, s.dropdown_background, d++, drop_clip);
+            for (int i = 0; i < count; i++) {
+                float ry = dy + i * s.item_height - drop_scroll_;
+                if (ry + s.item_height <= dy || ry >= dy + drop_h) continue;   // off-view
                 bool is_sel = (items_[i].id == selected_);
-                ri_.push_rect(bx, ry, bw, s.item_height,
+                ri_.push_rect(bx, ry, bw - sb_w, s.item_height,
                               is_sel ? s.item_selected_background : s.dropdown_background, d++, drop_clip);
                 if (!items_[i].text.empty()) {
                     math::Vec4 ic = is_sel ? s.item_selected_text_color : s.item_text_color;
-                    ri_.push_text(items_[i].text.c_str(), bx+s.item_padding, ry, bw-s.item_padding, s.item_height,
-                                  ic, 13.0f, Alignment::CenterLeft, d++, drop_clip);
+                    ri_.push_text(items_[i].text.c_str(), bx+s.item_padding, ry, bw-s.item_padding-sb_w, s.item_height,
+                                  ic, s.font_size, Alignment::CenterLeft, d++, drop_clip);
                 }
             }
-            ri_.push_outline(bx, dy, bw, drop_h, s.dropdown_border_color, d, noclip);
+            if (g.scroll) {   // scrollbar track + proportional thumb
+                float track_x = bx + bw - sb_w;
+                ri_.push_rect(track_x, dy, sb_w, drop_h, math::Vec4(0.10f,0.10f,0.11f,0.8f), d++, drop_clip);
+                float thumb_h = std::max(16.0f, drop_h * drop_h / g.full);
+                float max_sc = std::max(1.0f, g.full - drop_h);
+                float ty = dy + (drop_h - thumb_h) * (drop_scroll_ / max_sc);
+                ri_.push_rect(track_x, ty, sb_w, thumb_h, math::Vec4(0.45f,0.45f,0.47f,0.9f), d++, drop_clip);
+            }
+            ri_.push_outline(bx, dy, bw, drop_h, s.dropdown_border_color, d, drop_clip);
         }
         ri_.finalize();
         base_.clear_dirty();
