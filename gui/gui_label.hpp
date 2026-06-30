@@ -32,9 +32,42 @@ public:
 // TextInput Interface - For editable text
 // ============================================================================
 
+// Visual style for a single-line text input. Lets a caller reproduce a bespoke
+// field (rounded bg, custom outline, no focus ring, placeholder colour) instead
+// of the hardcoded default look.
+struct TextInputStyle {
+    math::Vec4 background_color;
+    math::Vec4 border_color;
+    math::Vec4 focus_border_color;   // drawn only when alpha > 0 (0 = no focus ring)
+    math::Vec4 text_color;
+    math::Vec4 placeholder_color;
+    math::Vec4 selection_color;
+    math::Vec4 cursor_color;
+    float font_size    = 14.0f;
+    float corner_radius = 0.0f;       // > 0 → rounded background
+    float padding       = 6.0f;       // left/right text inset
+    bool  hide_placeholder_on_focus = false;  // false = show placeholder even when focused+empty
+
+    static TextInputStyle default_style() {
+        TextInputStyle s;
+        s.background_color    = color_rgba8(30, 30, 30);
+        s.border_color        = color_rgba8(64, 64, 69);
+        s.focus_border_color  = color_rgba8(0, 122, 204);
+        s.text_color          = color_rgba8(240, 240, 240);
+        s.placeholder_color   = math::Vec4(0.5f, 0.5f, 0.5f, 0.7f);
+        s.selection_color     = color_rgba8(38, 79, 120);
+        s.cursor_color        = color_rgba8(240, 240, 240);
+        return s;
+    }
+};
+
 class IGuiTextInput : public IGuiLabel {
 public:
     virtual ~IGuiTextInput() = default;
+
+    // Field style (background, outline, focus ring, placeholder colour, …).
+    virtual const TextInputStyle& get_text_input_style() const = 0;
+    virtual void set_text_input_style(const TextInputStyle& style) = 0;
 
     // Cursor and selection
     virtual int get_cursor_position() const = 0;

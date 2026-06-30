@@ -20,6 +20,7 @@ class GuiButton : public WidgetBase<IGuiButton, WidgetType::Button> {
     ButtonTransition transition_;
     IButtonEventHandler* handler_ = nullptr;
     ITextMeasurer* measurer_ = nullptr;
+    math::Vec2 explicit_pref_{0.0f, 0.0f};   // pinned size; 0 component = auto/measure
     mutable WidgetRenderInfo ri_;
 
     // Transition animation state
@@ -102,15 +103,20 @@ public:
     const ButtonStyle& get_button_style() const override { return style_; }
     void set_button_style(const ButtonStyle& s) override { style_ = s; }
     void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
+    void set_preferred_size(const math::Vec2& s) override { explicit_pref_ = s; }
 
     // Self-size to its label (measured) + style padding when a measurer is set,
-    // so a sizer can place the button without a caller-supplied height.
+    // so a sizer can place the button without a caller-supplied height. A pinned
+    // axis (explicit_pref_ component > 0) overrides the measured value.
     math::Vec2 get_preferred_size() const override {
         if (!measurer_) return base_.get_preferred_size();
         float h  = measurer_->get_line_height(style_.font_size, nullptr);
         float tw = text_.empty() ? 0.0f
                  : measurer_->measure_text(text_.c_str(), style_.font_size, nullptr).x();
-        return math::Vec2(tw + 2.0f * style_.padding, h);
+        float w = tw + 2.0f * style_.padding;
+        if (math::x(explicit_pref_) > 0.0f) w = math::x(explicit_pref_);
+        if (math::y(explicit_pref_) > 0.0f) h = math::y(explicit_pref_);
+        return math::Vec2(w, h);
     }
     const ButtonTransition& get_button_transition() const override { return transition_; }
     void set_button_transition(const ButtonTransition& t) override { transition_ = t; }

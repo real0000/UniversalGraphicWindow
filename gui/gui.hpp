@@ -994,6 +994,11 @@ public:
     // set, get_preferred_size() reports the text's measured extent + one line
     // height instead of a fixed default. Default: no-op (non-text widgets).
     virtual void set_text_measurer(ITextMeasurer* measurer) { (void)measurer; }
+
+    // Pin the preferred size, overriding any self-measured value. A component of
+    // 0 means "leave that axis auto" (keep measuring it). Lets a caller reserve
+    // an exact row size when the visual design fixes it independent of the font.
+    virtual void set_preferred_size(const math::Vec2& size) { (void)size; }
 };
 
 } // namespace gui

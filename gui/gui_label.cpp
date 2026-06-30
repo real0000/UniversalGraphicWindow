@@ -26,14 +26,15 @@ public:
     void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
 
     // Self-size to one line of text (measured) when a measurer is attached, so a
-    // sizer can place the label with no caller-side height. render() insets text
-    // by +4 on the left (see below); mirror that as horizontal padding.
+    // sizer can place the label with no caller-side height. Height is the font em
+    // (font_size), i.e. a tight single-line box — matches a caller that reserves
+    // exactly one font's worth of vertical space per line. render() insets text by
+    // +4 on the left (see below); mirror that as horizontal padding.
     math::Vec2 get_preferred_size() const override {
         if (!measurer_) return base_.get_preferred_size();
-        float h  = measurer_->get_line_height(label_style_.font_size, label_style_.font_name);
         float tw = text_.empty() ? 0.0f
                  : measurer_->measure_text(text_.c_str(), label_style_.font_size, label_style_.font_name).x();
-        return math::Vec2(tw + 8.0f, h);
+        return math::Vec2(tw + 8.0f, label_style_.font_size);
     }
 
     const WidgetRenderInfo& get_render_info(Window*) const override {
@@ -44,7 +45,7 @@ public:
         auto noclip = math::make_box(0,0,0,0);
         int32_t d = 0;
         if (!text_.empty())
-            ri_.push_text(text_.c_str(), bx+4, by, bw-4, bh,
+            ri_.push_text(text_.c_str(), bx, by, bw, bh,
                           label_style_.text_color, label_style_.font_size,
                           label_style_.alignment, d++, noclip);
         ri_.finalize();
@@ -60,6 +61,7 @@ public:
 class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput> {
     std::string text_, placeholder_, preedit_;
     LabelStyle label_style_ = LabelStyle::default_style();
+    TextInputStyle ti_style_ = TextInputStyle::default_style();
     int cursor_ = 0, sel_start_ = 0, sel_len_ = 0, max_length_ = 0, preedit_cursor_ = 0;
     bool password_ = false, read_only_ = false;
     mutable WidgetRenderInfo ri_;
@@ -93,6 +95,8 @@ public:
     void set_text(const char* t) override { text_ = t ? t : ""; cursor_ = std::min(cursor_, (int)text_.size()); }
     const LabelStyle& get_label_style() const override { return label_style_; }
     void set_label_style(const LabelStyle& s) override { label_style_ = s; }
+    const TextInputStyle& get_text_input_style() const override { return ti_style_; }
+    void set_text_input_style(const TextInputStyle& s) override { ti_style_ = s; }
     int get_cursor_position() const override { return cursor_; }
     void set_cursor_position(int p) override { cursor_ = std::max(0, std::min(p, (int)text_.size())); }
     int get_selection_start() const override { return sel_start_; }
@@ -131,14 +135,28 @@ public:
         float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
         float bw = math::box_width(b), bh = math::box_height(b);
         auto noclip = math::make_box(0,0,0,0);
+        const auto& s = ti_style_;
         int32_t d = 0;
-        ri_.push_rect(bx, by, bw, bh, math::Vec4(0.12f,0.12f,0.12f,1.0f), d++, noclip);
-        ri_.push_outline(bx, by, bw, bh, math::Vec4(0.25f,0.25f,0.27f,1.0f), d, noclip);
-        if (base_.has_focus())
-            ri_.push_outline(bx-1, by-1, bw+2, bh+2, math::Vec4(0,0.48f,0.8f,1), d, noclip);
-        if (!text_.empty() || !preedit_.empty() || base_.has_focus()) {
-            // Inline IME preedit: show the composing text at the caret (the caret
-            // lands inside it). Single colour for now — composition still appears.
+        // Background (rounded if requested) + outline + optional focus ring.
+        if (s.corner_radius > 0.0f)
+            ri_.push_round_rect(bx, by, bw, bh, s.corner_radius, s.background_color, d++, noclip);
+        else
+            ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
+        if (s.border_color.w > 0.0f)
+            ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
+        if (base_.has_focus() && s.focus_border_color.w > 0.0f)
+            ri_.push_outline(bx-1, by-1, bw+2, bh+2, s.focus_border_color, d, noclip);
+
+        const float tx = bx + s.padding, tw = bw - 2.0f * s.padding;
+        const bool empty = text_.empty() && preedit_.empty();
+        // Placeholder shows while empty — even when focused (matches the original
+        // field) unless the caller opts into hide-on-focus.
+        if (empty && !placeholder_.empty() && !(s.hide_placeholder_on_focus && base_.has_focus()))
+            ri_.push_text(placeholder_.c_str(), tx, by, tw, bh, s.placeholder_color,
+                          s.font_size, Alignment::CenterLeft, d++, noclip);
+        // Text (+ inline IME preedit) and caret. An empty-but-focused field still
+        // emits a TextCmd so the caret blinks at the start.
+        if (!empty || base_.has_focus()) {
             std::string disp = text_;
             int caret = cursor_;
             if (!preedit_.empty()) {
@@ -147,22 +165,18 @@ public:
             }
             WidgetRenderInfo::TextCmd tc;
             tc.text      = disp;
-            tc.dest      = math::make_box(bx+6, by, bw-12, bh);
-            tc.color     = math::Vec4(0.94f,0.94f,0.94f,1.0f);
-            tc.font_size = label_style_.font_size;
+            tc.dest      = math::make_box(tx, by, tw, bh);
+            tc.color     = s.text_color;
+            tc.font_size = s.font_size;
             tc.alignment = Alignment::CenterLeft;
             tc.depth     = d++;
             tc.clip      = noclip;
             if (base_.has_focus()) {
                 tc.show_cursor  = true;
                 tc.cursor_pos   = caret;
-                tc.cursor_color = math::Vec4(0.94f,0.94f,0.94f,1.0f);
+                tc.cursor_color = s.cursor_color;
             }
             ri_.texts.push_back(tc);
-        } else if (!placeholder_.empty()) {
-            ri_.push_text(placeholder_.c_str(), bx+6, by, bw-12, bh,
-                          math::Vec4(0.5f,0.5f,0.5f,0.7f), label_style_.font_size,
-                          Alignment::CenterLeft, d++, noclip);
         }
         ri_.finalize();
         base_.clear_dirty();
@@ -661,10 +675,13 @@ public:
                           math::Vec4(0.4f,0.4f,0.42f,0.7f), d++, noclip);
         }
 
-        // Focus border + outer border
+        // Focus border + outer border (outer drawn only when the border colour is
+        // opaque — a transparent-background editbox embedded in other content sets
+        // alpha 0 to render borderless, like inline text).
         if (base_.has_focus())
             ri_.push_outline(bx-1, by-1, bw+2, bh+2, math::Vec4(0,0.48f,0.8f,1), d, noclip);
-        ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
+        if (s.border_color.w > 0.0f)
+            ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
 
         ri_.finalize();
         base_.clear_dirty();

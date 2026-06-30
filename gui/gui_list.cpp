@@ -269,18 +269,25 @@ public:
         auto noclip = math::make_box(0,0,0,0);
         int32_t d = 0;
         const auto& s = style_;
-        // Background + border
+        // Background (rounded when corner_radius > 0). The closed box is intentionally
+        // borderless — a caller wanting an outline sets border_width AND a non-zero
+        // dropdown_border_color (the dropdown list below always gets its border).
         math::Vec4 bg = open_ ? s.open_background : s.background_color;
-        ri_.push_rect(bx, by, bw, bh, bg, d++, noclip);
-        ri_.push_outline(bx, by, bw, bh, s.dropdown_border_color, d, noclip);
-        // Selected text or placeholder
+        if (s.corner_radius > 0.0f) ri_.push_round_rect(bx, by, bw, bh, s.corner_radius, bg, d++, noclip);
+        else                        ri_.push_rect(bx, by, bw, bh, bg, d++, noclip);
+        if (s.border_width > 0.0f && s.dropdown_border_color.w > 0.0f)
+            ri_.push_outline(bx, by, bw, bh, s.dropdown_border_color, d, noclip);
+        // Selected text or placeholder (styled font; right edge reserves the arrow).
         int si = find_idx(selected_);
         const char* text = (si >= 0) ? items_[si].text.c_str() : placeholder_.c_str();
         math::Vec4 text_col = (si >= 0) ? s.text_color : s.placeholder_color;
         if (text && text[0])
-            ri_.push_text(text, bx+8, by, bw-26, bh, text_col, 13.0f, Alignment::CenterLeft, d++, noclip);
-        // Arrow indicator
-        ri_.push_rect(bx+bw-18, by+bh/2-3, 8, 6, s.arrow_color, d++, noclip);
+            ri_.push_text(text, bx + s.item_padding, by,
+                          bw - 2.0f * s.item_padding - s.arrow_size, bh,
+                          text_col, s.font_size, Alignment::CenterLeft, d++, noclip);
+        // Arrow (▾ glyph, not a block) at the right, matching a text-drawn chevron.
+        ri_.push_text("\xE2\x96\xBE", bx + bw - s.item_padding - s.arrow_size, by,
+                      s.arrow_size, bh, s.arrow_color, s.font_size, Alignment::Center, d++, noclip);
         // Dropdown list
         if (open_) {
             int count = (int)items_.size();
