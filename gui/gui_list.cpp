@@ -130,13 +130,15 @@ public:
             float ry = by + i * row_h - scroll_y_;
             if (ry + row_h < by || ry > by + bh) continue;
             bool is_sel = (items_[i].id == selected_);
-            math::Vec4 row_bg = is_sel ? s.selected_background
+            bool dis = !items_[i].enabled;
+            math::Vec4 row_bg = (is_sel && !dis) ? s.selected_background
                               : (i%2==0) ? s.row_background : s.row_alt_background;
             ri_.push_rect(bx, ry, bw, row_h, row_bg, d++, clip);
-            math::Vec4 text_col = is_sel ? s.selected_text_color : s.text_color;
+            math::Vec4 text_col = dis ? s.disabled_text_color
+                                : is_sel ? s.selected_text_color : s.text_color;
             if (!items_[i].text.empty())
                 ri_.push_text(items_[i].text.c_str(), bx+s.item_padding, ry, bw-s.item_padding, row_h,
-                              text_col, 11.0f, Alignment::CenterLeft, d++, clip);
+                              text_col, s.font_size, Alignment::CenterLeft, d++, clip);
         }
         // Embedded scrollbar
         float content_h = (float)count * row_h;

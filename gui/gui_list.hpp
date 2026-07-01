@@ -28,6 +28,7 @@ struct ListBoxStyle {
     math::Vec4 hover_background;
     math::Vec4 text_color;
     math::Vec4 selected_text_color;
+    math::Vec4 disabled_text_color;   // dimmer text for disabled rows (e.g. group headers)
     math::Vec4 icon_color;
     math::Vec4 separator_color;
     float row_height = 24.0f;
@@ -44,6 +45,7 @@ struct ListBoxStyle {
         s.hover_background = color_rgba8(62, 62, 66);
         s.text_color = color_rgba8(241, 241, 241);
         s.selected_text_color = color_rgba8(255, 255, 255);
+        s.disabled_text_color = color_rgba8(140, 142, 150);
         s.icon_color = color_rgba8(200, 200, 200);
         s.separator_color = color_rgba8(63, 63, 70);
         return s;
