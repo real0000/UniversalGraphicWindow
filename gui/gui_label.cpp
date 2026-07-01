@@ -69,77 +69,94 @@ class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput> {
     std::string text_, placeholder_, preedit_;
     LabelStyle label_style_ = LabelStyle::default_style();
     TextInputStyle ti_style_ = TextInputStyle::default_style();
-    int cursor_ = 0, sel_start_ = 0, sel_len_ = 0, max_length_ = 0, preedit_cursor_ = 0;
-    bool password_ = false, read_only_ = false;
+    // Selection = [min(anchor_,cursor_), max]. anchor_==cursor_ means no selection.
+    int cursor_ = 0, anchor_ = 0, max_length_ = 0, preedit_cursor_ = 0;
+    bool password_ = false, read_only_ = false, dragging_ = false;
     ITextMeasurer* measurer_ = nullptr;   // maps a click x → caret char index
     mutable WidgetRenderInfo ri_;
     // Key codes from window::Key enum
     enum : int { K_Enter=308, K_Backspace=309, K_Delete=310,
                  K_Home=312, K_End=313, K_Left=316, K_Right=317 };
+    enum { MOD_SHIFT = 1 };   // handle_key modifier bits (see the chat's on_key)
+    int  sel_lo() const { return std::min(anchor_, cursor_); }
+    int  sel_hi() const { return std::max(anchor_, cursor_); }
+    bool has_sel() const { return anchor_ != cursor_; }
+    void clamp_caret() { cursor_ = std::max(0, std::min(cursor_, (int)text_.size())); }
     // x where the text starts (matches get_render_info + the flatten's +2 nudge).
     float text_origin_x() const {
         return math::x(math::box_min(base_.get_bounds())) + ti_style_.padding + 2.0f;
     }
+    int caret_from_x(float px) const {
+        return measurer_ ? index_at_x(*measurer_, text_.c_str(), ti_style_.font_size, px - text_origin_x()) : cursor_;
+    }
 public:
     bool is_focusable() const override { return true; }
     void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
-    // Click positions the caret at the nearest character boundary (needs a measurer).
+    // Click positions the caret (drops selection); drag extends it (rubber-band select).
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (btn == MouseButton::Left && pressed && base_.hit_test(p)) {
             base_.set_focus(true);
-            if (measurer_ && preedit_.empty())
-                cursor_ = index_at_x(*measurer_, text_.c_str(), ti_style_.font_size, math::x(p) - text_origin_x());
-            sel_start_ = cursor_; sel_len_ = 0;
+            if (preedit_.empty()) { cursor_ = caret_from_x(math::x(p)); clamp_caret(); }
+            anchor_ = cursor_; dragging_ = true;
+            base_.mark_dirty();
             return true;
         }
+        if (btn == MouseButton::Left && !pressed) dragging_ = false;
         return WidgetBase::handle_mouse_button(btn, pressed, p);
+    }
+    bool handle_mouse_move(const math::Vec2& p) override {
+        if (dragging_ && preedit_.empty()) { cursor_ = caret_from_x(math::x(p)); clamp_caret(); base_.mark_dirty(); return true; }
+        return WidgetBase::handle_mouse_move(p);
     }
     bool handle_text_input(const char* t) override {
         if (!read_only_ && t) {
-            if (sel_len_ > 0) delete_selection();
+            if (has_sel()) delete_selection();
             std::string s(t);
             if (max_length_ > 0 && (int)(text_.size() + s.size()) > max_length_) return false;
-            text_.insert(cursor_, s); cursor_ += (int)s.size();
+            text_.insert(cursor_, s); cursor_ += (int)s.size(); anchor_ = cursor_;
         }
         return true;
     }
-    bool handle_key(int code, bool pressed, int) override {
+    // code = window::Key; mods bit MOD_SHIFT extends the selection instead of collapsing it.
+    bool handle_key(int code, bool pressed, int mods) override {
         if (!pressed) return false;
+        const bool shift = (mods & MOD_SHIFT) != 0;
+        auto move = [&](int to) { cursor_ = std::max(0, std::min(to, (int)text_.size())); if (!shift) anchor_ = cursor_; };
         switch (code) {
-            case K_Left:      if (cursor_ > 0) --cursor_; return true;
-            case K_Right:     if (cursor_ < (int)text_.size()) ++cursor_; return true;
-            case K_Home:      cursor_ = 0; return true;
-            case K_End:       cursor_ = (int)text_.size(); return true;
-            case K_Backspace: if (!read_only_) { if (sel_len_ > 0) delete_selection(); else delete_backward(1); } return true;
-            case K_Delete:    if (!read_only_) { if (sel_len_ > 0) delete_selection(); else delete_forward(1); } return true;
+            case K_Left:  if (!shift && has_sel()) { cursor_ = anchor_ = sel_lo(); } else move(cursor_ - 1); return true;
+            case K_Right: if (!shift && has_sel()) { cursor_ = anchor_ = sel_hi(); } else move(cursor_ + 1); return true;
+            case K_Home:  move(0); return true;
+            case K_End:   move((int)text_.size()); return true;
+            case K_Backspace: if (!read_only_) { if (has_sel()) delete_selection(); else delete_backward(1); } return true;
+            case K_Delete:    if (!read_only_) { if (has_sel()) delete_selection(); else delete_forward(1); } return true;
         }
         return false;
     }
     const char* get_text() const override { return text_.c_str(); }
-    void set_text(const char* t) override { text_ = t ? t : ""; cursor_ = std::min(cursor_, (int)text_.size()); }
+    void set_text(const char* t) override { text_ = t ? t : ""; cursor_ = std::min(cursor_, (int)text_.size()); anchor_ = cursor_; }
     const LabelStyle& get_label_style() const override { return label_style_; }
     void set_label_style(const LabelStyle& s) override { label_style_ = s; }
     const TextInputStyle& get_text_input_style() const override { return ti_style_; }
     void set_text_input_style(const TextInputStyle& s) override { ti_style_ = s; }
     int get_cursor_position() const override { return cursor_; }
-    void set_cursor_position(int p) override { cursor_ = std::max(0, std::min(p, (int)text_.size())); }
-    int get_selection_start() const override { return sel_start_; }
-    int get_selection_length() const override { return sel_len_; }
-    void set_selection(int s, int l) override { sel_start_ = s; sel_len_ = l; }
-    void select_all() override { sel_start_ = 0; sel_len_ = (int)text_.size(); }
-    void clear_selection() override { sel_start_ = 0; sel_len_ = 0; }
+    void set_cursor_position(int p) override { cursor_ = std::max(0, std::min(p, (int)text_.size())); anchor_ = cursor_; }
+    int get_selection_start() const override { return sel_lo(); }
+    int get_selection_length() const override { return sel_hi() - sel_lo(); }
+    void set_selection(int s, int l) override { anchor_ = std::max(0, s); cursor_ = std::min((int)text_.size(), s + l); }
+    void select_all() override { anchor_ = 0; cursor_ = (int)text_.size(); }
+    void clear_selection() override { anchor_ = cursor_; }
     void insert_text(const char* t) override {
         if (!t || read_only_) return; delete_selection();
-        std::string s(t); text_.insert(cursor_, s); cursor_ += (int)s.size();
+        std::string s(t); text_.insert(cursor_, s); cursor_ += (int)s.size(); anchor_ = cursor_;
     }
     void delete_selection() override {
-        if (sel_len_ > 0) { text_.erase(sel_start_, sel_len_); cursor_ = sel_start_; sel_len_ = 0; }
+        if (has_sel()) { int lo = sel_lo(); text_.erase(lo, sel_hi() - lo); cursor_ = anchor_ = lo; }
     }
     void delete_backward(int n) override {
-        if (cursor_ > 0 && n > 0) { int d = std::min(n, cursor_); text_.erase(cursor_ - d, d); cursor_ -= d; }
+        if (cursor_ > 0 && n > 0) { int d = std::min(n, cursor_); text_.erase(cursor_ - d, d); cursor_ -= d; anchor_ = cursor_; }
     }
     void delete_forward(int n) override {
-        if (cursor_ < (int)text_.size() && n > 0) { int d = std::min(n, (int)text_.size() - cursor_); text_.erase(cursor_, d); }
+        if (cursor_ < (int)text_.size() && n > 0) { int d = std::min(n, (int)text_.size() - cursor_); text_.erase(cursor_, d); anchor_ = cursor_; }
     }
     const char* get_placeholder() const override { return placeholder_.c_str(); }
     void set_placeholder(const char* p) override { placeholder_ = p ? p : ""; }
@@ -199,6 +216,11 @@ public:
                 tc.show_cursor  = true;
                 tc.cursor_pos   = caret;
                 tc.cursor_color = s.cursor_color;
+                if (has_sel() && preedit_.empty()) {   // selection highlight (behind the glyphs)
+                    tc.sel_start    = sel_lo();
+                    tc.sel_end      = sel_hi();
+                    tc.sel_bg_color = s.selection_color;
+                }
             }
             ri_.texts.push_back(tc);
         }
