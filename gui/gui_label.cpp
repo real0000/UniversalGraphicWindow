@@ -81,7 +81,14 @@ class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput> {
     int  sel_lo() const { return std::min(anchor_, cursor_); }
     int  sel_hi() const { return std::max(anchor_, cursor_); }
     bool has_sel() const { return anchor_ != cursor_; }
-    void clamp_caret() { cursor_ = std::max(0, std::min(cursor_, (int)text_.size())); }
+    // UTF-8 code-point boundary helpers (skip 0b10xxxxxx continuation bytes) so the
+    // caret/selection never land mid-glyph — CJK is 2–4 bytes per character. Mirrors
+    // gui.hpp's TextEditState so the widget field edits CJK exactly like the immediate one.
+    int  snap(int i) const { i = std::max(0, std::min(i, (int)text_.size()));
+                             while (i > 0 && ((unsigned char)text_[i] & 0xC0) == 0x80) --i; return i; }
+    int  prev_i(int i) const { i = snap(i); if (i > 0) { --i; while (i > 0 && ((unsigned char)text_[i] & 0xC0) == 0x80) --i; } return i; }
+    int  next_i(int i) const { int n = (int)text_.size(); i = snap(i); if (i < n) { ++i; while (i < n && ((unsigned char)text_[i] & 0xC0) == 0x80) ++i; } return i; }
+    void clamp_caret() { cursor_ = snap(cursor_); }
     // x where the text starts (matches get_render_info + the flatten's +2 nudge).
     float text_origin_x() const {
         return math::x(math::box_min(base_.get_bounds())) + ti_style_.padding + 2.0f;
@@ -123,8 +130,8 @@ public:
         const bool shift = (mods & MOD_SHIFT) != 0;
         auto move = [&](int to) { cursor_ = std::max(0, std::min(to, (int)text_.size())); if (!shift) anchor_ = cursor_; };
         switch (code) {
-            case K_Left:  if (!shift && has_sel()) { cursor_ = anchor_ = sel_lo(); } else move(cursor_ - 1); return true;
-            case K_Right: if (!shift && has_sel()) { cursor_ = anchor_ = sel_hi(); } else move(cursor_ + 1); return true;
+            case K_Left:  if (!shift && has_sel()) { cursor_ = anchor_ = sel_lo(); } else move(prev_i(cursor_)); return true;
+            case K_Right: if (!shift && has_sel()) { cursor_ = anchor_ = sel_hi(); } else move(next_i(cursor_)); return true;
             case K_Home:  move(0); return true;
             case K_End:   move((int)text_.size()); return true;
             case K_Backspace: if (!read_only_) { if (has_sel()) delete_selection(); else delete_backward(1); } return true;
@@ -133,16 +140,16 @@ public:
         return false;
     }
     const char* get_text() const override { return text_.c_str(); }
-    void set_text(const char* t) override { text_ = t ? t : ""; cursor_ = std::min(cursor_, (int)text_.size()); anchor_ = cursor_; }
+    void set_text(const char* t) override { text_ = t ? t : ""; cursor_ = snap(std::min(cursor_, (int)text_.size())); anchor_ = cursor_; }
     const LabelStyle& get_label_style() const override { return label_style_; }
     void set_label_style(const LabelStyle& s) override { label_style_ = s; }
     const TextInputStyle& get_text_input_style() const override { return ti_style_; }
     void set_text_input_style(const TextInputStyle& s) override { ti_style_ = s; }
     int get_cursor_position() const override { return cursor_; }
-    void set_cursor_position(int p) override { cursor_ = std::max(0, std::min(p, (int)text_.size())); anchor_ = cursor_; }
+    void set_cursor_position(int p) override { cursor_ = snap(p); anchor_ = cursor_; }
     int get_selection_start() const override { return sel_lo(); }
     int get_selection_length() const override { return sel_hi() - sel_lo(); }
-    void set_selection(int s, int l) override { anchor_ = std::max(0, s); cursor_ = std::min((int)text_.size(), s + l); }
+    void set_selection(int s, int l) override { anchor_ = snap(s); cursor_ = snap(s + l); }
     void select_all() override { anchor_ = 0; cursor_ = (int)text_.size(); }
     void clear_selection() override { anchor_ = cursor_; }
     void insert_text(const char* t) override {
@@ -152,11 +159,13 @@ public:
     void delete_selection() override {
         if (has_sel()) { int lo = sel_lo(); text_.erase(lo, sel_hi() - lo); cursor_ = anchor_ = lo; }
     }
-    void delete_backward(int n) override {
-        if (cursor_ > 0 && n > 0) { int d = std::min(n, cursor_); text_.erase(cursor_ - d, d); cursor_ -= d; anchor_ = cursor_; }
+    void delete_backward(int n) override {   // n = characters (code points), not bytes
+        while (n-- > 0 && cursor_ > 0) { int p = prev_i(cursor_); text_.erase(p, cursor_ - p); cursor_ = p; }
+        anchor_ = cursor_;
     }
-    void delete_forward(int n) override {
-        if (cursor_ < (int)text_.size() && n > 0) { int d = std::min(n, (int)text_.size() - cursor_); text_.erase(cursor_, d); anchor_ = cursor_; }
+    void delete_forward(int n) override {    // n = characters (code points), not bytes
+        while (n-- > 0 && cursor_ < (int)text_.size()) { int q = next_i(cursor_); text_.erase(cursor_, q - cursor_); }
+        anchor_ = cursor_;
     }
     const char* get_placeholder() const override { return placeholder_.c_str(); }
     void set_placeholder(const char* p) override { placeholder_ = p ? p : ""; }
@@ -166,7 +175,13 @@ public:
     void set_read_only(bool r) override { read_only_ = r; }
     int get_max_length() const override { return max_length_; }
     void set_max_length(int m) override { max_length_ = m; }
-    void set_preedit(const char* t, int c) override { preedit_ = t ? t : ""; preedit_cursor_ = c; }
+    void set_preedit(const char* t, int c) override {   // c = IME cursor in code points → byte offset
+        preedit_ = t ? t : ""; int b = 0;
+        for (int k = 0; k < c && b < (int)preedit_.size(); ++k) {
+            ++b; while (b < (int)preedit_.size() && ((unsigned char)preedit_[b] & 0xC0) == 0x80) ++b;
+        }
+        preedit_cursor_ = b;
+    }
     void clear_preedit() override { preedit_.clear(); preedit_cursor_ = 0; }
     const char* get_preedit() const override { return preedit_.c_str(); }
 
