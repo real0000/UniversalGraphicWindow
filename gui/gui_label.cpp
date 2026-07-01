@@ -17,6 +17,7 @@ class GuiLabel : public WidgetBase<IGuiLabel, WidgetType::Label> {
     std::string text_;
     LabelStyle label_style_ = LabelStyle::default_style();
     ITextMeasurer* measurer_ = nullptr;
+    math::Vec2 explicit_pref_{0.0f, 0.0f};   // pinned size; 0 component = auto/measure
     mutable WidgetRenderInfo ri_;
 public:
     const char* get_text() const override { return text_.c_str(); }
@@ -24,6 +25,7 @@ public:
     const LabelStyle& get_label_style() const override { return label_style_; }
     void set_label_style(const LabelStyle& s) override { label_style_ = s; }
     void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
+    void set_preferred_size(const math::Vec2& s) override { explicit_pref_ = s; }
 
     // Self-size to one line of text (measured) when a measurer is attached, so a
     // sizer can place the label with no caller-side height. Height is the font em
@@ -31,10 +33,15 @@ public:
     // exactly one font's worth of vertical space per line. render() insets text by
     // +4 on the left (see below); mirror that as horizontal padding.
     math::Vec2 get_preferred_size() const override {
-        if (!measurer_) return base_.get_preferred_size();
-        float tw = text_.empty() ? 0.0f
-                 : measurer_->measure_text(text_.c_str(), label_style_.font_size, label_style_.font_name).x();
-        return math::Vec2(tw + 8.0f, label_style_.font_size);
+        math::Vec2 base = base_.get_preferred_size();
+        if (measurer_) {
+            float tw = text_.empty() ? 0.0f
+                     : measurer_->measure_text(text_.c_str(), label_style_.font_size, label_style_.font_name).x();
+            base = math::Vec2(tw + 8.0f, label_style_.font_size);
+        }
+        float w = (math::x(explicit_pref_) > 0.0f) ? math::x(explicit_pref_) : math::x(base);
+        float h = (math::y(explicit_pref_) > 0.0f) ? math::y(explicit_pref_) : math::y(base);
+        return math::Vec2(w, h);
     }
 
     const WidgetRenderInfo& get_render_info(Window*) const override {

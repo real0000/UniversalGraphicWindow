@@ -109,13 +109,15 @@ public:
     // so a sizer can place the button without a caller-supplied height. A pinned
     // axis (explicit_pref_ component > 0) overrides the measured value.
     math::Vec2 get_preferred_size() const override {
-        if (!measurer_) return base_.get_preferred_size();
-        float h  = measurer_->get_line_height(style_.font_size, nullptr);
-        float tw = text_.empty() ? 0.0f
-                 : measurer_->measure_text(text_.c_str(), style_.font_size, nullptr).x();
-        float w = tw + 2.0f * style_.padding;
-        if (math::x(explicit_pref_) > 0.0f) w = math::x(explicit_pref_);
-        if (math::y(explicit_pref_) > 0.0f) h = math::y(explicit_pref_);
+        math::Vec2 base = base_.get_preferred_size();
+        if (measurer_) {
+            float h  = measurer_->get_line_height(style_.font_size, nullptr);
+            float tw = text_.empty() ? 0.0f
+                     : measurer_->measure_text(text_.c_str(), style_.font_size, nullptr).x();
+            base = math::Vec2(tw + 2.0f * style_.padding, h);
+        }
+        float w = (math::x(explicit_pref_) > 0.0f) ? math::x(explicit_pref_) : math::x(base);
+        float h = (math::y(explicit_pref_) > 0.0f) ? math::y(explicit_pref_) : math::y(base);
         return math::Vec2(w, h);
     }
     const ButtonTransition& get_button_transition() const override { return transition_; }
@@ -163,26 +165,27 @@ public:
         bool is_radio = (type_ == ButtonType::Radio);
         bool is_check = (type_ == ButtonType::Checkbox);
         if (is_radio || is_check) {
+            // Control glyph is a square the height of the row (the caller sizes the
+            // row); the label follows one half-box to its right.
+            const float box = rh;
             if (base_.has_focus())
-                ri_.push_outline(rx, ry, rw, rh, s.focus_border_color, d, noclip);
+                ri_.push_outline(rx, ry, box, box, s.focus_border_color, d, noclip);
             if (is_check) {
-                float cbx = rx + 4, cby = ry + rh/2 - 6;
-                math::Vec4 bg = {s.background_color.x*ts.tint.x, s.background_color.y*ts.tint.y,
-                                 s.background_color.z*ts.tint.z, s.background_color.w*ts.tint.w};
-                ri_.push_rect(cbx, cby, 12, 12, bg, d++, noclip);
-                ri_.push_outline(cbx, cby, 12, 12, s.border_color, d, noclip);
-                if (checked_) ri_.push_rect(cbx+3, cby+3, 6, 6, s.checked_color, d++, noclip);
+                // Filled square (checked → checked_color, else background) + a centred "x".
+                ri_.push_rect(rx, ry, box, box, checked_ ? s.checked_color : s.background_color, d++, noclip);
+                if (s.border_color.w > 0.0f) ri_.push_outline(rx, ry, box, box, s.border_color, d, noclip);
+                if (checked_) ri_.push_text("x", rx, ry, box, box, s.text_color, s.font_size, Alignment::Center, d++, noclip);
             } else {
-                float rcx = rx + 10, rcy = ry + rh/2;
-                ri_.push_circle(rcx, rcy, 6, s.border_color, d++, noclip);
-                math::Vec4 bg = {s.background_color.x*ts.tint.x, s.background_color.y*ts.tint.y,
-                                 s.background_color.z*ts.tint.z, s.background_color.w*ts.tint.w};
-                ri_.push_circle(rcx, rcy, 5, bg, d++, noclip);
-                if (checked_) ri_.push_circle(rcx, rcy, 3, s.checked_color, d++, noclip);
+                float r = box * 0.5f, rcx = rx + r, rcy = ry + r;
+                ri_.push_circle(rcx, rcy, r, s.border_color, d++, noclip);
+                ri_.push_circle(rcx, rcy, r - 1.0f, s.background_color, d++, noclip);
+                if (checked_) ri_.push_circle(rcx, rcy, r * 0.5f, s.checked_color, d++, noclip);
             }
-            if (!text_.empty())
-                ri_.push_text(text_.c_str(), rx+22, ry, rw-22, rh,
+            if (!text_.empty()) {
+                float lx = rx + box + box * 0.5f;
+                ri_.push_text(text_.c_str(), lx, ry, rw - (lx - rx), box,
                               s.text_color, s.font_size, Alignment::CenterLeft, d++, noclip);
+            }
         } else {
             math::Vec4 base_bg;
             switch (anim_to_) {
