@@ -71,12 +71,29 @@ class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput> {
     TextInputStyle ti_style_ = TextInputStyle::default_style();
     int cursor_ = 0, sel_start_ = 0, sel_len_ = 0, max_length_ = 0, preedit_cursor_ = 0;
     bool password_ = false, read_only_ = false;
+    ITextMeasurer* measurer_ = nullptr;   // maps a click x → caret char index
     mutable WidgetRenderInfo ri_;
     // Key codes from window::Key enum
     enum : int { K_Enter=308, K_Backspace=309, K_Delete=310,
                  K_Home=312, K_End=313, K_Left=316, K_Right=317 };
+    // x where the text starts (matches get_render_info + the flatten's +2 nudge).
+    float text_origin_x() const {
+        return math::x(math::box_min(base_.get_bounds())) + ti_style_.padding + 2.0f;
+    }
 public:
     bool is_focusable() const override { return true; }
+    void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
+    // Click positions the caret at the nearest character boundary (needs a measurer).
+    bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
+        if (btn == MouseButton::Left && pressed && base_.hit_test(p)) {
+            base_.set_focus(true);
+            if (measurer_ && preedit_.empty())
+                cursor_ = index_at_x(*measurer_, text_.c_str(), ti_style_.font_size, math::x(p) - text_origin_x());
+            sel_start_ = cursor_; sel_len_ = 0;
+            return true;
+        }
+        return WidgetBase::handle_mouse_button(btn, pressed, p);
+    }
     bool handle_text_input(const char* t) override {
         if (!read_only_ && t) {
             if (sel_len_ > 0) delete_selection();
