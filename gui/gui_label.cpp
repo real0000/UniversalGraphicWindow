@@ -720,10 +720,12 @@ public:
             }
         }
 
-        // Auto-scrollbar
+        // Auto-scrollbar — only for real overflow: line_h = font_size * line_height
+        // reintroduces float error, so a content-sized box can measure fractionally
+        // "taller" than itself and grow a phantom scrollbar without the tolerance.
         float content_h = lc * line_h;
         float scroll_offset = first_vis_ * line_h;
-        if (content_h > bh) {
+        if (content_h > bh + 0.5f) {
             const float sb_w = 10.0f;
             float sb_x = bx + bw - sb_w - 1;
             ri_.push_rect(sb_x, by, sb_w, bh, math::Vec4(0.12f,0.12f,0.13f,0.6f), d++, noclip);
