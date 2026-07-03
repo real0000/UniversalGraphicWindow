@@ -5,6 +5,7 @@
 #include "window.hpp"
 #include <cstring>
 #include <cctype>
+#include <chrono>
 #include <thread>
 
 namespace window {
@@ -280,6 +281,20 @@ void Window::show_font_dialog_async(const FontDialogOptions& options, FontDialog
     std::thread([opts, callback]() {
         callback(Window::show_font_dialog(opts));
     }).detach();
+}
+
+//=============================================================================
+// Cross-platform main loop
+//=============================================================================
+
+void Window::run(const std::function<void()>& frame, int frame_delay_ms) {
+    while (!should_close()) {
+        poll_events();
+        if (frame) frame();
+        if (Graphics* g = graphics()) g->present();
+        if (frame_delay_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(frame_delay_ms));
+    }
 }
 
 } // namespace window

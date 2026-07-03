@@ -690,6 +690,13 @@ public:
     void set_should_close(bool close);
     void poll_events();
 
+    // Cross-platform main loop: poll events → run the app's frame callback →
+    // present, paced by frame_delay_ms, until the window is asked to close.
+    // The callback only describes/renders the frame (via the renderer layer);
+    // event pumping and presentation are owned here, so app code carries no
+    // platform- or graphics-API-specific loop logic.
+    void run(const std::function<void()>& frame, int frame_delay_ms = 8);
+
     //-------------------------------------------------------------------------
     // Message Box
     //-------------------------------------------------------------------------

@@ -1,4 +1,7 @@
 #include "gui_renderer.hpp"
+#include "gui_text_rasterizer.hpp"
+#include "vector_renderer.hpp"
+#include "../gui/gui_context.hpp"
 
 #include "shader_compiler/shader_compiler.hpp"   // HLSL -> backend blob (cached) at runtime
 
@@ -391,6 +394,38 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
         cmd->set_scissor(ScissorRect{ s.sx, s.sy, s.sw, s.sh });
         cmd->draw(s.count, s.first);
     }
+}
+
+void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, GpuTextRasterizer* raster,
+                                         int fb_w, int fb_h, const ClearColor& clear,
+                                         WidgetRenderInfo* immediate, IGuiContext* ctx, float dt,
+                                         window::gfx::VectorRenderer* underlay) {
+    if (!gfx || !cmd || !raster || fb_w <= 0 || fb_h <= 0) return;
+    // Collect every layer BEFORE sync_atlas() so glyphs rasterized this frame
+    // (flatten + widget render-info) are uploaded before the draw.
+    if (immediate) { immediate->finalize(); immediate->flatten(raster); }
+    const WidgetRenderInfo* gri = nullptr;
+    if (ctx) { ctx->begin_frame(dt); gri = &ctx->get_render_info(); }
+    TextureHandle atlas = raster->sync_atlas();
+    const float proj[16] = {
+        2.0f / fb_w, 0.0f,          0.0f, 0.0f,
+        0.0f,       -2.0f / fb_h,   0.0f, 0.0f,
+        0.0f,        0.0f,         -1.0f, 0.0f,
+       -1.0f,        1.0f,          0.0f, 1.0f,
+    };
+    cmd->begin();
+    cmd->set_render_target_backbuffer();
+    window::Viewport vp; vp.x = 0; vp.y = 0; vp.width = float(fb_w); vp.height = float(fb_h);
+    cmd->set_viewport(vp);
+    cmd->clear_color(clear);
+    if (underlay) underlay->end(cmd);
+    if (immediate && immediate->is_valid())
+        render(cmd, *immediate, atlas, proj, fb_w, fb_h, 1.0f, raster->color_atlas());
+    if (gri && gri->is_valid())
+        render(cmd, const_cast<WidgetRenderInfo&>(*gri), atlas, proj, fb_w, fb_h, 1.0f,
+               raster->color_atlas());
+    cmd->end();
+    submit_commander(gfx, cmd);
 }
 
 } // namespace gui

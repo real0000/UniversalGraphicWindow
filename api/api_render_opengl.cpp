@@ -617,6 +617,17 @@ public:
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glDeleteFramebuffers(1, &fbo);
     }
+    bool read_backbuffer(int x, int y, int width, int height, void* dst_rgba8) override {
+        if (!dst_rgba8 || width <= 0 || height <= 0) return false;
+        cur();
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#ifdef GL_BACK
+        glReadBuffer(GL_BACK);
+#endif
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, dst_rgba8);
+        return true;
+    }
 
     // ---- Texture views ------------------------------------------------------
     TextureHandle create_texture_view(const TextureViewDesc& d) override {

@@ -1383,6 +1383,12 @@ public:
     // Read back GPU data to CPU memory (blocking).
     virtual void  read_buffer(BufferHandle h, void* dst, uint32_t size, uint32_t offset = 0) = 0;
     virtual void  read_texture(TextureHandle h, const TextureRegion& region, void* dst) = 0;
+    // Read a rectangle of the current backbuffer as tightly-packed RGBA8 (blocking;
+    // synchronizes with all submitted work). Origin is the backbuffer's native origin
+    // (OpenGL: bottom-left). Returns false where the backend doesn't support it.
+    virtual bool  read_backbuffer(int x, int y, int width, int height, void* dst_rgba8) {
+        (void)x; (void)y; (void)width; (void)height; (void)dst_rgba8; return false;
+    }
 
     // ---- Texture views ------------------------------------------------------
     // A reinterpreting view (format/mip/layer sub-range) onto a texture. Returns a

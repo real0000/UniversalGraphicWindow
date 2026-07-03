@@ -17,7 +17,11 @@
 #include <vector>
 
 namespace window {
+namespace gfx { class VectorRenderer; }   // renderer/vector_renderer.hpp
 namespace gui {
+
+class IGuiContext;        // gui/gui_context.hpp
+class GpuTextRasterizer;  // renderer/gui_text_rasterizer.hpp
 
 // Resolves a GUI image command (file path / in-memory blob / image name) to a GPU
 // texture for sampling. UGW ships no image decoder, so the consumer implements this
@@ -53,6 +57,18 @@ public:
     void render(GraphicCommander* cmd, WidgetRenderInfo& info,
                 TextureHandle atlas, const float proj[16],
                 int fb_w, int fb_h, float scale = 1.0f, TextureHandle color_atlas = {});
+
+    // One COMPLETE window frame through the abstraction, so app frame code carries
+    // no commander/viewport/clear plumbing: begin → backbuffer viewport/clear →
+    // optional vector underlay (caller built its batch; end() draws it) → optional
+    // immediate layer (finalized + flattened here) → optional retained-widget pass
+    // (ctx->begin_frame(dt) → get_render_info) → end → submit. The glyph atlas
+    // syncs AFTER every layer is collected so glyphs rasterized this frame upload
+    // before the draw. Projection = UI pixels, origin top-left.
+    void render_window_frame(Graphics* gfx, GraphicCommander* cmd, GpuTextRasterizer* raster,
+                             int fb_w, int fb_h, const ClearColor& clear,
+                             WidgetRenderInfo* immediate, IGuiContext* ctx, float dt,
+                             window::gfx::VectorRenderer* underlay = nullptr);
 
 private:
     void emit_quad(float x, float y, float w, float h,
