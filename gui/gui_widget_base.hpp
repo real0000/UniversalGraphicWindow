@@ -132,8 +132,13 @@ public:
         bool inside = hit_test(pos);
         if (inside && state_ == WidgetState::Normal) state_ = WidgetState::Hovered;
         else if (!inside && state_ == WidgetState::Hovered) state_ = WidgetState::Normal;
-        for (auto* c : children_) { if (c->handle_mouse_move(pos)) return true; }
-        return inside != was;
+        // Mouse-move is a broadcast: EVERY child must see it so hover leave/enter
+        // updates and an active drag (editbox selection, slider) keep tracking.
+        // Early-outing on the first child that reports a change starves later
+        // siblings — a neighbour's hover-leave would swallow the drag's moves.
+        bool consumed = false;
+        for (auto* c : children_) consumed = c->handle_mouse_move(pos) || consumed;
+        return consumed || (inside != was);
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& pos) override {
         if (!enabled_ || !visible_) return false;
