@@ -959,9 +959,11 @@ void Window::poll_events() {
         }
     };
 
+    bool processed_any = false;
     while (XPending(impl->display)) {
         XEvent event;
         XNextEvent(impl->display, &event);
+        processed_any = true;
 
         // Filter events for XIM
         if (impl->xic && XFilterEvent(&event, impl->xwindow)) {
@@ -1224,6 +1226,11 @@ void Window::poll_events() {
     // Drain any ibus signals that arrived outside a ProcessKeyEvent round-trip
     // (late commits / preedit updates).
     if (impl->use_ibus) impl->ibus.pump();
+
+    // Any processed input is a reason to repaint. Retained widgets also mark
+    // themselves dirty, but this lets a pure immediate-mode drawer (no widget
+    // tree) be event-driven too: input → one repaint, idle → asleep.
+    if (processed_any) impl->needs_paint = true;
 }
 
 //=============================================================================
