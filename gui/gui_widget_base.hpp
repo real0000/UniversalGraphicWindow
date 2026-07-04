@@ -115,10 +115,7 @@ public:
         WidgetRenderInfo::ColorCmd bg;
         bg.dest  = bounds_;
         bg.color = style_.background_color;
-        // Honour the style's corner radius so a container/button renders rounded
-        // (radius 0 → a plain rect, unchanged for existing callers).
-        bg.shape = style_.corner_radius > 0.0f ? DrawShape::RoundRect : DrawShape::Rect;
-        bg.corner_radius = style_.corner_radius;
+        bg.shape = DrawShape::Rect;
         bg.depth = 0;
         bg.clip  = render_info_.clip_rect;
         render_info_.colors.push_back(bg);
