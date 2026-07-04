@@ -98,6 +98,38 @@ class GuiContext : public IGuiContext {
     Window* attached_window_=nullptr;
     float window_dpi_scale_=1.0f;  // Mirror of attached window's DPI scale
 
+    // ---- Event-driven host (see set_host_window / post / pump) --------------
+    Window* host_=nullptr;             // window whose loop drives us (may differ from attached_window_)
+    bool needs_layout_=true;           // root sizer tree must re-flow before next render
+    bool suppress_dirty_notify_=false; // guard: relayout marks widgets dirty; don't re-arm during paint
+    int  last_win_w_=-1, last_win_h_=-1;  // last window size we cascaded to the root
+    int  blink_timer_id_=0;            // caret-blink timer id while a text widget is focused
+    std::function<bool()> pre_render_; // measure hook (after layout, before collect)
+
+    // Push a repaint (and re-layout) request to the host loop. Fired from the root
+    // widget's dirty listener, so ANY widget change schedules exactly one re-layout
+    // + repaint with no app involvement.
+    void notify_dirty() {
+        if (suppress_dirty_notify_) return;
+        needs_layout_ = true;
+        if (host_) host_->request_redraw();
+    }
+    // Arm/disarm the caret-blink timer to match the focused widget. Only a focused
+    // editable text widget needs a periodic repaint; everything else stays idle.
+    void update_blink_timer() {
+        const bool want = host_ && focused_ && focused_->wants_caret_blink();
+        if (want && !blink_timer_id_) {
+            // 500 ms == half of the 1 s caret square wave, so consecutive samples
+            // always land in opposite halves → a clean on/off blink.
+            blink_timer_id_ = host_->add_timer(500, true, [this] {
+                if (host_) host_->request_redraw();   // repaint only, no re-layout
+            });
+        } else if (!want && blink_timer_id_) {
+            host_->remove_timer(blink_timer_id_);
+            blink_timer_id_ = 0;
+        }
+    }
+
     // Intersect two clip rects. An empty (zero-area) box means "no clip", so it is the
     // identity — intersecting with it returns the other.
     static math::Box clip_isect(const math::Box& a, const math::Box& b) {
@@ -209,11 +241,16 @@ public:
     GuiResult initialize() override {
         initialized_=true;
         root_.set_name("root");
+        // Any descendant marking dirty bubbles to the root; this sink turns that
+        // into one scheduled re-layout + repaint on the host loop (event-driven).
+        root_.set_dirty_listener([this] { notify_dirty(); });
         anim_mgr_.reset(create_animation_manager_widget());
         return GuiResult::Success;
     }
     void shutdown() override {
         if (attached_window_) detach_window(attached_window_);
+        if (host_ && blink_timer_id_) host_->remove_timer(blink_timer_id_);
+        blink_timer_id_ = 0; host_ = nullptr;
         owned_widgets_.clear(); modal_stack_.clear(); focused_=nullptr; anim_mgr_.reset(); initialized_=false;
     }
     bool is_initialized() const override { return initialized_; }
@@ -284,6 +321,7 @@ public:
                 if (focused_) focused_->set_focus(false);
                 focused_ = new_focus;
                 if (focused_) focused_->set_focus(true);
+                update_blink_timer();
             }
         }
         return consumed;
@@ -311,6 +349,39 @@ public:
         attached_window_ = nullptr;
     }
 
+    void set_host_window(Window* win) override {
+        if (host_ == win) return;
+        if (host_ && blink_timer_id_) { host_->remove_timer(blink_timer_id_); blink_timer_id_ = 0; }
+        host_ = win;
+        last_win_w_ = last_win_h_ = -1;   // force a root cascade on the next render
+        needs_layout_ = true;
+        update_blink_timer();
+    }
+
+    void post(std::function<void()> fn) override {
+        if (!fn) return;
+        if (host_) {
+            // Run on the UI thread; a posted mutation may change sizing, so mark
+            // for re-layout and repaint. request_redraw() also happens via the
+            // widgets' dirty listener, but request it explicitly in case the task
+            // only toggles visibility on an already-dirty-clean subtree.
+            host_->post_task([this, fn = std::move(fn)]() mutable {
+                fn();
+                needs_layout_ = true;
+                if (host_) host_->request_redraw();
+            });
+        } else {
+            // Headless / no host bound: apply immediately; the caller's next
+            // synchronous render picks it up.
+            fn();
+            needs_layout_ = true;
+        }
+    }
+
+    void pump() override { if (host_) host_->run_pending(); }
+
+    void set_pre_render(std::function<bool()> hook) override { pre_render_ = std::move(hook); }
+
     void apply_dpi_scale_to_viewports(float scale) {
         if (scale <= 0.0f) scale = 1.0f;
         window_dpi_scale_ = scale;
@@ -322,6 +393,36 @@ public:
         overlays_.erase(std::remove(overlays_.begin(), overlays_.end(), w), overlays_.end());
     }
     const WidgetRenderInfo& get_render_info() override {
+        // ---- Automatic layout (event-driven; app never calls cascade/relayout) --
+        // Keep the root filling the host window, and re-flow the sizer tree if any
+        // widget marked dirty since the last render. Done here (once per render,
+        // only when something changed) instead of every frame.
+        if (host_) {
+            int w = 0, h = 0; host_->get_size(&w, &h);
+            float s = window_dpi_scale_; if (s <= 0.0f) s = 1.0f;
+            if (w != last_win_w_ || h != last_win_h_) {
+                last_win_w_ = w; last_win_h_ = h;
+                root_.set_bounds(math::make_box(0.0f, 0.0f, (float)w / s, (float)h / s));
+                needs_layout_ = false;   // set_bounds just re-flowed everything
+            }
+        }
+        if (needs_layout_) {
+            // Re-flow over the CURRENT bounds. Suppress the dirty sink so the
+            // widgets marked dirty by this layout pass don't schedule another one.
+            suppress_dirty_notify_ = true;
+            root_.set_bounds(root_.get_bounds());
+            suppress_dirty_notify_ = false;
+            needs_layout_ = false;
+        }
+        // Measure hook: content sized to the just-laid-out width (e.g. scroll
+        // content height). If it changed sizes, settle with one more re-flow.
+        if (pre_render_) {
+            suppress_dirty_notify_ = true;
+            const bool changed = pre_render_();
+            if (changed) root_.set_bounds(root_.get_bounds());
+            suppress_dirty_notify_ = false;
+        }
+
         frame_ri_.invalidate();
         int32_t depth = 0;
         const math::Box noclip = math::make_box(0, 0, 0, 0);   // top level: no ancestor clip
@@ -366,8 +467,8 @@ public:
     IGuiWidget* get_root() override { return &root_; }
 
     IGuiWidget* get_focused_widget() const override { return focused_; }
-    void set_focused_widget(IGuiWidget* w) override { focused_=w; }
-    void clear_focus() override { focused_=nullptr; }
+    void set_focused_widget(IGuiWidget* w) override { focused_=w; update_blink_timer(); }
+    void clear_focus() override { focused_=nullptr; update_blink_timer(); }
 
     void get_widgets_in_box(const math::Box& box, std::vector<IGuiWidget*>& out) override {
         collect_in_box(&root_, box, out);

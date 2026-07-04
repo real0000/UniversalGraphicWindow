@@ -58,6 +58,8 @@ struct SizerItem {
     float       border     = 0.0f;             // Border width applied to sides selected by flags
     math::Vec2  fixed_size = math::Vec2(0.0f, 0.0f);  // spacers: size; widgets: 0 = use get_preferred_size()
                                                // (Boost points aren't auto-zeroed — must init or add() leaks garbage)
+    float       max_fraction = 0.0f;           // >0: clamp a fixed item's main size to fraction × content
+                                               // (e.g. a side panel of preferred 260px capped at 34% of width)
     bool        visible    = true;
 };
 
@@ -108,6 +110,10 @@ public:
     virtual const SizerItem& get_item(int index) const = 0;
     virtual SizerItem*       find_item(IGuiWidget* widget) = 0;
     virtual void             set_item_visible(IGuiWidget* widget, bool visible) = 0;
+    // Clamp a fixed (proportion 0) item's main-axis size to fraction × the sizer's
+    // content extent (0 = no clamp). Lets "fixed 260px but at most 34% of the
+    // window" panels stay declarative.
+    virtual void             set_item_max_fraction(IGuiWidget* widget, float fraction) = 0;
 
     // --- Geometry ---
 
@@ -185,6 +191,9 @@ public:
 // ============================================================================
 
 IBoxSizer*  create_box_sizer(LayoutDirection direction);
+// Overlay/stack sizer: EVERY visible item fills the whole padded rect. For slots
+// whose children swap by visibility (panel pages, a Send/Stop button pair).
+ISizer*     create_stack_sizer();
 IGridSizer* create_grid_sizer(int cols, float hgap = 0.0f, float vgap = 0.0f);
 IFlowSizer* create_flow_sizer(LayoutDirection direction = LayoutDirection::Horizontal);
 void        destroy_sizer(ISizer* sizer);

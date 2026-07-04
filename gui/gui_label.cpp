@@ -66,6 +66,9 @@ public:
 // ============================================================================
 
 class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput> {
+public:
+    bool wants_caret_blink() const override { return !read_only_; }  // blinking caret when editable+focused
+private:
     std::string text_, placeholder_, preedit_;
     LabelStyle label_style_ = LabelStyle::default_style();
     TextInputStyle ti_style_ = TextInputStyle::default_style();
@@ -250,6 +253,9 @@ public:
 // ============================================================================
 
 class GuiEditBox : public WidgetBase<IGuiEditBox, WidgetType::Custom> {
+public:
+    bool wants_caret_blink() const override { return !read_only_; }  // read-only bubbles never blink
+private:
     std::vector<std::string> lines_{""};
     // Word-wrap: visual display lines derived from lines_ + width (cached). When
     // wrap_ != None each logical line is greedily split to fit the content width

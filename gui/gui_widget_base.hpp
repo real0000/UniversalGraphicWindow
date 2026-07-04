@@ -11,6 +11,7 @@
 #include "gui.hpp"
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -91,7 +92,10 @@ public:
     math::Box get_clip_rect() const override { return clip_rect_; }
     void set_clip_rect(const math::Box& r) override { clip_rect_ = r; }
     bool is_visible() const override { return visible_; }
-    void set_visible(bool v) override { visible_ = v; }
+    // A visibility change alters both what renders AND the sizer layout (a hidden
+    // sizer item yields its space), so it must invalidate — otherwise a shown/hidden
+    // widget keeps its stale bounds until some other change forces a re-layout.
+    void set_visible(bool v) override { if (visible_ != v) { visible_ = v; mark_dirty(); } }
     bool is_enabled() const override { return enabled_; }
     void set_enabled(bool e) override { enabled_ = e; }
     WidgetState get_state() const override { return state_; }
@@ -122,8 +126,15 @@ public:
     void mark_dirty() override {
         dirty_ = true;
         if (parent_) parent_->mark_dirty();
+        // Invalidation sink (set only on the context root): any descendant marking
+        // dirty bubbles here, so the event-driven context learns "something changed"
+        // and schedules a re-layout + repaint — no per-frame poll, no app call.
+        if (dirty_listener_) dirty_listener_();
     }
     bool is_dirty() const override { return dirty_; }
+    // Install a callback fired on every mark_dirty(). The context sets this on its
+    // root widget to drive automatic re-layout/repaint.
+    void set_dirty_listener(std::function<void()> l) { dirty_listener_ = std::move(l); }
     // Allow concrete subclasses to reset dirty after rebuilding their own render_info_
     void clear_dirty() const { dirty_ = false; }
     bool handle_mouse_move(const math::Vec2& pos) override {
@@ -142,7 +153,10 @@ public:
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& pos) override {
         if (!enabled_ || !visible_) return false;
-        for (auto* c : children_) { if (c->handle_mouse_button(btn, pressed, pos)) return true; }
+        // Reverse order: the LAST child renders on top, so it gets first claim —
+        // mirrors find_focusable_at and the paint order.
+        for (auto it = children_.rbegin(); it != children_.rend(); ++it)
+            if ((*it)->handle_mouse_button(btn, pressed, pos)) return true;
         if (!hit_test(pos)) return false;
         if (pressed) state_ = WidgetState::Pressed;
         else if (state_ == WidgetState::Pressed) {
@@ -155,7 +169,8 @@ public:
         return true;
     }
     bool handle_mouse_scroll(float dx, float dy) override {
-        for (auto* c : children_) { if (c->handle_mouse_scroll(dx, dy)) return true; }
+        for (auto it = children_.rbegin(); it != children_.rend(); ++it)
+            if ((*it)->handle_mouse_scroll(dx, dy)) return true;
         return false;
     }
     bool handle_key(int code, bool pressed, int mods) override {
@@ -229,6 +244,7 @@ protected:
     ISizer* sizer_ = nullptr;       // optional: drives child layout + preferred size
     mutable WidgetRenderInfo render_info_;
     mutable bool dirty_ = true;
+    std::function<void()> dirty_listener_;   // fired on mark_dirty (context root only)
 };
 
 // ============================================================================

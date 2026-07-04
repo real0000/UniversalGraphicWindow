@@ -690,12 +690,53 @@ public:
     void set_should_close(bool close);
     void poll_events();
 
-    // Cross-platform main loop: poll events → run the app's frame callback →
-    // present, paced by frame_delay_ms, until the window is asked to close.
-    // The callback only describes/renders the frame (via the renderer layer);
-    // event pumping and presentation are owned here, so app code carries no
-    // platform- or graphics-API-specific loop logic.
-    void run(const std::function<void()>& frame, int frame_delay_ms = 8);
+    // Cross-platform main loop, until the window is asked to close. Owns event
+    // pumping, the posted-task queue, timers, and presentation, so app code
+    // carries no platform- or graphics-API-specific loop logic.
+    //
+    // Two modes, chosen automatically:
+    //   • Event-driven (a paint callback was registered via set_paint): the loop
+    //     BLOCKS in the OS event wait when idle (zero CPU) and only wakes on an
+    //     input event, a posted task (post_task / IGuiContext::post), a due timer
+    //     (e.g. caret blink), or a redraw request. It repaints only when there is
+    //     something to repaint. This is the retained-GUI path.
+    //   • Legacy continuous (no paint callback): polls, runs `update_cb`, presents
+    //     every iteration paced by frame_delay_ms. Immediate-mode drawers use this.
+    //
+    // `update_cb` is optional per-iteration logic for the caller (e.g. a game
+    // loop's simulation step). In event-driven mode, supplying it forces a
+    // continuous repaint cadence; a pure GUI app passes nothing and stays idle.
+    void run(const std::function<void()>& update_cb = {}, int frame_delay_ms = 8);
+
+    //-------------------------------------------------------------------------
+    // Event-driven main-loop services (owned by the window; wake the OS wait)
+    //-------------------------------------------------------------------------
+    // These are the internals the retained-GUI layer (IGuiContext) drives; app
+    // code normally touches only set_paint()/run(). The window owns a self-pipe
+    // so that a task posted from another thread, a due timer, or a redraw request
+    // unblocks the event wait immediately.
+
+    // Register the frame painter (the retained render, WITHOUT present). Called by
+    // run() only when a repaint is actually needed. This is the retained-GUI
+    // equivalent of a platform paint event — not a per-frame poll.
+    void set_paint(const std::function<void()>& paint);
+
+    // Mark the window as needing one repaint and wake the event wait. Thread-safe.
+    void request_redraw();
+
+    // Queue a task to run on the UI (loop) thread and wake the event wait.
+    // Thread-safe — this is the cross-thread UI marshalling primitive.
+    void post_task(std::function<void()> task);
+
+    // Run any queued tasks and fire any due timers on the calling thread, then
+    // return. Used by the loop each wake, and by a synchronous one-shot render.
+    void run_pending();
+
+    // One-shot timer registry. Callbacks fire on the loop thread from run_pending()
+    // once their interval elapses (repeating timers re-arm). add_timer returns an
+    // id for remove_timer; 0 is never a valid id.
+    int  add_timer(int interval_ms, bool repeating, std::function<void()> callback);
+    void remove_timer(int id);
 
     //-------------------------------------------------------------------------
     // Message Box

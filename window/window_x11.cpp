@@ -45,6 +45,12 @@ static constexpr int           kX11Success = 0;     // X11 Success (XGetWindowPr
 #include <dirent.h>     // directory listing for the file dialog
 #include <sys/stat.h>   // stat() to tell files from directories
 #include <unistd.h>
+#include <sys/select.h> // select() for the event-driven main loop
+#include <fcntl.h>      // non-blocking self-pipe
+#include <cerrno>
+#include <mutex>        // task-queue guard
+#include <deque>        // posted-task queue
+#include <chrono>       // steady_clock for timers
 #include <pwd.h>        // home directory fallback
 
 //=============================================================================
@@ -267,6 +273,25 @@ struct Window::Impl {
     input::KeyboardEventDispatcher keyboard_dispatcher;
     input::DefaultKeyboardDevice keyboard_device;
 
+    // ---- Event-driven main loop (see Window::run) ---------------------------
+    // Self-pipe: the loop blocks in select() on the X connection AND read-end of
+    // this pipe; posting a task / requesting a redraw / arming a timer writes a
+    // byte to the write-end, unblocking select() immediately from any thread.
+    int  wake_pipe[2] = {-1, -1};        // [0]=read, [1]=write
+    bool needs_paint = false;            // a repaint is pending
+    std::function<void()> paint;         // retained render (no present)
+    std::mutex               task_mu;    // guards task_queue (cross-thread)
+    std::deque<std::function<void()>> task_queue;
+    struct Timer {
+        int  id = 0;
+        bool repeating = false;
+        std::chrono::steady_clock::duration interval{};
+        std::chrono::steady_clock::time_point due{};
+        std::function<void()> cb;
+    };
+    std::vector<Timer> timers;
+    int next_timer_id = 1;
+
     // XIM for text input (legacy fallback)
     XIM xim = nullptr;
     XIC xic = nullptr;
@@ -381,6 +406,19 @@ Window* create_window_impl(const Config& config, Result* out_result) {
     window->impl = new Window::Impl();
     window->impl->display = display;
     window->impl->screen = screen;
+    // Self-pipe used to unblock the event-driven main loop's select() from any
+    // thread (posted task / redraw request / armed timer). Non-blocking so a
+    // burst of wakes never stalls the poster; the loop drains it on each wake.
+    if (pipe(window->impl->wake_pipe) == 0) {
+        for (int fd : window->impl->wake_pipe) {
+            int fl = fcntl(fd, F_GETFL, 0);
+            if (fl != -1) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+            int fd_fl = fcntl(fd, F_GETFD, 0);
+            if (fd_fl != -1) fcntl(fd, F_SETFD, fd_fl | FD_CLOEXEC);
+        }
+    } else {
+        window->impl->wake_pipe[0] = window->impl->wake_pipe[1] = -1;
+    }
     window->impl->dpi = detect_x11_dpi(display, screen);
     window->impl->dpi_scale = static_cast<float>(window->impl->dpi) / 96.0f;
     // Convert logical → physical px.
@@ -652,6 +690,7 @@ void Window::destroy() {
         if (impl->xwindow) {
             XDestroyWindow(impl->display, impl->xwindow);
         }
+        for (int& fd : impl->wake_pipe) { if (fd != -1) { close(fd); fd = -1; } }
         if (impl->display) {
             // NVIDIA's Vulkan ICD leaves a dangling XESetCloseDisplay hook after
             // vkDestroyInstance, so XCloseDisplay() then jumps into freed driver
@@ -1185,6 +1224,178 @@ void Window::poll_events() {
     // Drain any ibus signals that arrived outside a ProcessKeyEvent round-trip
     // (late commits / preedit updates).
     if (impl->use_ibus) impl->ibus.pump();
+}
+
+//=============================================================================
+// Event-driven main loop (X11)
+//
+// The loop BLOCKS in select() on the X connection fd and the self-pipe read fd
+// when idle — zero CPU until something happens. It wakes on: an X event, a byte
+// written to the self-pipe (post_task / request_redraw / add_timer, from any
+// thread), or a timer's select() timeout expiring. On each wake it pumps X
+// events, runs due timers + posted tasks, then repaints only if needed.
+//=============================================================================
+
+void Window::set_paint(const std::function<void()>& paint) {
+    if (impl) impl->paint = paint;
+}
+
+// Write one byte to the self-pipe to unblock select(). Cheap and idempotent —
+// the pipe is drained wholesale on wake, so many wakes collapse into one.
+static void x11_wake(Window::Impl* impl) {
+    if (impl && impl->wake_pipe[1] != -1) {
+        const char b = 1;
+        ssize_t n = ::write(impl->wake_pipe[1], &b, 1);
+        (void)n;  // EAGAIN (pipe already full of wake bytes) is fine
+    }
+}
+
+void Window::request_redraw() {
+    if (!impl) return;
+    impl->needs_paint = true;
+    x11_wake(impl);
+}
+
+void Window::post_task(std::function<void()> task) {
+    if (!impl || !task) return;
+    {
+        std::lock_guard<std::mutex> lk(impl->task_mu);
+        impl->task_queue.push_back(std::move(task));
+    }
+    x11_wake(impl);
+}
+
+int Window::add_timer(int interval_ms, bool repeating, std::function<void()> callback) {
+    if (!impl || !callback || interval_ms < 0) return 0;
+    Impl::Timer t;
+    t.id        = impl->next_timer_id++;
+    t.repeating = repeating;
+    t.interval  = std::chrono::milliseconds(interval_ms);
+    t.due       = std::chrono::steady_clock::now() + t.interval;
+    t.cb        = std::move(callback);
+    impl->timers.push_back(std::move(t));
+    x11_wake(impl);   // recompute the select() timeout to honour this timer
+    return impl->timers.back().id;
+}
+
+void Window::remove_timer(int id) {
+    if (!impl || id == 0) return;
+    impl->timers.erase(
+        std::remove_if(impl->timers.begin(), impl->timers.end(),
+                       [id](const Impl::Timer& t) { return t.id == id; }),
+        impl->timers.end());
+}
+
+void Window::run_pending() {
+    if (!impl) return;
+    // Fire due timers first (a timer may post a task or request a redraw).
+    const auto now = std::chrono::steady_clock::now();
+    // Snapshot due timers so a callback that (re)arms timers can't invalidate the
+    // iteration; repeating timers are re-armed relative to their scheduled due
+    // time to avoid drift.
+    std::vector<std::function<void()>> due_cbs;
+    for (auto& t : impl->timers) {
+        if (t.due <= now) {
+            due_cbs.push_back(t.cb);
+            if (t.repeating) {
+                do { t.due += t.interval; } while (t.due <= now);
+            } else {
+                t.id = 0;  // mark for removal
+            }
+        }
+    }
+    impl->timers.erase(
+        std::remove_if(impl->timers.begin(), impl->timers.end(),
+                       [](const Impl::Timer& t) { return t.id == 0; }),
+        impl->timers.end());
+    for (auto& cb : due_cbs) if (cb) cb();
+
+    // Then drain posted tasks. Swap under lock so tasks posted from within a task
+    // run on the next wake, not this pass (bounded work per iteration).
+    std::deque<std::function<void()>> batch;
+    {
+        std::lock_guard<std::mutex> lk(impl->task_mu);
+        batch.swap(impl->task_queue);
+    }
+    for (auto& task : batch) if (task) task();
+}
+
+// Milliseconds until the soonest timer is due, or -1 if there are no timers.
+static int x11_next_timeout_ms(Window::Impl* impl) {
+    if (impl->timers.empty()) return -1;
+    auto soonest = impl->timers.front().due;
+    for (const auto& t : impl->timers) if (t.due < soonest) soonest = t.due;
+    auto now = std::chrono::steady_clock::now();
+    if (soonest <= now) return 0;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(soonest - now).count();
+    return ms > 1000000 ? 1000000 : static_cast<int>(ms);
+}
+
+void Window::run(const std::function<void()>& update_cb, int frame_delay_ms) {
+    if (!impl) return;
+
+    // No paint registered → nothing to draw event-driven; fall back to the simple
+    // continuous loop (immediate-mode drawers set no paint and render in update_cb).
+    if (!impl->paint) {
+        while (!should_close()) {
+            poll_events();
+            run_pending();
+            if (update_cb) update_cb();
+            if (Graphics* g = graphics()) g->present();
+            if (frame_delay_ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(frame_delay_ms));
+        }
+        return;
+    }
+
+    const bool continuous = static_cast<bool>(update_cb);
+    impl->needs_paint = true;   // always paint the first frame
+
+    const int x_fd    = ConnectionNumber(impl->display);
+    const int wake_fd = impl->wake_pipe[0];
+
+    while (!should_close()) {
+        // Flush any queued X requests, then block until: an X event arrives, the
+        // self-pipe is poked, or the soonest timer is due. XPending may already
+        // hold buffered events (don't sleep past them).
+        int timeout_ms = x11_next_timeout_ms(impl);
+        if (continuous)
+            timeout_ms = (timeout_ms < 0) ? frame_delay_ms
+                                          : std::min(timeout_ms, frame_delay_ms);
+
+        if (!XPending(impl->display)) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(x_fd, &rfds);
+            int maxfd = x_fd;
+            if (wake_fd != -1) { FD_SET(wake_fd, &rfds); maxfd = std::max(maxfd, wake_fd); }
+
+            timeval  tv;
+            timeval* ptv = nullptr;
+            if (timeout_ms >= 0) {
+                tv.tv_sec  = timeout_ms / 1000;
+                tv.tv_usec = (timeout_ms % 1000) * 1000;
+                ptv = &tv;
+            }
+            int r = ::select(maxfd + 1, &rfds, nullptr, nullptr, ptv);
+            if (r < 0 && errno != EINTR) break;   // fatal select error
+            // Drain wake bytes (coalesced); the flags they signalled are read below.
+            if (wake_fd != -1 && r > 0 && FD_ISSET(wake_fd, &rfds)) {
+                char buf[64];
+                while (::read(wake_fd, buf, sizeof(buf)) > 0) {}
+            }
+        }
+
+        poll_events();     // X input → handlers → widgets (may request_redraw)
+        run_pending();     // due timers (caret blink) + posted UI tasks
+        if (update_cb) { update_cb(); impl->needs_paint = true; }
+
+        if (impl->needs_paint) {
+            impl->needs_paint = false;
+            if (impl->paint) impl->paint();
+            if (Graphics* g = graphics()) g->present();
+        }
+    }
 }
 
 Graphics* Window::graphics() const {

@@ -939,6 +939,12 @@ public:
     // True if render info needs to be rebuilt on the next get_render_info call.
     virtual bool is_dirty() const = 0;
 
+    // True if this widget needs a periodic repaint while focused (a blinking text
+    // caret). The event-driven context arms a low-rate timer while such a widget
+    // holds focus so the caret toggles without any per-frame loop; everything else
+    // repaints purely on change. Default false — only text-entry widgets override.
+    virtual bool wants_caret_blink() const { return false; }
+
     // Input handling
     virtual bool handle_mouse_move(const math::Vec2& position) = 0;
     virtual bool handle_mouse_button(MouseButton button, bool pressed, const math::Vec2& position) = 0;

@@ -9,6 +9,8 @@
 #ifndef WINDOW_GUI_CONTEXT_HPP
 #define WINDOW_GUI_CONTEXT_HPP
 
+#include <functional>   // IGuiContext::post
+
 // Forward declarations
 namespace window {
 class Window;
@@ -93,6 +95,41 @@ public:
     // Automatically unregisters on detach_window() or context shutdown.
     virtual void attach_window(Window* win) = 0;
     virtual void detach_window(Window* win) = 0;
+
+    //-------------------------------------------------------------------------
+    // Event-driven host binding (retained GUI, no per-frame loop)
+    //-------------------------------------------------------------------------
+    // Bind the window whose main loop drives this context, WITHOUT taking over
+    // input (unlike attach_window). Enables three things that make the GUI update
+    // itself the way a webview does — the app only mutates widgets:
+    //   • post(): cross-thread UI marshalling (the "postMessage" of this GUI).
+    //   • automatic re-layout + repaint when any widget marks dirty (the root's
+    //     bounds also auto-follow the window size).
+    //   • a caret-blink timer while a text widget holds focus.
+    // Use this when the app manages its own input routing; use attach_window when
+    // you want the context to own input too.
+    virtual void set_host_window(Window* win) = 0;
+
+    // Queue a widget mutation to run on the UI (loop) thread, then wake the loop.
+    // Thread-safe — call from worker threads (agent/network) to update the UI. The
+    // task runs, the affected sizers re-flow, and only the changed region repaints;
+    // no invalidate()/render() call from the app. This is the ONE cross-thread UI
+    // update primitive (mirrors a webview's postMessage → onmessage handler).
+    virtual void post(std::function<void()> fn) = 0;
+
+    // Drain queued post() tasks and fire due timers on the calling thread. Used by
+    // a synchronous one-shot render (tests/host) so a post()'d change is applied
+    // before the next get_render_info(). The live loop calls this itself.
+    virtual void pump() = 0;
+
+    // Measure hook: run inside get_render_info() AFTER the root has been laid out
+    // (so widget bounds/widths are current) but BEFORE render commands are
+    // collected. This is where content whose size depends on the laid-out width
+    // is sized — e.g. a scroll view's content height from height-for-width text.
+    // Return true if the hook changed any widget's size, so the context re-flows
+    // once more before collecting. Called only on a real render (event-driven),
+    // and expected to self-gate (return false when nothing needs rebuilding).
+    virtual void set_pre_render(std::function<bool()> hook) = 0;
 
     // Overlay widgets: rendered after the root tree (on top), in registration order.
     // Suitable for standalone widgets, dropdowns, dialogs, and context menus.

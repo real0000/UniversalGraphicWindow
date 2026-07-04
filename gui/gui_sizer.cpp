@@ -141,6 +141,9 @@ public:
     void set_item_visible(IGuiWidget* widget, bool visible) override {
         if (auto* item = find_item(widget)) item->visible = visible;
     }
+    void set_item_max_fraction(IGuiWidget* widget, float fraction) override {
+        if (auto* item = find_item(widget)) item->max_fraction = fraction;
+    }
 
     // --- ISizer: geometry ---
 
@@ -186,6 +189,7 @@ class BoxSizer : public SizerBase, public IBoxSizer {
     const SizerItem& get_item(int i) const override { return SizerBase::get_item(i); }
     SizerItem* find_item(IGuiWidget* w) override { return SizerBase::find_item(w); }
     void set_item_visible(IGuiWidget* w, bool v) override { SizerBase::set_item_visible(w,v); }
+    void set_item_max_fraction(IGuiWidget* w, float f) override { SizerBase::set_item_max_fraction(w,f); }
     void set_bounds(const math::Box& b) override { SizerBase::set_bounds(b); }
     math::Box get_bounds() const override { return SizerBase::get_bounds(); }
     void set_padding(float a) override { SizerBase::set_padding(a); }
@@ -270,7 +274,10 @@ public:
             auto b    = resolve_border(item);
             if (item.proportion <= 0) {
                 float main_border = horiz ? b.left+b.right : b.top+b.bottom;
-                fixed_total += (horiz ? math::x(pref) : math::y(pref)) + main_border;
+                float main_sz = horiz ? math::x(pref) : math::y(pref);
+                if (item.max_fraction > 0.0f)
+                    main_sz = std::min(main_sz, area_main * item.max_fraction);
+                fixed_total += main_sz + main_border;
             } else {
                 total_prop += item.proportion;
             }
@@ -289,7 +296,10 @@ public:
             float main_border = horiz ? (b.left + b.right) : (b.top + b.bottom);
             float slot_main;
             if (item.proportion <= 0) {
-                slot_main = (horiz ? math::x(pref) : math::y(pref)) + main_border;
+                float main_sz = horiz ? math::x(pref) : math::y(pref);
+                if (item.max_fraction > 0.0f)
+                    main_sz = std::min(main_sz, area_main * item.max_fraction);
+                slot_main = main_sz + main_border;
             } else {
                 slot_main = (total_prop > 0) ? (avail * item.proportion / (float)total_prop) : 0.0f;
             }
@@ -362,6 +372,7 @@ class GridSizer : public SizerBase, public IGridSizer {
     const SizerItem& get_item(int i) const override { return SizerBase::get_item(i); }
     SizerItem* find_item(IGuiWidget* w) override { return SizerBase::find_item(w); }
     void set_item_visible(IGuiWidget* w, bool v) override { SizerBase::set_item_visible(w,v); }
+    void set_item_max_fraction(IGuiWidget* w, float f) override { SizerBase::set_item_max_fraction(w,f); }
     void set_bounds(const math::Box& b) override { SizerBase::set_bounds(b); }
     math::Box get_bounds() const override { return SizerBase::get_bounds(); }
     void set_padding(float a) override { SizerBase::set_padding(a); }
@@ -476,6 +487,7 @@ class FlowSizer : public SizerBase, public IFlowSizer {
     const SizerItem& get_item(int i) const override { return SizerBase::get_item(i); }
     SizerItem* find_item(IGuiWidget* w) override { return SizerBase::find_item(w); }
     void set_item_visible(IGuiWidget* w, bool v) override { SizerBase::set_item_visible(w,v); }
+    void set_item_max_fraction(IGuiWidget* w, float f) override { SizerBase::set_item_max_fraction(w,f); }
     void set_bounds(const math::Box& b) override { SizerBase::set_bounds(b); }
     math::Box get_bounds() const override { return SizerBase::get_bounds(); }
     void set_padding(float a) override { SizerBase::set_padding(a); }
@@ -612,6 +624,36 @@ public:
 // Factory functions
 // ============================================================================
 
+// ============================================================================
+// StackSizer — every visible item fills the whole padded rect (overlay slots
+// whose children swap by visibility: panel pages, a Send/Stop button pair).
+// ============================================================================
+
+class StackSizer : public SizerBase {
+public:
+    math::Vec2 get_min_size() const override {
+        float w = 0.0f, h = 0.0f;
+        for (const auto& item : items_) {
+            if (!item.visible) continue;
+            auto pref = item_pref_size(item);
+            w = std::max(w, math::x(pref));
+            h = std::max(h, math::y(pref));
+        }
+        return math::Vec2(w + padding_.x + padding_.z, h + padding_.y + padding_.w);
+    }
+    void layout() override {
+        auto cr = content_rect();
+        for (auto& item : items_) {
+            if (!item.visible || (!item.widget && !item.sizer)) continue;
+            item_set_bounds(item, cr);
+        }
+    }
+};
+
+// ============================================================================
+// Factories
+// ============================================================================
+
 IBoxSizer* create_box_sizer(LayoutDirection direction) {
     return new BoxSizer(direction);
 }
@@ -622,6 +664,10 @@ IGridSizer* create_grid_sizer(int cols, float hgap, float vgap) {
 
 IFlowSizer* create_flow_sizer(LayoutDirection direction) {
     return new FlowSizer(direction);
+}
+
+ISizer* create_stack_sizer() {
+    return new StackSizer();
 }
 
 void destroy_sizer(ISizer* sizer) {

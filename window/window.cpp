@@ -285,16 +285,32 @@ void Window::show_font_dialog_async(const FontDialogOptions& options, FontDialog
 
 //=============================================================================
 // Cross-platform main loop
+//
+// The X11 platform provides an event-driven implementation (blocks in select()
+// when idle, wakes on input/posted-task/timer via a self-pipe) plus the posted-
+// task queue, timers, set_paint/request_redraw services — all in window_x11.cpp.
+// Other platforms keep this simple continuous fallback for now (see the "先 X11,
+// win32/macOS/wayland 之後補" note); the event-driven services are X11-only until
+// ported.
 //=============================================================================
 
-void Window::run(const std::function<void()>& frame, int frame_delay_ms) {
+#ifndef WINDOW_PLATFORM_X11
+void Window::run(const std::function<void()>& update_cb, int frame_delay_ms) {
     while (!should_close()) {
         poll_events();
-        if (frame) frame();
+        if (update_cb) update_cb();
         if (Graphics* g = graphics()) g->present();
         if (frame_delay_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(frame_delay_ms));
     }
 }
+// Event-driven services are not yet ported off X11.
+void Window::set_paint(const std::function<void()>&) {}
+void Window::request_redraw() {}
+void Window::post_task(std::function<void()> task) { if (task) task(); }
+void Window::run_pending() {}
+int  Window::add_timer(int, bool, std::function<void()>) { return 0; }
+void Window::remove_timer(int) {}
+#endif // !WINDOW_PLATFORM_X11
 
 } // namespace window
