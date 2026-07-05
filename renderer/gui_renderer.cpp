@@ -399,11 +399,13 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
 void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, GpuTextRasterizer* raster,
                                          int fb_w, int fb_h, const ClearColor& clear,
                                          WidgetRenderInfo* immediate, IGuiContext* ctx, float dt,
-                                         window::gfx::VectorRenderer* underlay) {
+                                         window::gfx::VectorRenderer* underlay,
+                                         WidgetRenderInfo* overlay) {
     if (!gfx || !cmd || !raster || fb_w <= 0 || fb_h <= 0) return;
     // Collect every layer BEFORE sync_atlas() so glyphs rasterized this frame
     // (flatten + widget render-info) are uploaded before the draw.
     if (immediate) { immediate->finalize(); immediate->flatten(raster); }
+    if (overlay)   { overlay->finalize();   overlay->flatten(raster); }
     const WidgetRenderInfo* gri = nullptr;
     if (ctx) { ctx->begin_frame(dt); gri = &ctx->get_render_info(); }
     TextureHandle atlas = raster->sync_atlas();
@@ -424,6 +426,8 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
     if (gri && gri->is_valid())
         render(cmd, const_cast<WidgetRenderInfo&>(*gri), atlas, proj, fb_w, fb_h, 1.0f,
                raster->color_atlas());
+    if (overlay && overlay->is_valid())   // popups/menus on top of the retained widgets
+        render(cmd, *overlay, atlas, proj, fb_w, fb_h, 1.0f, raster->color_atlas());
     cmd->end();
     submit_commander(gfx, cmd);
 }

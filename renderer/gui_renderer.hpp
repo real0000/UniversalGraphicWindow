@@ -62,13 +62,16 @@ public:
     // no commander/viewport/clear plumbing: begin → backbuffer viewport/clear →
     // optional vector underlay (caller built its batch; end() draws it) → optional
     // immediate layer (finalized + flattened here) → optional retained-widget pass
-    // (ctx->begin_frame(dt) → get_render_info) → end → submit. The glyph atlas
-    // syncs AFTER every layer is collected so glyphs rasterized this frame upload
-    // before the draw. Projection = UI pixels, origin top-left.
+    // (ctx->begin_frame(dt) → get_render_info) → optional overlay immediate layer
+    // (drawn LAST, above the retained widgets — for popups/menus that must sit on
+    // top of retained content) → end → submit. The glyph atlas syncs AFTER every
+    // layer is collected so glyphs rasterized this frame upload before the draw.
+    // Projection = UI pixels, origin top-left.
     void render_window_frame(Graphics* gfx, GraphicCommander* cmd, GpuTextRasterizer* raster,
                              int fb_w, int fb_h, const ClearColor& clear,
                              WidgetRenderInfo* immediate, IGuiContext* ctx, float dt,
-                             window::gfx::VectorRenderer* underlay = nullptr);
+                             window::gfx::VectorRenderer* underlay = nullptr,
+                             WidgetRenderInfo* overlay = nullptr);
 
 private:
     void emit_quad(float x, float y, float w, float h,
