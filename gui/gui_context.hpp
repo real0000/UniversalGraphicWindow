@@ -26,6 +26,7 @@ class IGuiTreeView;
 class IGuiTabControl;
 class IGuiListBox;
 class IGuiComboBox;
+class IGuiCanvasView;
 class IGuiDialog;
 class IGuiPopup;
 class IGuiMenu;
@@ -181,6 +182,7 @@ public:
     virtual IGuiTabControl* create_tab_control(TabPosition position) = 0;
     virtual IGuiListBox* create_list_box() = 0;
     virtual IGuiComboBox* create_combo_box() = 0;
+    virtual IGuiCanvasView* create_canvas_view() = 0;
     virtual IGuiDialog* create_dialog(const char* title = nullptr, DialogButtons buttons = static_cast<DialogButtons>(1)) = 0;
     virtual IGuiPopup* create_popup() = 0;
     virtual IGuiMenu* create_menu() = 0;

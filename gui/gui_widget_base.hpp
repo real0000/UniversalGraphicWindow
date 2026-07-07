@@ -74,6 +74,34 @@ public:
             }
         }
     }
+    // Content transform (see IGuiWidget docs): children's space → this space.
+    float content_scale() const override { return content_scale_; }
+    math::Vec2 content_offset() const override { return content_offset_; }
+    void set_content_transform(float scale, const math::Vec2& offset) override {
+        const float s = scale > 0.0f ? scale : 1.0f;
+        // No-change guard: rebinding the same view each event must not schedule
+        // repaints (mark_dirty reaches the event-driven host) — same contract as
+        // set_bounds/set_visible.
+        if (s == content_scale_ &&
+            math::x(offset) == math::x(content_offset_) &&
+            math::y(offset) == math::y(content_offset_)) return;
+        content_scale_ = s;
+        content_offset_ = offset;
+        mark_dirty();
+    }
+    float content_text_min_px() const override { return content_text_min_px_; }
+    void set_content_text_min_px(float px) override { content_text_min_px_ = px; }
+    bool has_content_transform() const {
+        return content_scale_ != 1.0f ||
+               math::x(content_offset_) != 0.0f || math::y(content_offset_) != 0.0f;
+    }
+    // Parent-space position → children's coordinate space.
+    math::Vec2 to_content(const math::Vec2& p) const {
+        if (!has_content_transform()) return p;
+        const float inv = 1.0f / content_scale_;
+        return math::Vec2((math::x(p) - math::x(content_offset_)) * inv,
+                          (math::y(p) - math::y(content_offset_)) * inv);
+    }
     // Sizer-driven container hooks (see IGuiWidget docs).
     void set_sizer(ISizer* s) override {
         sizer_ = s;
@@ -147,16 +175,18 @@ public:
         // updates and an active drag (editbox selection, slider) keep tracking.
         // Early-outing on the first child that reports a change starves later
         // siblings — a neighbour's hover-leave would swallow the drag's moves.
+        const math::Vec2 cpos = to_content(pos);   // children may live in a transformed space
         bool consumed = false;
-        for (auto* c : children_) consumed = c->handle_mouse_move(pos) || consumed;
+        for (auto* c : children_) consumed = c->handle_mouse_move(cpos) || consumed;
         return consumed || (inside != was);
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& pos) override {
         if (!enabled_ || !visible_) return false;
         // Reverse order: the LAST child renders on top, so it gets first claim —
         // mirrors find_focusable_at and the paint order.
+        const math::Vec2 cpos = to_content(pos);
         for (auto it = children_.rbegin(); it != children_.rend(); ++it)
-            if ((*it)->handle_mouse_button(btn, pressed, pos)) return true;
+            if ((*it)->handle_mouse_button(btn, pressed, cpos)) return true;
         if (!hit_test(pos)) return false;
         if (pressed) state_ = WidgetState::Pressed;
         else if (state_ == WidgetState::Pressed) {
@@ -187,8 +217,9 @@ public:
     bool hit_test(const math::Vec2& pos) const override { return math::box_contains(bounds_, pos); }
     IGuiWidget* find_widget_at(const math::Vec2& pos) override {
         if (!visible_ || !hit_test(pos)) return nullptr;
+        const math::Vec2 cpos = to_content(pos);
         for (int i = (int)children_.size() - 1; i >= 0; --i) {
-            if (auto* w = children_[i]->find_widget_at(pos)) return w;
+            if (auto* w = children_[i]->find_widget_at(cpos)) return w;
         }
         return this;
     }
@@ -228,6 +259,9 @@ protected:
     // (skipped by render/sizer measure) instead of a wild rectangle.
     math::Box bounds_ = math::make_box(0.0f, 0.0f, 0.0f, 0.0f);
     math::Vec2 preferred_size_ = math::Vec2(100.0f, 30.0f);
+    float content_scale_ = 1.0f;                                 // children→this space (identity default)
+    math::Vec2 content_offset_ = math::Vec2(0.0f, 0.0f);
+    float content_text_min_px_ = 0.0f;                           // cull descendants' text below this (screen px)
     math::Vec2 min_size_ = math::Vec2(0.0f, 0.0f);
     math::Vec2 max_size_ = math::Vec2(1e12f, 1e12f);
     math::Box clip_rect_ = math::make_box(0.0f, 0.0f, 0.0f, 0.0f);
@@ -291,6 +325,11 @@ public:
     Alignment get_alignment() const override { return base_.get_alignment(); }
     void set_alignment(Alignment a) override { base_.set_alignment(a); }
     void set_event_handler(IGuiEventHandler* h) override { base_.set_event_handler(h); }
+    float content_scale() const override { return base_.content_scale(); }
+    math::Vec2 content_offset() const override { return base_.content_offset(); }
+    void set_content_transform(float s, const math::Vec2& o) override { base_.set_content_transform(s, o); }
+    float content_text_min_px() const override { return base_.content_text_min_px(); }
+    void set_content_text_min_px(float px) override { base_.set_content_text_min_px(px); }
     void update(float dt) override { base_.update(dt); }
     const WidgetRenderInfo& get_render_info(Window* w) const override { return base_.get_render_info(w); }
     void mark_dirty() override { base_.mark_dirty(); }

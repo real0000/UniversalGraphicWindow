@@ -396,6 +396,93 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
     }
 }
 
+namespace {
+
+// ---- CanvasView vector emission -------------------------------------------
+// Backdrop, world grid and retained wires of every visible IGuiCanvasView in
+// the context tree render through the vector underlay (drawn UNDER the widget
+// batch, so wires sit above the grid and below the world-space children). The
+// widget only holds data (gui/ has no renderer dependency); this is the one
+// place that turns it into geometry, once per actually-rendered frame.
+
+void emit_canvas_wire(gfx::VectorRenderer& vr, const IGuiCanvasView& cv,
+                      const CanvasWire& wire, const CanvasStyle& cs) {
+    const int last = (int)wire.points.size() - 1;
+    if (last < 1) return;
+    const CanvasWireStyle& ws = wire.style;
+    const float s = cv.view_scale();
+    std::vector<math::Vec2> sp;
+    sp.reserve(wire.points.size());
+    for (const auto& p : wire.points) sp.push_back(cv.world_to_screen(p));
+    // Smooth curve through the waypoints: cubic segments with Catmull-Rom
+    // handles, first/last tangents forced horizontal (node-editor look). The
+    // vector renderer tessellates each cubic to the camera LOD.
+    vr.set_line_width(std::max(ws.min_width_px, ws.width * s));
+    const float tangent_min = ws.end_tangent_min * s;
+    for (int i = 0; i < last; ++i) {
+        const math::Vec2& P0 = sp[(std::size_t)(i == 0 ? 0 : i - 1)];
+        const math::Vec2& P1 = sp[(std::size_t)i];
+        const math::Vec2& P2 = sp[(std::size_t)(i + 1)];
+        const math::Vec2& P3 = sp[(std::size_t)(i + 2 <= last ? i + 2 : last)];
+        float c1x = math::x(P1) + (math::x(P2) - math::x(P0)) / 6.0f;
+        float c1y = math::y(P1) + (math::y(P2) - math::y(P0)) / 6.0f;
+        float c2x = math::x(P2) - (math::x(P3) - math::x(P1)) / 6.0f;
+        float c2y = math::y(P2) - (math::y(P3) - math::y(P1)) / 6.0f;
+        if (i == 0) {
+            const float k = std::max(std::fabs(math::x(P2) - math::x(P1)) * 0.5f, tangent_min);
+            c1x = math::x(P1) + k; c1y = math::y(P1);
+        }
+        if (i == last - 1) {
+            const float k = std::max(std::fabs(math::x(P2) - math::x(P1)) * 0.5f, tangent_min);
+            c2x = math::x(P2) - k; c2y = math::y(P2);
+        }
+        vr.bezier({math::x(P1), math::y(P1), 0.0f}, {c1x, c1y, 0.0f},
+                  {c2x, c2y, 0.0f}, {math::x(P2), math::y(P2), 0.0f}, ws.color);
+    }
+    if (ws.handles && last >= 2) {
+        // Interior waypoints get a grab ring: wire-coloured disc + backdrop hole.
+        const math::Vec4 hole = ws.handle_hole_color.w > 0.0f ? ws.handle_hole_color
+                                                              : cs.backdrop_color;
+        for (int i = 1; i < last; ++i) {
+            const float hx = math::x(sp[(std::size_t)i]), hy = math::y(sp[(std::size_t)i]);
+            vr.fill_circle(hx, hy, std::max(ws.handle_min_px, ws.handle_radius * s), ws.color);
+            vr.fill_circle(hx, hy, std::max(ws.handle_hole_min_px, ws.handle_hole_radius * s), hole);
+        }
+    }
+}
+
+void emit_canvas(gfx::VectorRenderer& vr, IGuiCanvasView* cv) {
+    const CanvasStyle& cs = cv->get_canvas_style();
+    const math::Box b = cv->get_bounds();
+    const float x = math::x(math::box_min(b)), y = math::y(math::box_min(b));
+    const float w = math::box_width(b), h = math::box_height(b);
+    if (w <= 0.0f || h <= 0.0f) return;
+    if (cs.backdrop_color.w > 0.0f) vr.fill_rect(x, y, w, h, cs.backdrop_color);
+    const float s = cv->view_scale();
+    if (cs.grid_spacing > 0.0f && s >= cs.grid_min_scale) {
+        const math::Vec2 o = cv->view_origin();
+        const float wr = math::x(o) + w / s, wb = math::y(o) + h / s;   // world right/bottom
+        for (float gw = std::ceil(math::x(o) / cs.grid_spacing) * cs.grid_spacing; gw < wr; gw += cs.grid_spacing)
+            vr.fill_rect(math::x(cv->world_to_screen(math::Vec2(gw, 0.0f))), y,
+                         cs.grid_line_px, h, cs.grid_color);
+        for (float gh = std::ceil(math::y(o) / cs.grid_spacing) * cs.grid_spacing; gh < wb; gh += cs.grid_spacing)
+            vr.fill_rect(x, math::y(cv->world_to_screen(math::Vec2(0.0f, gh))),
+                         w, cs.grid_line_px, cs.grid_color);
+    }
+    for (int i = 0; i < cv->wire_count(); ++i)
+        emit_canvas_wire(vr, *cv, cv->get_wire(i), cs);
+}
+
+void emit_canvases(gfx::VectorRenderer& vr, IGuiWidget* w) {
+    if (!w || !w->is_visible()) return;
+    if (w->get_type() == WidgetType::CanvasView)
+        emit_canvas(vr, static_cast<IGuiCanvasView*>(w));
+    for (int i = 0; i < w->get_child_count(); ++i)
+        emit_canvases(vr, w->get_child(i));
+}
+
+} // namespace
+
 void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, GpuTextRasterizer* raster,
                                          int fb_w, int fb_h, const ClearColor& clear,
                                          WidgetRenderInfo* immediate, IGuiContext* ctx, float dt,
@@ -415,6 +502,15 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
         0.0f,        0.0f,         -1.0f, 0.0f,
        -1.0f,        1.0f,          0.0f, 1.0f,
     };
+    // CanvasView widgets (world canvases) draw their backdrop/grid/wires through
+    // the vector underlay. With a context present the facade OWNS the batch —
+    // begin resets last frame's geometry, canvases emit, end() below draws it;
+    // callers must not pre-fill in this mode. (Without a context the underlay is
+    // passed through untouched: the caller built its own batch.)
+    if (underlay && ctx) {
+        underlay->begin(proj, fb_w, fb_h);
+        emit_canvases(*underlay, ctx->get_root());
+    }
     cmd->begin();
     cmd->set_render_target_backbuffer();
     window::Viewport vp; vp.x = 0; vp.y = 0; vp.width = float(fb_w); vp.height = float(fb_h);

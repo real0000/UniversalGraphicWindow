@@ -39,6 +39,7 @@ IGuiScrollView* create_scroll_view_widget();
 
 // gui_list.cpp
 IGuiListBox* create_list_box_widget();
+IGuiCanvasView* create_canvas_view_widget();
 IGuiComboBox* create_combo_box_widget();
 
 // gui_tree.cpp
@@ -144,11 +145,30 @@ class GuiContext : public IGuiContext {
         if (ix1 <= ix0 || iy1 <= iy0) return math::make_box(ix0, iy0, 0, 0);  // empty → fully clipped
         return math::make_box(ix0, iy0, ix1 - ix0, iy1 - iy0);
     }
-    // `parent_clip` is the clip imposed by clip-enabled ancestors (empty = none). A
-    // widget's own commands are clamped to it; clip-enabled widgets (e.g. ScrollView)
-    // tighten the clip handed to their descendants — so scrolled content stays bounded.
+    // Accumulated content transform along the ancestor chain: a command point p in
+    // the current widget's space lands on screen at p*scale + (ox, oy). Identity
+    // (scale 1, offset 0) for every widget outside a transformed container, so the
+    // common path stays a plain copy. text_min_px culls text whose transformed font
+    // drops below that many screen px (0 = never) — set via content_text_min_px().
+    struct CollectXf {
+        float scale = 1.0f;
+        float ox = 0.0f, oy = 0.0f;
+        float text_min_px = 0.0f;
+        bool identity() const { return scale == 1.0f && ox == 0.0f && oy == 0.0f; }
+        math::Box box(const math::Box& b) const {
+            if (math::box_is_empty(b)) return b;   // empty = "no clip" identity — keep it
+            return math::make_box(math::x(math::box_min(b)) * scale + ox,
+                                  math::y(math::box_min(b)) * scale + oy,
+                                  math::box_width(b) * scale, math::box_height(b) * scale);
+        }
+    };
+
+    // `parent_clip` is the clip imposed by clip-enabled ancestors (empty = none), in
+    // SCREEN space. A widget's own commands are clamped to it; clip-enabled widgets
+    // (e.g. ScrollView) tighten the clip handed to their descendants — so scrolled
+    // content stays bounded. `xf` maps this widget's coordinate space to the screen.
     static void collect_recursive(IGuiWidget* w, WidgetRenderInfo& out, int32_t& depth,
-                                  const math::Box& parent_clip) {
+                                  const math::Box& parent_clip, const CollectXf& xf) {
         if (!w || !w->is_visible()) return;
         if (math::box_is_empty(w->get_bounds())) return;
         const WidgetRenderInfo& ri = w->get_render_info(nullptr);
@@ -157,22 +177,82 @@ class GuiContext : public IGuiContext {
         for (const auto& ref : ri.get_draw_order())
             if (ref.depth > local_max) local_max = ref.depth;
         int32_t base = depth;
-        for (auto cmd : ri.colors)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.colors.push_back(cmd); }
-        for (auto cmd : ri.textures) { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.textures.push_back(cmd); }
-        for (auto cmd : ri.slices)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.slices.push_back(cmd); }
-        for (auto cmd : ri.texts)    { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.texts.push_back(cmd); }
+        if (xf.identity()) {
+            for (auto cmd : ri.colors)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.colors.push_back(cmd); }
+            for (auto cmd : ri.textures) { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.textures.push_back(cmd); }
+            for (auto cmd : ri.slices)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.slices.push_back(cmd); }
+            for (auto cmd : ri.texts)    { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.texts.push_back(cmd); }
+        } else {
+            // Transformed subtree: scale + translate every geometric field so the
+            // widget renders exactly as if it had been laid out in screen space.
+            for (auto cmd : ri.colors) {
+                cmd.depth += base;
+                cmd.dest = xf.box(cmd.dest);
+                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                cmd.corner_radius *= xf.scale;
+                if (cmd.shape == DrawShape::Line) {
+                    cmd.line_x1 = cmd.line_x1 * xf.scale + xf.ox;
+                    cmd.line_y1 = cmd.line_y1 * xf.scale + xf.oy;
+                    cmd.line_w *= xf.scale;
+                }
+                out.colors.push_back(cmd);
+            }
+            for (auto cmd : ri.textures) {
+                cmd.depth += base;
+                cmd.dest = xf.box(cmd.dest);
+                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                out.textures.push_back(cmd);
+            }
+            for (auto cmd : ri.slices) {
+                cmd.depth += base;
+                cmd.dest = xf.box(cmd.dest);
+                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                cmd.border.left *= xf.scale; cmd.border.top *= xf.scale;
+                cmd.border.right *= xf.scale; cmd.border.bottom *= xf.scale;
+                out.slices.push_back(cmd);
+            }
+            for (auto cmd : ri.texts) {
+                cmd.font_size *= xf.scale;
+                if (xf.text_min_px > 0.0f && cmd.font_size < xf.text_min_px) continue;
+                cmd.depth += base;
+                cmd.dest = xf.box(cmd.dest);
+                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                out.texts.push_back(cmd);
+            }
+        }
         if (!ri.get_draw_order().empty()) depth = base + local_max + 1;
-        const math::Box child_clip = w->is_clip_enabled() ? clip_isect(parent_clip, w->get_clip_rect()) : parent_clip;
+        const math::Box child_clip = w->is_clip_enabled()
+            ? clip_isect(parent_clip, xf.box(w->get_clip_rect())) : parent_clip;
+        CollectXf cxf = xf;
+        if (w->content_scale() != 1.0f || math::x(w->content_offset()) != 0.0f ||
+            math::y(w->content_offset()) != 0.0f || w->content_text_min_px() > 0.0f) {
+            // Compose: screen = (child*s2 + o2)*scale + offset
+            const float s2 = w->content_scale();
+            cxf.ox = xf.ox + xf.scale * math::x(w->content_offset());
+            cxf.oy = xf.oy + xf.scale * math::y(w->content_offset());
+            cxf.scale = xf.scale * s2;
+            cxf.text_min_px = std::max(xf.text_min_px, w->content_text_min_px());
+        }
         for (int i = 0; i < w->get_child_count(); ++i)
-            collect_recursive(w->get_child(i), out, depth, child_clip);
+            collect_recursive(w->get_child(i), out, depth, child_clip, cxf);
     }
 
-    // Find the deepest visible focusable widget at pos within the given subtree
+    // Find the deepest visible focusable widget at pos within the given subtree.
+    // pos is in the WIDGET's coordinate space; content transforms map it into the
+    // children's space on the way down (mirrors GuiWidget::find_widget_at).
     static IGuiWidget* find_focusable_at(IGuiWidget* w, const math::Vec2& pos) {
         if (!w || !w->is_visible()) return nullptr;
         if (!w->hit_test(pos)) return nullptr;
+        math::Vec2 cpos = pos;
+        const float cs = w->content_scale();
+        const math::Vec2 co = w->content_offset();
+        if (cs != 1.0f || math::x(co) != 0.0f || math::y(co) != 0.0f) {
+            const float inv = 1.0f / cs;
+            cpos = math::Vec2((math::x(pos) - math::x(co)) * inv,
+                              (math::y(pos) - math::y(co)) * inv);
+        }
         for (int i = w->get_child_count() - 1; i >= 0; --i) {
-            if (auto* f = find_focusable_at(w->get_child(i), pos)) return f;
+            if (auto* f = find_focusable_at(w->get_child(i), cpos)) return f;
         }
         return w->is_focusable() ? w : nullptr;
     }
@@ -426,8 +506,9 @@ public:
         frame_ri_.invalidate();
         int32_t depth = 0;
         const math::Box noclip = math::make_box(0, 0, 0, 0);   // top level: no ancestor clip
-        collect_recursive(&root_, frame_ri_, depth, noclip);
-        for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth, noclip);
+        const CollectXf identity;
+        collect_recursive(&root_, frame_ri_, depth, noclip, identity);
+        for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth, noclip, identity);
         frame_ri_.finalize();
         if (text_rasterizer_)
             frame_ri_.flatten(text_rasterizer_);
@@ -524,6 +605,9 @@ public:
     IGuiListBox* create_list_box() override {
         auto* p=create_list_box_widget(); owned_widgets_.emplace_back(p); return p;
     }
+    IGuiCanvasView* create_canvas_view() override {
+        auto* p=create_canvas_view_widget(); owned_widgets_.emplace_back(p); return p;
+    }
     IGuiComboBox* create_combo_box() override {
         auto* p=create_combo_box_widget(); owned_widgets_.emplace_back(p); return p;
     }
@@ -598,7 +682,18 @@ private:
         if(math::box_contains(box, math::box_min(w->get_bounds())) ||
            math::box_contains(box, math::box_max(w->get_bounds())))
             out.push_back(w);
-        for(int i=0;i<w->get_child_count();++i) collect_in_box(w->get_child(i),box,out);
+        // Children of a transformed container live in their own space: map the
+        // query box through the inverse transform before descending.
+        math::Box cbox = box;
+        const float cs = w->content_scale();
+        const math::Vec2 co = w->content_offset();
+        if (cs != 1.0f || math::x(co) != 0.0f || math::y(co) != 0.0f) {
+            const float inv = 1.0f / cs;
+            cbox = math::make_box((math::x(math::box_min(box)) - math::x(co)) * inv,
+                                  (math::y(math::box_min(box)) - math::y(co)) * inv,
+                                  math::box_width(box) * inv, math::box_height(box) * inv);
+        }
+        for(int i=0;i<w->get_child_count();++i) collect_in_box(w->get_child(i),cbox,out);
     }
 };
 

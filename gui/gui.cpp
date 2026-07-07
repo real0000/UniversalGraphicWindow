@@ -50,6 +50,7 @@ const char* widget_type_to_string(WidgetType type) {
         case WidgetType::Image:       return "Image";
         case WidgetType::Separator:   return "Separator";
         case WidgetType::Spacer:      return "Spacer";
+        case WidgetType::CanvasView:  return "CanvasView";
         default:                      return "Unknown";
     }
 }

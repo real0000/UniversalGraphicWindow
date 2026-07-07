@@ -732,6 +732,7 @@ if(WINDOW_ENABLE_GUI)
         gui/gui_controls.cpp
         gui/gui_scroll.cpp
         gui/gui_list.cpp
+        gui/gui_canvas.cpp
         gui/gui_tree.cpp
         gui/gui_tab.cpp
         gui/gui_property.cpp

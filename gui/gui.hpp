@@ -101,7 +101,8 @@ enum class WidgetType : uint8_t {
     TreeView,
     Image,
     Separator,
-    Spacer
+    Spacer,
+    CanvasView      // pannable/zoomable world-coordinate container (gui_canvas.hpp)
 };
 
 enum class MouseButton : uint8_t {
@@ -985,6 +986,23 @@ public:
     virtual void layout_children() = 0;
 
     // -----------------------------------------------------------------------
+    // Optional content transform (world-space containers)
+    // -----------------------------------------------------------------------
+    // Maps the CHILDREN's coordinate space into this widget's space:
+    //   parent_point = child_point * content_scale() + content_offset()
+    // Identity by default. Set on a container whose children live in a
+    // panned/zoomed world (see IGuiCanvasView): render collection scales the
+    // children's draw commands (positions, sizes, radii, stroke widths, font
+    // sizes) and input dispatch inverse-transforms mouse positions — the app
+    // never repositions children for camera changes. content_text_min_px()
+    // culls descendants' text below that many transformed (screen) pixels.
+    virtual float      content_scale() const { return 1.0f; }
+    virtual math::Vec2 content_offset() const { return math::Vec2(0.0f, 0.0f); }
+    virtual void set_content_transform(float scale, const math::Vec2& offset) { (void)scale; (void)offset; }
+    virtual float content_text_min_px() const { return 0.0f; }
+    virtual void  set_content_text_min_px(float px) { (void)px; }
+
+    // -----------------------------------------------------------------------
     // Optional sizer-driven layout (containers)
     // -----------------------------------------------------------------------
     // When a sizer is attached, the widget delegates all child positioning to
@@ -1021,6 +1039,7 @@ public:
 #include "gui_dialog.hpp"       // IGuiDialog, IGuiPopup
 #include "gui_menu.hpp"         // IGuiMenu, IGuiMenuBar
 #include "gui_toolbar.hpp"      // IGuiToolbar, IGuiStatusBar
+#include "gui_canvas.hpp"       // IGuiCanvasView
 #include "gui_panel.hpp"        // IGuiSplitPanel, IGuiDockPanel
 #include "gui_controls.hpp"     // IGuiButton, IGuiSlider, IGuiProgressBar, IGuiColorPicker, IGuiImage
 #include "gui_animation.hpp"    // IGuiAnimation, IGuiAnimationManager
