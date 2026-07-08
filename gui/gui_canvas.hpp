@@ -109,6 +109,85 @@ struct CanvasWire {
 };
 
 // ============================================================================
+// CanvasNode / CanvasPin / CanvasNodeStyle - retained world-space node cards
+//
+// A node editor hands the canvas a NODE MODEL (positions, titles, colours,
+// pins) and the canvas renders each node as a rounded body + header + title +
+// pin dots/labels + selection outline, entirely in world space — the app never
+// creates or positions a single widget. Sizes are WORLD units; the view
+// transform scales them to the screen and culls sub-`text_min_px` text.
+// ============================================================================
+
+struct CanvasNodeStyle {
+    float      corner_radius;       // node body/header rounding (world units)
+    float      header_height;       // header band height (world units)
+    float      row_height;          // vertical spacing between pin rows (world units)
+    float      pin_radius;          // pin dot radius (world units)
+    float      title_font;          // header title font (world units → screen px)
+    float      pin_font;            // pin label font (world units)
+    float      title_pad;           // header title left inset (world units)
+    float      pin_label_pad;       // pin label inset from the node edge (world units)
+    math::Vec4 title_color;         // header title colour
+    math::Vec4 pin_label_color;     // pin label colour
+    float      selection_border;    // selection outline thickness (screen px)
+    math::Vec4 selection_color;     // selection outline colour
+
+    static CanvasNodeStyle default_style() {
+        CanvasNodeStyle s;
+        s.corner_radius   = 6.0f;
+        s.header_height   = 24.0f;
+        s.row_height      = 18.0f;
+        s.pin_radius      = 5.0f;
+        s.title_font      = 14.0f;
+        s.pin_font        = 11.0f;
+        s.title_pad       = 8.0f;
+        s.pin_label_pad   = 8.0f;
+        s.title_color     = color_rgba8(240, 240, 244);
+        s.pin_label_color = color_rgba8(185, 188, 196);
+        s.selection_border = 2.0f;
+        s.selection_color  = color_rgba8(255, 200, 80);
+        return s;
+    }
+};
+
+struct CanvasPin {
+    std::string name;                                  // label (empty = no label)
+    math::Vec4  dot_color = color_rgba8(255, 255, 255);
+    int         row = 0;                               // vertical slot under the header
+    bool        output = false;                        // false = left/input, true = right/output
+
+    bool operator==(const CanvasPin& o) const {
+        return name == o.name && row == o.row && output == o.output &&
+               dot_color.x == o.dot_color.x && dot_color.y == o.dot_color.y &&
+               dot_color.z == o.dot_color.z && dot_color.w == o.dot_color.w;
+    }
+    bool operator!=(const CanvasPin& o) const { return !(*this == o); }
+};
+
+struct CanvasNode {
+    std::string            id;                     // stable identity (for hit-testing/selection)
+    math::Vec2             pos = math::Vec2(0.0f, 0.0f);   // world top-left
+    float                  width = 0.0f;           // world
+    float                  height = 0.0f;          // world
+    std::string            title;
+    math::Vec4             header_color = color_rgba8(70, 74, 86);
+    math::Vec4             body_color   = color_rgba8(40, 42, 48);
+    bool                   selected = false;
+    std::vector<CanvasPin> pins;
+
+    bool operator==(const CanvasNode& o) const {
+        auto veq = [](const math::Vec4& a, const math::Vec4& b) {
+            return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+        };
+        return id == o.id && math::x(pos) == math::x(o.pos) && math::y(pos) == math::y(o.pos) &&
+               width == o.width && height == o.height && title == o.title &&
+               veq(header_color, o.header_color) && veq(body_color, o.body_color) &&
+               selected == o.selected && pins == o.pins;
+    }
+    bool operator!=(const CanvasNode& o) const { return !(*this == o); }
+};
+
+// ============================================================================
 // CanvasView Interface - world-space container + view + wires + rubber band
 // ============================================================================
 
@@ -128,7 +207,19 @@ public:
     virtual math::Vec2 screen_to_world(const math::Vec2& screen) const = 0;
 
     // World-space content container: parent widgets here with WORLD bounds.
+    // (Node editors should use set_nodes instead — see below — and leave this
+    // for extra bespoke overlays.)
     virtual IGuiWidget* content() = 0;
+
+    // Node model (retained; rebuild only when the graph data changes). The
+    // canvas renders each node as a rounded body + header/title + pin dots and
+    // labels + a selection outline, in world space, managing the widgets itself.
+    // set_nodes is idempotent: an unchanged rebind schedules no repaint, so a
+    // data binding may rebuild + rebind on every event. The style is shared by
+    // all nodes (per-node colours live on CanvasNode).
+    virtual const CanvasNodeStyle& get_node_style() const = 0;
+    virtual void set_node_style(const CanvasNodeStyle& style) = 0;
+    virtual void set_nodes(const std::vector<CanvasNode>& nodes) = 0;
 
     // Wires (retained; rebuild only when the underlying data changes)
     virtual int  add_wire(const std::vector<math::Vec2>& world_points,

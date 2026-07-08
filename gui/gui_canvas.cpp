@@ -36,6 +36,89 @@ public:
     }
 };
 
+// Nodes layer: self-drawing child of the content layer. Pushes every node's
+// rounded body + header/title + pin dots/labels + selection ring in WORLD
+// coords; the content transform (world→screen) and the context UI scale carry
+// them to physical px, and sub-text_min_px labels are culled at collect. No
+// child widgets, no pooling — one render_info rebuilt only when the model
+// changes.
+class CanvasNodesLayer : public GuiWidget {
+public:
+    CanvasNodesLayer() : GuiWidget(WidgetType::Container) {
+        GuiStyle st = GuiStyle::default_style();
+        st.background_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+        set_style(st);
+    }
+    const CanvasNodeStyle& node_style() const { return style_; }
+    void set_node_style(const CanvasNodeStyle& s) { style_ = s; reflow(); }
+    void set_nodes(const std::vector<CanvasNode>& nodes) {
+        if (nodes == nodes_) return;              // idempotent rebind
+        nodes_ = nodes;
+        reflow();
+    }
+    // world coords; a canvas move re-anchors via the parent transform, not here.
+    void set_bounds(const math::Box& b) override {
+        if (math::x(math::box_min(b)) == math::x(math::box_min(bounds_)) &&
+            math::y(math::box_min(b)) == math::y(math::box_min(bounds_)) &&
+            math::box_width(b) == math::box_width(bounds_) &&
+            math::box_height(b) == math::box_height(bounds_)) return;
+        bounds_ = b; mark_dirty();
+    }
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        if (!dirty_) return render_info_;
+        render_info_.invalidate();
+        render_info_.clip_rect = bounds_;
+        const CanvasNodeStyle& s = style_;
+        const float lineh = s.pin_font * 1.35f;   // label line height (no measurer here)
+        int32_t d = 0;
+        for (const auto& n : nodes_) {
+            const float x = math::x(n.pos), y = math::y(n.pos), w = n.width, h = n.height;
+            const math::Box clip = bounds_;
+            if (n.selected) {   // rounded ring behind the body
+                const float bw = s.selection_border;
+                render_info_.push_round_rect(x - bw, y - bw, w + 2 * bw, h + 2 * bw,
+                                             s.corner_radius + bw, s.selection_color, d++, clip);
+            }
+            render_info_.push_round_rect(x, y, w, h, s.corner_radius, n.body_color, d++, clip);
+            render_info_.push_round_rect(x, y, w, s.header_height, s.corner_radius, n.header_color, d++, clip);
+            if (!n.title.empty())
+                render_info_.push_text(n.title.c_str(), x + s.title_pad, y, w - 2 * s.title_pad,
+                                       s.header_height, s.title_color, s.title_font,
+                                       Alignment::CenterLeft, d++, clip);
+            for (const auto& p : n.pins) {
+                const float py = y + s.header_height + s.row_height * (float(p.row) + 0.5f);
+                const float px = p.output ? x + w : x;
+                render_info_.push_circle(px, py, s.pin_radius, p.dot_color, d++, clip);
+                if (!p.name.empty())
+                    render_info_.push_text(p.name.c_str(), x + s.pin_label_pad, py - lineh * 0.5f,
+                                           w - 2 * s.pin_label_pad, lineh, s.pin_label_color, s.pin_font,
+                                           p.output ? Alignment::CenterRight : Alignment::CenterLeft, d++, clip);
+            }
+        }
+        render_info_.finalize();
+        dirty_ = false;
+        return render_info_;
+    }
+private:
+    // Cover all nodes so collect visits us (empty bounds are skipped) and the
+    // clip encloses every node. A 1×1 fallback keeps an empty canvas valid.
+    void reflow() {
+        if (nodes_.empty()) { set_bounds(math::make_box(0.0f, 0.0f, 1.0f, 1.0f)); mark_dirty(); return; }
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        const float bw = style_.selection_border;
+        for (const auto& n : nodes_) {
+            x0 = std::min(x0, math::x(n.pos) - bw);
+            y0 = std::min(y0, math::y(n.pos) - bw);
+            x1 = std::max(x1, math::x(n.pos) + n.width + bw);
+            y1 = std::max(y1, math::y(n.pos) + n.height + bw);
+        }
+        set_bounds(math::make_box(x0, y0, x1 - x0, y1 - y0));
+        mark_dirty();
+    }
+    std::vector<CanvasNode> nodes_;
+    CanvasNodeStyle style_ = CanvasNodeStyle::default_style();
+};
+
 // Rubber band: screen-space fill + 1 px outline, sized by the canvas.
 class CanvasRubberBand : public GuiWidget {
 public:
@@ -73,6 +156,7 @@ public:
         base_.set_style(st);
         base_.set_clip_enabled(true);
         content_.set_content_text_min_px(style_.text_min_px);
+        content_.add_child(&nodes_layer_);   // world-space; drawn under app content() overlays
         base_.add_child(&content_);
         base_.add_child(&rubber_);
         rubber_.set_colors(style_.rubber_fill, style_.rubber_border);
@@ -111,6 +195,10 @@ public:
     }
 
     IGuiWidget* content() override { return &content_; }
+
+    const CanvasNodeStyle& get_node_style() const override { return nodes_layer_.node_style(); }
+    void set_node_style(const CanvasNodeStyle& s) override { nodes_layer_.set_node_style(s); }
+    void set_nodes(const std::vector<CanvasNode>& nodes) override { nodes_layer_.set_nodes(nodes); }
 
     int add_wire(const std::vector<math::Vec2>& pts, const CanvasWireStyle& ws) override {
         CanvasWire w;
@@ -224,6 +312,7 @@ private:
     math::Vec2 origin_ = math::Vec2(0.0f, 0.0f);   // world point at the canvas top-left
     float scale_ = 1.0f;                            // screen px per world unit
     CanvasContentLayer content_;
+    CanvasNodesLayer nodes_layer_;                  // self-drawing node cards (world space)
     CanvasRubberBand rubber_;
     math::Box rubber_world_ = math::make_box(0.0f, 0.0f, 0.0f, 0.0f);
     bool rubber_on_ = false;
