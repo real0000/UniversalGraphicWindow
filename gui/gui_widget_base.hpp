@@ -109,7 +109,19 @@ public:
     }
     ISizer* get_sizer() const override { return sizer_; }
     math::Vec2 get_preferred_size() const override {
-        return sizer_ ? sizer_->get_min_size() : preferred_size_;
+        math::Vec2 p = sizer_ ? sizer_->get_min_size() : preferred_size_;
+        // An explicitly pinned axis (set_preferred_size, component > 0) overrides
+        // the measured/sizer value — per the IGuiWidget contract (0 = keep auto).
+        const float ex = math::x(explicit_pref_), ey = math::y(explicit_pref_);
+        return math::Vec2(ex > 0.0f ? ex : math::x(p), ey > 0.0f ? ey : math::y(p));
+    }
+    // Pin the preferred size (a container in a sizer cell reports this as its
+    // fixed extent). Marks dirty so the host re-flows the owning sizer; the
+    // no-change guard keeps per-event rebinds silent.
+    void set_preferred_size(const math::Vec2& s) override {
+        if (math::x(s) == math::x(explicit_pref_) && math::y(s) == math::y(explicit_pref_)) return;
+        explicit_pref_ = s;
+        mark_dirty();
     }
     math::Vec2 get_min_size() const override { return min_size_; }
     math::Vec2 get_max_size() const override { return max_size_; }
@@ -259,6 +271,7 @@ protected:
     // (skipped by render/sizer measure) instead of a wild rectangle.
     math::Box bounds_ = math::make_box(0.0f, 0.0f, 0.0f, 0.0f);
     math::Vec2 preferred_size_ = math::Vec2(100.0f, 30.0f);
+    math::Vec2 explicit_pref_ = math::Vec2(0.0f, 0.0f);         // pinned axes (0 = auto)
     float content_scale_ = 1.0f;                                 // children→this space (identity default)
     math::Vec2 content_offset_ = math::Vec2(0.0f, 0.0f);
     float content_text_min_px_ = 0.0f;                           // cull descendants' text below this (screen px)

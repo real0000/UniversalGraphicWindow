@@ -1651,6 +1651,9 @@ target_include_directories(window PUBLIC
 )
 
 target_compile_definitions(window PUBLIC ${WINDOW_DEFINES})
+# GUI shaders (renderer/shaders/gui*.hlsl) are read at runtime; point the renderer
+# at the source tree's shader dir. A deployed build must ship that folder.
+target_compile_definitions(window PRIVATE WINDOW_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/renderer/shaders")
 target_link_libraries(window PUBLIC ${WINDOW_LIBS})
 
 # Fix parallel PDB write contention on MSVC debug builds

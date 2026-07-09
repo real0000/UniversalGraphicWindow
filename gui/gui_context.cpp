@@ -40,6 +40,7 @@ IGuiScrollView* create_scroll_view_widget();
 // gui_list.cpp
 IGuiListBox* create_list_box_widget();
 IGuiCanvasView* create_canvas_view_widget();
+IGuiCollapseSection* create_collapse_section_widget();
 IGuiComboBox* create_combo_box_widget();
 
 // gui_tree.cpp
@@ -97,7 +98,8 @@ class GuiContext : public IGuiContext {
     std::vector<IGuiWidget*> overlays_;
     mutable WidgetRenderInfo frame_ri_;
     Window* attached_window_=nullptr;
-    float window_dpi_scale_=1.0f;  // Mirror of attached window's DPI scale
+    float window_dpi_scale_=1.0f;  // Mirror of attached window's DPI scale (input to_ui path)
+    float ui_scale_=1.0f;          // global render/layout scale (see set_ui_scale); 1 = logical==physical
 
     // ---- Event-driven host (see set_host_window / post / pump) --------------
     Window* host_=nullptr;             // window whose loop drives us (may differ from attached_window_)
@@ -438,6 +440,23 @@ public:
         update_blink_timer();
     }
 
+    float get_ui_scale() const override { return ui_scale_; }
+    void set_ui_scale(float scale) override {
+        if (scale <= 0.0f) scale = 1.0f;
+        if (scale == ui_scale_) return;
+        ui_scale_ = scale;
+        last_win_w_ = last_win_h_ = -1;   // re-derive the logical root size next render
+        needs_layout_ = true;
+        if (host_) host_->request_redraw();
+    }
+    math::Vec2 to_logical(const math::Vec2& p) const override {
+        const float s = ui_scale_ > 0.0f ? ui_scale_ : 1.0f;
+        return math::Vec2(math::x(p) / s, math::y(p) / s);
+    }
+    math::Vec2 to_physical(const math::Vec2& p) const override {
+        return math::Vec2(math::x(p) * ui_scale_, math::y(p) * ui_scale_);
+    }
+
     void post(std::function<void()> fn) override {
         if (!fn) return;
         if (host_) {
@@ -478,10 +497,11 @@ public:
         // widget marked dirty since the last render. Done here (once per render,
         // only when something changed) instead of every frame.
         if (host_) {
-            int w = 0, h = 0; host_->get_size(&w, &h);
-            float s = window_dpi_scale_; if (s <= 0.0f) s = 1.0f;
+            int w = 0, h = 0; host_->get_size(&w, &h);   // physical px
+            float s = ui_scale_; if (s <= 0.0f) s = 1.0f;
             if (w != last_win_w_ || h != last_win_h_) {
                 last_win_w_ = w; last_win_h_ = h;
+                // Root fills the window in LOGICAL px; collect scales draws by ui_scale.
                 root_.set_bounds(math::make_box(0.0f, 0.0f, (float)w / s, (float)h / s));
                 needs_layout_ = false;   // set_bounds just re-flowed everything
             }
@@ -506,9 +526,12 @@ public:
         frame_ri_.invalidate();
         int32_t depth = 0;
         const math::Box noclip = math::make_box(0, 0, 0, 0);   // top level: no ancestor clip
-        const CollectXf identity;
-        collect_recursive(&root_, frame_ri_, depth, noclip, identity);
-        for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth, noclip, identity);
+        // Root transform = the global UI scale: every collected draw (incl. font
+        // sizes → crisp glyphs) is scaled to physical px. 1.0 = logical==physical.
+        CollectXf root_xf;
+        root_xf.scale = (ui_scale_ > 0.0f) ? ui_scale_ : 1.0f;
+        collect_recursive(&root_, frame_ri_, depth, noclip, root_xf);
+        for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth, noclip, root_xf);
         frame_ri_.finalize();
         if (text_rasterizer_)
             frame_ri_.flatten(text_rasterizer_);
@@ -607,6 +630,9 @@ public:
     }
     IGuiCanvasView* create_canvas_view() override {
         auto* p=create_canvas_view_widget(); owned_widgets_.emplace_back(p); return p;
+    }
+    IGuiCollapseSection* create_collapse_section() override {
+        auto* p=create_collapse_section_widget(); owned_widgets_.emplace_back(p); return p;
     }
     IGuiComboBox* create_combo_box() override {
         auto* p=create_combo_box_widget(); owned_widgets_.emplace_back(p); return p;

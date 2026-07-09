@@ -27,6 +27,7 @@ class IGuiTabControl;
 class IGuiListBox;
 class IGuiComboBox;
 class IGuiCanvasView;
+class IGuiCollapseSection;
 class IGuiDialog;
 class IGuiPopup;
 class IGuiMenu;
@@ -111,6 +112,28 @@ public:
     // you want the context to own input too.
     virtual void set_host_window(Window* win) = 0;
 
+    // Global UI scale (DPI). The whole widget tree is declared in LOGICAL units;
+    // the context lays the root out in logical space and scales every collected
+    // draw command — positions, sizes, corner radii, stroke widths AND font
+    // sizes (so glyphs rasterize at the physical pixel size, staying crisp) — by
+    // this factor at render time. Consumers therefore never multiply by DPI: set
+    // this once (typically to the host window's DPI scale) and author everything
+    // in logical pixels. Input arriving in physical pixels must be divided by it
+    // before hit-testing (the context does this on its own input path; apps that
+    // own input divide themselves). Default 1.0 (logical == physical). The
+    // immediate/overlay layers and the vector underlay are scaled to match by
+    // GpuGuiRenderer::render_window_frame, which reads this value.
+    virtual float get_ui_scale() const = 0;
+    virtual void set_ui_scale(float scale) = 0;
+
+    // Convert between physical (window/event) px and logical (widget) px using
+    // the UI scale, so a consumer that owns its own input never does DPI
+    // arithmetic: divide raw event coords through to_logical() before hit-testing
+    // the logical widget tree. (Input dispatched via dispatch_* is already
+    // converted on the context's own input path.)
+    virtual math::Vec2 to_logical(const math::Vec2& physical) const = 0;
+    virtual math::Vec2 to_physical(const math::Vec2& logical) const = 0;
+
     // Queue a widget mutation to run on the UI (loop) thread, then wake the loop.
     // Thread-safe — call from worker threads (agent/network) to update the UI. The
     // task runs, the affected sizers re-flow, and only the changed region repaints;
@@ -183,6 +206,7 @@ public:
     virtual IGuiListBox* create_list_box() = 0;
     virtual IGuiComboBox* create_combo_box() = 0;
     virtual IGuiCanvasView* create_canvas_view() = 0;
+    virtual IGuiCollapseSection* create_collapse_section() = 0;
     virtual IGuiDialog* create_dialog(const char* title = nullptr, DialogButtons buttons = static_cast<DialogButtons>(1)) = 0;
     virtual IGuiPopup* create_popup() = 0;
     virtual IGuiMenu* create_menu() = 0;

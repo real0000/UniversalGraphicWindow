@@ -22,6 +22,7 @@
 #include <algorithm>
 
 #include "../math_util.hpp"
+#include "gui_theme.hpp"   // GuiColor roles + GuiTheme (draw commands carry a role)
 
 namespace window {
 
@@ -544,6 +545,9 @@ struct WidgetRenderInfo {
         float      line_x1 = 0.0f, line_y1 = 0.0f, line_w = 0.0f;
         // RoundRect shape only: corner radius (clamped to half the smaller side).
         float      corner_radius = 0.0f;
+        // Semantic colour role: when != None the context fills `color` from its
+        // theme at collect time, so the widget carries no colour value.
+        GuiColor   role = GuiColor::None;
     };
 
     // Component: textured quad (atlas layer or file path)
@@ -593,6 +597,8 @@ struct WidgetRenderInfo {
         int32_t      sel_start     = -1;
         int32_t      sel_end       = -1;    // half-open [sel_start, sel_end)
         math::Vec4   sel_bg_color;
+        // Semantic colour role (see ColorCmd::role): themed at collect time.
+        GuiColor     role = GuiColor::None;
     };
 
     std::vector<ColorCmd>   colors;    // solid rects / circles

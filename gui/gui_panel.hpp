@@ -11,6 +11,61 @@ namespace window {
 namespace gui {
 
 // ============================================================================
+// CollapseSection - a header bar that expands/collapses its body
+//
+// Generic disclosure widget: a one-line header (glyph + title, plus an
+// optional right-aligned "extra" slot for action buttons) over a content
+// body. Clicking the header toggles the body; the widget re-reports its
+// preferred size, so any owning sizer re-flows automatically — consumers do
+// no geometry and keep no collapse flag (the state lives here). A toggle
+// fires GuiEventType::ValueChanged (bool_value = expanded) on the widget's
+// event handler. Docks, side-panel sections and consoles are all this.
+// ============================================================================
+
+struct CollapseSectionStyle {
+    math::Vec4  header_color;          // header bar fill
+    math::Vec4  header_border_color;   // 1px line above the header (alpha 0 = none)
+    math::Vec4  header_text_color;
+    math::Vec4  body_color;            // body fill behind the consumer's content
+    float       header_height = 22.0f;
+    float       header_border_px = 1.0f;
+    float       header_pad_x = 8.0f;
+    float       font_size = 12.0f;
+    const char* glyph_collapsed = "\xE2\x96\xB8";   // ▸
+    const char* glyph_expanded  = "\xE2\x96\xBE";   // ▾
+
+    static CollapseSectionStyle default_style() {
+        CollapseSectionStyle s;
+        s.header_color        = color_rgba8(30, 31, 34);
+        s.header_border_color = color_rgba8(62, 62, 68);
+        s.header_text_color   = color_rgba8(190, 192, 198);
+        s.body_color          = color_rgba8(22, 23, 25);
+        return s;
+    }
+};
+
+class IGuiCollapseSection : public IGuiWidget {
+public:
+    virtual ~IGuiCollapseSection() = default;
+
+    virtual const char* get_title() const = 0;
+    virtual void set_title(const char* title) = 0;
+
+    virtual bool is_expanded() const = 0;
+    virtual void set_expanded(bool expanded) = 0;
+
+    // Content container shown when expanded — parent the section's content
+    // here. Give it a preferred height (or a sizer) so the section can size.
+    virtual IGuiWidget* body() = 0;
+
+    // Right-aligned slot in the header for consumer action widgets (buttons…).
+    virtual IGuiWidget* header_extra() = 0;
+
+    virtual const CollapseSectionStyle& get_section_style() const = 0;
+    virtual void set_section_style(const CollapseSectionStyle& style) = 0;
+};
+
+// ============================================================================
 // SplitPanel Interface - Resizable split container
 // ============================================================================
 

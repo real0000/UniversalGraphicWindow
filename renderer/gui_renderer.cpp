@@ -8,6 +8,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <string>
+
+// Directory the GUI shaders (gui.hlsl / gui_image.hlsl) are read from at
+// runtime. CMake sets this to the source tree's renderer/shaders; a deployed
+// build must ship that folder alongside the binary.
+#ifndef WINDOW_SHADER_DIR
+#define WINDOW_SHADER_DIR "renderer/shaders"
+#endif
 
 namespace window {
 namespace gui {
@@ -15,55 +24,21 @@ namespace {
 
 using gfx::ShaderCompiler;
 
-const int FLOATS_PER_VERT = 9;  // pos2 + uvw3 + rgba4
+// pos2 + uvw3 + rgba4 + sdf4. The sdf attribute carries (half_w, half_h,
+// corner_radius, border_width) for the procedural SDF shape path (see gui.hlsl).
+const int FLOATS_PER_VERT = 13;
 
-// One HLSL language for every backend, compiled + disk-cached at runtime with NO per-backend
-// flags. Resources share one set: projection UBO at register(b0) -> binding 0, the texture at
-// register(t1) -> binding 1, the sampler at register(s2) -> binding 2 (distinct numbers so they
-// don't collide in a Vulkan set; SPIRV-Cross folds texture+sampler into a combined sampler for
-// OpenGL). Vertex inputs use TEXCOORD<n> so the RHI maps attribute n.
-//
-// Atlas source: vertex + the glyph/solid pixel shader (sampler2DArray as an alpha mask).
-const char* kHLSL_ATLAS = R"(
-cbuffer Proj : register(b0) { float4x4 uProjection; };
-
-struct VSIn  { float2 pos : TEXCOORD0; float3 uvw : TEXCOORD1; float4 color : TEXCOORD2; };
-struct VSOut { float4 pos : SV_Position; float3 uvw : TEXCOORD0; float4 color : TEXCOORD1; };
-
-VSOut vs_main(VSIn i) {
-    VSOut o;
-    o.pos   = mul(uProjection, float4(i.pos, 0.0, 1.0));
-    o.uvw   = i.uvw;
-    o.color = i.color;
-    return o;
+// Read a whole text file (shader source). Empty vector on failure.
+std::string read_text_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    const std::streamsize n = f.tellg();
+    if (n <= 0) return {};
+    std::string s((size_t)n, '\0');
+    f.seekg(0);
+    f.read(&s[0], n);
+    return s;
 }
-
-Texture2DArray uAtlas      : register(t1);   // R8 signed-distance-field glyph atlas (text)
-SamplerState   uSamp       : register(s2);
-Texture2DArray uColorAtlas : register(t3);   // RGBA colour-emoji glyph atlas
-float4 ps_atlas(VSOut i) : SV_Target {
-    if (i.uvw.z < 0.0) return i.color;                    // solid colour quad
-    if (i.uvw.z >= 4096.0) {                              // colour emoji: sample RGBA directly
-        float3 cuvw = float3(i.uvw.xy, i.uvw.z - 4096.0);
-        float4 c = uColorAtlas.Sample(uSamp, cuvw);
-        return float4(c.rgb, c.a * i.color.a);
-    }
-    // SDF text glyph: 0.5 = the glyph edge. Threshold with screen-space-derivative AA,
-    // so the same atlas stays crisp at any scale; tint by the vertex colour (the 染色).
-    float d  = uAtlas.Sample(uSamp, i.uvw).r;
-    float aa = fwidth(d);
-    float a  = aa > 0.0 ? smoothstep(0.5 - aa, 0.5 + aa, d) : step(0.5, d);
-    return float4(i.color.rgb, i.color.a * a);
-}
-)";
-
-// Image source: full RGBA sampler2D modulated by the vertex colour (tint).
-const char* kHLSL_IMAGE = R"(
-struct VSOut { float4 pos : SV_Position; float3 uvw : TEXCOORD0; float4 color : TEXCOORD1; };
-Texture2D    uImage : register(t1);
-SamplerState uSamp  : register(s2);
-float4 ps_image(VSOut i) : SV_Target { return uImage.Sample(uSamp, i.uvw.xy) * i.color; }
-)";
 
 } // namespace
 
@@ -76,11 +51,16 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     // flags. Works on every backend the RHI supports (the projection is a uniform buffer, not a
     // push constant, so there is no D3D11 restriction).
 #ifdef WINDOW_SUPPORT_SHADER_COMPILER
-    const size_t atlas_len = std::strlen(kHLSL_ATLAS);
-    const size_t image_len = std::strlen(kHLSL_IMAGE);
-    vs_       = ShaderCompiler::compile_and_create_cached(device_, kHLSL_ATLAS, atlas_len, ShaderStage::Vertex,   "vs_main");
-    fs_       = ShaderCompiler::compile_and_create_cached(device_, kHLSL_ATLAS, atlas_len, ShaderStage::Fragment, "ps_atlas");
-    fs_image_ = ShaderCompiler::compile_and_create_cached(device_, kHLSL_IMAGE, image_len, ShaderStage::Fragment, "ps_image");
+    // Read the HLSL from renderer/shaders/ at runtime (source of truth; compiled
+    // + disk-cached for the active backend). gui.hlsl holds vs_main + ps_atlas
+    // (solid / SDF shape / glyph); gui_image.hlsl holds ps_image.
+    const std::string dir     = WINDOW_SHADER_DIR;
+    const std::string atlas   = read_text_file(dir + "/gui.hlsl");
+    const std::string image   = read_text_file(dir + "/gui_image.hlsl");
+    if (atlas.empty() || image.empty()) return false;   // shaders must ship with the binary
+    vs_       = ShaderCompiler::compile_and_create_cached(device_, atlas.c_str(), atlas.size(), ShaderStage::Vertex,   "vs_main");
+    fs_       = ShaderCompiler::compile_and_create_cached(device_, atlas.c_str(), atlas.size(), ShaderStage::Fragment, "ps_atlas");
+    fs_image_ = ShaderCompiler::compile_and_create_cached(device_, image.c_str(), image.size(), ShaderStage::Fragment, "ps_image");
     if (!vs_.valid() || !fs_.valid() || !fs_image_.valid()) return false;
 #else
     return false;   // the GUI renderer's shaders now require the built-in shader compiler
@@ -132,9 +112,10 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     pd.rasterizer.scissor_enable = true;   // we always scissor (full-screen rect = no clip)
     VertexLayout& l = pd.vertex_layout;
     l.attributes[0] = { 0, VertexFormat::Float2, 0,  0 };   // pos
-    l.attributes[1] = { 1, VertexFormat::Float3, 8,  0 };   // uvw
+    l.attributes[1] = { 1, VertexFormat::Float3, 8,  0 };   // uvw (z selects shader path)
     l.attributes[2] = { 2, VertexFormat::Float4, 20, 0 };   // rgba
-    l.attribute_count = 3;
+    l.attributes[3] = { 3, VertexFormat::Float4, 36, 0 };   // sdf (half_w, half_h, radius, border)
+    l.attribute_count = 4;
     l.strides[0]      = FLOATS_PER_VERT * sizeof(float);
     l.buffer_count    = 1;
 
@@ -186,69 +167,51 @@ void GpuGuiRenderer::shutdown() {
     device_ = nullptr;
 }
 
+// One vertex: pos | uvw (z = shader path) | rgba | sdf (half_w,half_h,radius,border).
+void GpuGuiRenderer::push_vert(float px, float py, float u, float vv, float layer,
+                               const math::Vec4& c, float s0, float s1, float s2, float s3) {
+    verts_.push_back(px); verts_.push_back(py);
+    verts_.push_back(u);  verts_.push_back(vv); verts_.push_back(layer);
+    verts_.push_back(c.x); verts_.push_back(c.y); verts_.push_back(c.z); verts_.push_back(c.w);
+    verts_.push_back(s0); verts_.push_back(s1); verts_.push_back(s2); verts_.push_back(s3);
+}
+
 void GpuGuiRenderer::emit_quad(float x, float y, float w, float h,
                                float u0, float v0, float u1, float v1,
                                float layer, const math::Vec4& c) {
-    auto v = [&](float px, float py, float u, float vv) {
-        verts_.push_back(px); verts_.push_back(py);
-        verts_.push_back(u);  verts_.push_back(vv); verts_.push_back(layer);
-        verts_.push_back(c.x); verts_.push_back(c.y); verts_.push_back(c.z); verts_.push_back(c.w);
-    };
+    auto v = [&](float px, float py, float u, float vv) { push_vert(px, py, u, vv, layer, c, 0,0,0,0); };
     v(x,     y,     u0, v0); v(x + w, y,     u1, v0); v(x + w, y + h, u1, v1);
     v(x,     y,     u0, v0); v(x + w, y + h, u1, v1); v(x,     y + h, u0, v1);
 }
 
-void GpuGuiRenderer::emit_circle(float cx, float cy, float radius, const math::Vec4& c) {
-    const int N = 24;
-    auto v = [&](float px, float py) {
-        verts_.push_back(px); verts_.push_back(py);
-        verts_.push_back(0);  verts_.push_back(0); verts_.push_back(-1.0f);
-        verts_.push_back(c.x); verts_.push_back(c.y); verts_.push_back(c.z); verts_.push_back(c.w);
+// One SDF quad (6 verts): rounded box centred at (cx,cy), half-extent (hw,hh),
+// corner radius `radius`, `border` > 0 draws a centred outline ring instead of a
+// fill. Circle = hw==hh==radius. The fragment computes the distance field so the
+// shape is smooth at any scale with free anti-aliasing (see gui.hlsl). Local
+// coords (relative to centre) go in uvw.xy; the quad is grown by a 1px AA margin.
+void GpuGuiRenderer::emit_sdf_box(float cx, float cy, float hw, float hh,
+                                  float radius, float border, const math::Vec4& c) {
+    const float m = 1.0f;                      // AA margin (so the edge isn't clipped)
+    const float ex = hw + m, ey = hh + m;
+    auto v = [&](float lx, float ly) {
+        push_vert(cx + lx, cy + ly, lx, ly, -2.0f, c, hw, hh, radius, border);
     };
-    for (int i = 0; i < N; ++i) {
-        const float a0 = (float(i)     / N) * 6.2831853f;
-        const float a1 = (float(i + 1) / N) * 6.2831853f;
-        v(cx, cy);
-        v(cx + std::cos(a0) * radius, cy + std::sin(a0) * radius);
-        v(cx + std::cos(a1) * radius, cy + std::sin(a1) * radius);
-    }
+    v(-ex, -ey); v(ex, -ey); v(ex, ey);
+    v(-ex, -ey); v(ex, ey);  v(-ex, ey);
 }
 
-// Filled rounded rectangle: 3 cross bands + 4 quarter-circle corner fans. Always
-// emits kRoundRectVerts vertices (degenerate corners when radius≈0) so the draw
-// bookkeeping stays a fixed count. Solid colour (layer = -1).
+void GpuGuiRenderer::emit_circle(float cx, float cy, float radius, const math::Vec4& c) {
+    emit_sdf_box(cx, cy, radius, radius, radius, 0.0f, c);
+}
+
 void GpuGuiRenderer::emit_round_rect(float x, float y, float w, float h, float radius, const math::Vec4& c) {
     const float r = std::max(0.0f, std::min(radius, std::min(w, h) * 0.5f));
-    // 3 bands covering the rect minus the 4 corner squares (18 verts).
-    emit_quad(x,     y + r, w,         h - 2 * r, 0,0,0,0, -1.0f, c);   // middle (full width)
-    emit_quad(x + r, y,     w - 2 * r, r,         0,0,0,0, -1.0f, c);   // top
-    emit_quad(x + r, y + h - r, w - 2 * r, r,     0,0,0,0, -1.0f, c);   // bottom
-    auto v = [&](float px, float py) {
-        verts_.push_back(px); verts_.push_back(py);
-        verts_.push_back(0);  verts_.push_back(0); verts_.push_back(-1.0f);
-        verts_.push_back(c.x); verts_.push_back(c.y); verts_.push_back(c.z); verts_.push_back(c.w);
-    };
-    const float cx[4] = { x + r,     x + w - r, x + w - r, x + r     };  // TL, TR, BR, BL
-    const float cy[4] = { y + r,     y + r,     y + h - r, y + h - r };
-    const float a0[4] = { 3.14159265f, 4.71238898f, 0.0f,        1.57079633f };  // start angles
-    for (int k = 0; k < 4; ++k) {
-        for (int i = 0; i < kRoundRectCornerSegs; ++i) {
-            const float t0 = a0[k] + (float(i)     / kRoundRectCornerSegs) * 1.57079633f;
-            const float t1 = a0[k] + (float(i + 1) / kRoundRectCornerSegs) * 1.57079633f;
-            v(cx[k], cy[k]);
-            v(cx[k] + std::cos(t0) * r, cy[k] + std::sin(t0) * r);
-            v(cx[k] + std::cos(t1) * r, cy[k] + std::sin(t1) * r);
-        }
-    }
+    emit_sdf_box(x + w * 0.5f, y + h * 0.5f, w * 0.5f, h * 0.5f, r, 0.0f, c);
 }
 
 // Thick line p0→p1 as a rotated quad (two triangles), solid colour (layer = -1).
 void GpuGuiRenderer::emit_line(float x0, float y0, float x1, float y1, float width, const math::Vec4& c) {
-    auto v = [&](float px, float py) {
-        verts_.push_back(px); verts_.push_back(py);
-        verts_.push_back(0);  verts_.push_back(0); verts_.push_back(-1.0f);
-        verts_.push_back(c.x); verts_.push_back(c.y); verts_.push_back(c.z); verts_.push_back(c.w);
-    };
+    auto v = [&](float px, float py) { push_vert(px, py, 0, 0, -1.0f, c, 0,0,0,0); };
     float dx = x1 - x0, dy = y1 - y0;
     const float len = std::sqrt(dx * dx + dy * dy);
     if (len < 1e-4f) { emit_quad(x0 - width * 0.5f, y0 - width * 0.5f, width, width, 0,0,0,0, -1.0f, c); return; }
@@ -340,9 +303,9 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
             const auto& c = info.colors[ref.index];
             const float px = math::x(math::box_min(c.dest)), py = math::y(math::box_min(c.dest));
             const float pw = math::box_width(c.dest),        ph = math::box_height(c.dest);
-            if      (c.shape == DrawShape::Circle)    { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vc += 24 * 3; cur.count += 24 * 3; }
+            if      (c.shape == DrawShape::Circle)    { emit_circle(px + pw * 0.5f, py + ph * 0.5f, pw * 0.5f, c.color); vc += kSdfBoxVerts; cur.count += kSdfBoxVerts; }
             else if (c.shape == DrawShape::Line)      { emit_line(px, py, c.line_x1, c.line_y1, c.line_w, c.color);     vc += 6;      cur.count += 6; }
-            else if (c.shape == DrawShape::RoundRect) { emit_round_rect(px, py, pw, ph, c.corner_radius, c.color);      vc += kRoundRectVerts; cur.count += kRoundRectVerts; }
+            else if (c.shape == DrawShape::RoundRect) { emit_round_rect(px, py, pw, ph, c.corner_radius, c.color);      vc += kSdfBoxVerts; cur.count += kSdfBoxVerts; }
             else                                      { emit_quad(px, py, pw, ph, 0,0,0,0, -1.0f, c.color);             vc += 6;      cur.count += 6; }
         } else if (ref.pool == Pool::Texture) {
             const auto& t = info.textures[ref.index];
@@ -406,14 +369,17 @@ namespace {
 // place that turns it into geometry, once per actually-rendered frame.
 
 void emit_canvas_wire(gfx::VectorRenderer& vr, const IGuiCanvasView& cv,
-                      const CanvasWire& wire, const CanvasStyle& cs) {
+                      const CanvasWire& wire, const CanvasStyle& cs, float ui) {
     const int last = (int)wire.points.size() - 1;
     if (last < 1) return;
     const CanvasWireStyle& ws = wire.style;
-    const float s = cv.view_scale();
+    // Everything the canvas produces is LOGICAL; the vector layer draws in
+    // physical px, so world-derived sizes carry the ui (DPI) factor and screen
+    // points are lifted to physical. The *_px floors are already physical.
+    const float s = cv.view_scale() * ui;
     std::vector<math::Vec2> sp;
     sp.reserve(wire.points.size());
-    for (const auto& p : wire.points) sp.push_back(cv.world_to_screen(p));
+    for (const auto& p : wire.points) { math::Vec2 q = cv.world_to_screen(p); sp.push_back(math::Vec2(math::x(q) * ui, math::y(q) * ui)); }
     // Smooth curve through the waypoints: cubic segments with Catmull-Rom
     // handles, first/last tangents forced horizontal (node-editor look). The
     // vector renderer tessellates each cubic to the camera LOD.
@@ -451,34 +417,58 @@ void emit_canvas_wire(gfx::VectorRenderer& vr, const IGuiCanvasView& cv,
     }
 }
 
-void emit_canvas(gfx::VectorRenderer& vr, IGuiCanvasView* cv) {
+// `ui` = the context's UI (DPI) scale: the canvas is laid out in logical px but
+// the vector underlay draws in physical px, so all logical coords/extents are
+// lifted by ui here. Grid line thickness stays physical (a crisp 1 px line).
+void emit_canvas(gfx::VectorRenderer& vr, IGuiCanvasView* cv, float ui) {
     const CanvasStyle& cs = cv->get_canvas_style();
     const math::Box b = cv->get_bounds();
-    const float x = math::x(math::box_min(b)), y = math::y(math::box_min(b));
-    const float w = math::box_width(b), h = math::box_height(b);
+    const float x = math::x(math::box_min(b)) * ui, y = math::y(math::box_min(b)) * ui;
+    const float w = math::box_width(b) * ui, h = math::box_height(b) * ui;
     if (w <= 0.0f || h <= 0.0f) return;
     if (cs.backdrop_color.w > 0.0f) vr.fill_rect(x, y, w, h, cs.backdrop_color);
     const float s = cv->view_scale();
     if (cs.grid_spacing > 0.0f && s >= cs.grid_min_scale) {
         const math::Vec2 o = cv->view_origin();
-        const float wr = math::x(o) + w / s, wb = math::y(o) + h / s;   // world right/bottom
+        const float wr = math::x(o) + math::box_width(b) / s, wb = math::y(o) + math::box_height(b) / s;   // world right/bottom
         for (float gw = std::ceil(math::x(o) / cs.grid_spacing) * cs.grid_spacing; gw < wr; gw += cs.grid_spacing)
-            vr.fill_rect(math::x(cv->world_to_screen(math::Vec2(gw, 0.0f))), y,
+            vr.fill_rect(math::x(cv->world_to_screen(math::Vec2(gw, 0.0f))) * ui, y,
                          cs.grid_line_px, h, cs.grid_color);
         for (float gh = std::ceil(math::y(o) / cs.grid_spacing) * cs.grid_spacing; gh < wb; gh += cs.grid_spacing)
-            vr.fill_rect(x, math::y(cv->world_to_screen(math::Vec2(0.0f, gh))),
+            vr.fill_rect(x, math::y(cv->world_to_screen(math::Vec2(0.0f, gh))) * ui,
                          w, cs.grid_line_px, cs.grid_color);
     }
     for (int i = 0; i < cv->wire_count(); ++i)
-        emit_canvas_wire(vr, *cv, cv->get_wire(i), cs);
+        emit_canvas_wire(vr, *cv, cv->get_wire(i), cs, ui);
 }
 
-void emit_canvases(gfx::VectorRenderer& vr, IGuiWidget* w) {
+void emit_canvases(gfx::VectorRenderer& vr, IGuiWidget* w, float ui) {
     if (!w || !w->is_visible()) return;
     if (w->get_type() == WidgetType::CanvasView)
-        emit_canvas(vr, static_cast<IGuiCanvasView*>(w));
+        emit_canvas(vr, static_cast<IGuiCanvasView*>(w), ui);
     for (int i = 0; i < w->get_child_count(); ++i)
-        emit_canvases(vr, w->get_child(i));
+        emit_canvases(vr, w->get_child(i), ui);
+}
+
+// Scale every draw command of an app-authored immediate layer (positions, sizes,
+// clips, radii, line endpoints/width AND font sizes) by the UI scale, so the
+// caller authors it in logical px like the retained tree. Text scales too, so
+// glyphs rasterize at physical size and stay crisp.
+void scale_render_info(WidgetRenderInfo& ri, float ui) {
+    if (ui == 1.0f) return;
+    auto sb = [ui](math::Box& box) {
+        box = math::make_box(math::x(math::box_min(box)) * ui, math::y(math::box_min(box)) * ui,
+                             math::box_width(box) * ui, math::box_height(box) * ui);
+    };
+    sb(ri.clip_rect);
+    for (auto& c : ri.colors) {
+        sb(c.dest); sb(c.clip); c.corner_radius *= ui;
+        c.line_x1 *= ui; c.line_y1 *= ui; c.line_w *= ui;
+    }
+    for (auto& t : ri.textures) { sb(t.dest); sb(t.clip); }
+    for (auto& s : ri.slices)   { sb(s.dest); sb(s.clip);
+        s.border.left *= ui; s.border.top *= ui; s.border.right *= ui; s.border.bottom *= ui; }
+    for (auto& t : ri.texts)    { sb(t.dest); sb(t.clip); t.font_size *= ui; }
 }
 
 } // namespace
@@ -489,10 +479,15 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
                                          window::gfx::VectorRenderer* underlay,
                                          WidgetRenderInfo* overlay) {
     if (!gfx || !cmd || !raster || fb_w <= 0 || fb_h <= 0) return;
+    // The context's global UI scale: the retained tree is scaled inside
+    // get_render_info(); the app-authored immediate/overlay layers and the
+    // vector underlay are lifted to physical px here so the app authors every
+    // layer in logical px.
+    const float ui = ctx ? ctx->get_ui_scale() : 1.0f;
     // Collect every layer BEFORE sync_atlas() so glyphs rasterized this frame
     // (flatten + widget render-info) are uploaded before the draw.
-    if (immediate) { immediate->finalize(); immediate->flatten(raster); }
-    if (overlay)   { overlay->finalize();   overlay->flatten(raster); }
+    if (immediate) { scale_render_info(*immediate, ui); immediate->finalize(); immediate->flatten(raster); }
+    if (overlay)   { scale_render_info(*overlay, ui);   overlay->finalize();   overlay->flatten(raster); }
     const WidgetRenderInfo* gri = nullptr;
     if (ctx) { ctx->begin_frame(dt); gri = &ctx->get_render_info(); }
     TextureHandle atlas = raster->sync_atlas();
@@ -509,7 +504,7 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
     // passed through untouched: the caller built its own batch.)
     if (underlay && ctx) {
         underlay->begin(proj, fb_w, fb_h);
-        emit_canvases(*underlay, ctx->get_root());
+        emit_canvases(*underlay, ctx->get_root(), ui);
     }
     cmd->begin();
     cmd->set_render_target_backbuffer();

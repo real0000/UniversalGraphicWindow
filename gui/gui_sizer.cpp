@@ -27,6 +27,14 @@ static math::Vec2 item_pref_size(const SizerItem& item) {
     return math::Vec2(w, h);
 }
 
+// An item takes part in layout only when its own flag AND its widget's
+// visibility agree — a hidden widget yields its space automatically (see the
+// set_visible contract in gui_widget_base.hpp), no separate set_item_visible
+// bookkeeping needed by the app.
+static bool item_shown(const SizerItem& item) {
+    return item.visible && (!item.widget || item.widget->is_visible());
+}
+
 // Resolve border amounts for each side.
 struct BorderSides { float left, right, top, bottom; };
 
@@ -209,7 +217,7 @@ public:
         float main_total = 0.0f, cross_max = 0.0f;
         int n = 0;
         for (const auto& item : items_) {
-            if (!item.visible) continue;
+            if (!item_shown(item)) continue;
             auto pref = item_pref_size(item);
             auto b    = resolve_border(item);
             float main_sz  = (horiz ? math::x(pref) : math::y(pref)) + (horiz ? b.left+b.right : b.top+b.bottom);
@@ -243,7 +251,7 @@ public:
         // height computed against a stale width. Cross size never depends on the
         // main size, so a single forward pass converges.
         for (auto& item : items_) {
-            if (!item.visible || (!item.widget && !item.sizer)) continue;
+            if (!item_shown(item) || (!item.widget && !item.sizer)) continue;
             auto b = resolve_border(item);
             float cross_b_lo = horiz ? b.top    : b.left;
             float cross_b_hi = horiz ? b.bottom : b.right;
@@ -268,7 +276,7 @@ public:
         float fixed_total     = 0.0f;
         int   total_prop      = 0;
         for (const auto& item : items_) {
-            if (!item.visible) continue;
+            if (!item_shown(item)) continue;
             ++n_visible;
             auto pref = item_pref_size(item);
             auto b    = resolve_border(item);
@@ -288,7 +296,7 @@ public:
         // Pass 2: assign widget bounds
         float pos = horiz ? cx : cy;  // position along main axis
         for (auto& item : items_) {
-            if (!item.visible) continue;
+            if (!item_shown(item)) continue;
             auto pref = item_pref_size(item);
             auto b    = resolve_border(item);
 
@@ -396,7 +404,7 @@ public:
     math::Vec2 cell_size() const {
         float cw = 0.0f, ch = 0.0f;
         for (const auto& item : items_) {
-            if (!item.visible) continue;
+            if (!item_shown(item)) continue;
             auto pref = item_pref_size(item);
             cw = std::max(cw, math::x(pref));
             ch = std::max(ch, math::y(pref));
@@ -406,7 +414,7 @@ public:
 
     int visible_count() const {
         int n = 0;
-        for (const auto& item : items_) if (item.visible) ++n;
+        for (const auto& item : items_) if (item_shown(item)) ++n;
         return n;
     }
 
@@ -438,7 +446,7 @@ public:
 
         int col = 0, row = 0;
         for (auto& item : items_) {
-            if (!item.visible) continue;
+            if (!item_shown(item)) continue;
             if (!item.widget && !item.sizer) { /* spacer: advance grid position */ goto next; }
             {
                 float wx = cx + col * (cell_w + hgap_);
@@ -510,7 +518,7 @@ public:
         float main_total = 0.0f, cross_max = 0.0f;
         int n = 0;
         for (const auto& item : items_) {
-            if (!item.visible) continue;
+            if (!item_shown(item)) continue;
             auto pref = item_pref_size(item);
             auto b    = resolve_border(item);
             float main_sz  = (horiz ? math::x(pref) : math::y(pref)) + (horiz ? b.left+b.right : b.top+b.bottom);
@@ -574,7 +582,7 @@ public:
             for (int j = line_start; j < i; ) {
                 auto& item = items_[j];
                 ++j;
-                if (!item.visible) continue;
+                if (!item_shown(item)) continue;
                 auto pref = item_pref_size(item);
                 auto b    = resolve_border(item);
                 float item_main  = (horiz ? math::x(pref) : math::y(pref));
@@ -634,7 +642,7 @@ public:
     math::Vec2 get_min_size() const override {
         float w = 0.0f, h = 0.0f;
         for (const auto& item : items_) {
-            if (!item.visible) continue;
+            if (!item_shown(item)) continue;
             auto pref = item_pref_size(item);
             w = std::max(w, math::x(pref));
             h = std::max(h, math::y(pref));
@@ -644,7 +652,7 @@ public:
     void layout() override {
         auto cr = content_rect();
         for (auto& item : items_) {
-            if (!item.visible || (!item.widget && !item.sizer)) continue;
+            if (!item_shown(item) || (!item.widget && !item.sizer)) continue;
             item_set_bounds(item, cr);
         }
     }

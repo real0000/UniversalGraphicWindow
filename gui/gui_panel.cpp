@@ -4,6 +4,7 @@
  * Concrete implementations of IGuiSplitPanel and IGuiDockPanel.
  */
 
+#include "gui_widget_base.hpp"   // GuiWidget / WidgetBase (CollapseSection internals)
 #include "gui.hpp"
 #include <algorithm>
 #include <cstring>
@@ -1453,8 +1454,187 @@ const char* dock_panel_state_to_string(DockPanelState state) {
 }
 
 // ============================================================================
+// CollapseSection - header bar + collapsible body (see gui_panel.hpp)
+// ============================================================================
+
+namespace {
+// Header bar: renders its own fill + "glyph title" text (no other widget kind
+// is instantiated — the bar IS the render source, like a list row).
+class SectionHeader : public GuiWidget {
+public:
+    SectionHeader() : GuiWidget(WidgetType::Container) {}
+    void bind(const std::string& text, const math::Vec4& fill, const math::Vec4& text_color,
+              float font_size, float pad_x) {
+        auto veq = [](const math::Vec4& a, const math::Vec4& b) {
+            return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+        };
+        if (text_ == text && font_ == font_size && pad_x_ == pad_x &&
+            veq(fill_, fill) && veq(text_color_, text_color)) return;   // idempotent rebind
+        text_ = text; font_ = font_size; pad_x_ = pad_x;
+        fill_ = fill; text_color_ = text_color;
+        mark_dirty();
+    }
+    const WidgetRenderInfo& get_render_info(Window*) const override {
+        if (!dirty_) return render_info_;
+        render_info_.invalidate();
+        render_info_.clip_rect = bounds_;
+        float x = 0, y = 0, w = 0, h = 0;
+        x = math::x(math::box_min(bounds_)); y = math::y(math::box_min(bounds_));
+        w = math::box_width(bounds_); h = math::box_height(bounds_);
+        int32_t d = 0;
+        render_info_.push_rect(x, y, w, h, fill_, d++, bounds_);
+        render_info_.push_text(text_.c_str(), x + pad_x_, y, w - 2.0f * pad_x_, h,
+                               text_color_, font_, Alignment::CenterLeft, d++, bounds_);
+        render_info_.finalize();
+        dirty_ = false;
+        return render_info_;
+    }
+private:
+    std::string text_;
+    math::Vec4 fill_ = math::Vec4(0, 0, 0, 0);
+    math::Vec4 text_color_ = math::Vec4(1, 1, 1, 1);
+    float font_ = 12.0f, pad_x_ = 8.0f;
+};
+} // namespace
+
+class GuiCollapseSection : public WidgetBase<IGuiCollapseSection, WidgetType::Panel> {
+public:
+    GuiCollapseSection() {
+        border_ = new GuiWidget(WidgetType::Container);
+        header_ = new SectionHeader();
+        body_   = new GuiWidget(WidgetType::Container);
+        extra_  = new GuiWidget(WidgetType::Container);
+        base_.add_child(border_);
+        base_.add_child(header_);
+        base_.add_child(body_);
+        header_->add_child(extra_);
+        // header row: the bar draws the title itself; the sizer only places the
+        // consumer's right-aligned extra slot.
+        header_sizer_ = create_box_sizer(LayoutDirection::Horizontal);
+        header_sizer_->set_gap(0.0f);
+        header_sizer_->add_stretch(1);
+        header_sizer_->add(extra_, 0, SizerFlag::Center);
+        header_->set_sizer(header_sizer_);
+        // section column: [1px border / header / body]; the section's preferred
+        // size IS this sizer's min size, so collapsing re-flows any owner.
+        col_sizer_ = create_box_sizer(LayoutDirection::Vertical);
+        col_sizer_->set_gap(0.0f);
+        col_sizer_->add(border_, 0, SizerFlag::Expand);
+        col_sizer_->add(header_, 0, SizerFlag::Expand);
+        col_sizer_->add(body_, 0, SizerFlag::Expand);
+        base_.set_sizer(col_sizer_);
+        // the extra slot sizes itself to whatever the consumer parents into it
+        extra_->set_preferred_size(math::Vec2(0.0f, 0.0f));
+        body_->set_visible(false);   // collapsed by default
+        apply_style();
+    }
+    ~GuiCollapseSection() override {
+        base_.set_sizer(nullptr);
+        header_->set_sizer(nullptr);
+        destroy_sizer(col_sizer_);
+        destroy_sizer(header_sizer_);
+        delete extra_;
+        delete body_;
+        delete header_;
+        delete border_;
+    }
+
+    // ---- IGuiCollapseSection ------------------------------------------------
+    const char* get_title() const override { return title_text_.c_str(); }
+    void set_title(const char* t) override {
+        if (title_text_ == (t ? t : "")) return;
+        title_text_ = t ? t : "";
+        refresh_title();
+    }
+    bool is_expanded() const override { return body_->is_visible(); }
+    void set_expanded(bool e) override {
+        if (e == body_->is_visible()) return;
+        body_->set_visible(e);       // sizer yields/reclaims the space
+        refresh_title();
+    }
+    IGuiWidget* body() override { return body_; }
+    IGuiWidget* header_extra() override { return extra_; }
+    const CollapseSectionStyle& get_section_style() const override { return style_; }
+    void set_section_style(const CollapseSectionStyle& s) override {
+        style_ = s;
+        apply_style();
+    }
+
+    // ---- IGuiWidget bits beyond the WidgetBase stubs -------------------------
+    int get_child_count() const override { return base_.get_child_count(); }
+    IGuiWidget* get_child(int i) const override { return base_.get_child(i); }
+    bool add_child(IGuiWidget* c) override { return body_->add_child(c); }   // content goes in the body
+    bool remove_child(IGuiWidget* c) override { return body_->remove_child(c); }
+    void clear_children() override { body_->clear_children(); }
+    IGuiWidget* find_by_name(const char* n) override { return base_.find_by_name(n); }
+    void find_all_by_name(const char* n, std::vector<IGuiWidget*>& out) override { base_.find_all_by_name(n, out); }
+    IGuiWidget* find_widget_at(const math::Vec2& p) override { return base_.find_widget_at(p); }
+    void set_event_handler(IGuiEventHandler* h) override { handler_ = h; base_.set_event_handler(h); }
+
+    // Header click toggles; extra-slot/body children get first claim; clicks
+    // anywhere inside the section are swallowed (it is an opaque dock).
+    bool handle_mouse_button(MouseButton b, bool pressed, const math::Vec2& p) override {
+        if (!base_.is_visible() || !base_.is_enabled()) return false;
+        if (extra_->handle_mouse_button(b, pressed, p)) return true;
+        if (body_->is_visible() && body_->handle_mouse_button(b, pressed, p)) return true;
+        if (pressed && b == MouseButton::Left && header_->hit_test(p)) {
+            set_expanded(!is_expanded());
+            if (handler_) {
+                GuiEvent ev;
+                ev.type = GuiEventType::ValueChanged;
+                ev.source = this;
+                ev.position = p;
+                ev.bool_value = is_expanded();
+                handler_->on_gui_event(ev);
+            }
+            return true;
+        }
+        return base_.hit_test(p);
+    }
+    bool handle_mouse_move(const math::Vec2& p) override { return base_.handle_mouse_move(p); }
+    bool handle_mouse_scroll(float dx, float dy) override { return base_.handle_mouse_scroll(dx, dy); }
+
+private:
+    void refresh_title() {
+        const char* glyph = body_->is_visible() ? style_.glyph_expanded : style_.glyph_collapsed;
+        header_->bind(std::string(glyph) + " " + title_text_, style_.header_color,
+                      style_.header_text_color, style_.font_size, style_.header_pad_x);
+        base_.mark_dirty();
+    }
+    void apply_style() {
+        auto bg = [](IGuiWidget* w, const math::Vec4& c) {
+            GuiStyle gs = w->get_style(); gs.background_color = c; gs.border_width = 0; w->set_style(gs);
+        };
+        bg(border_, style_.header_border_color);
+        bg(body_, style_.body_color);
+        bg(extra_, math::Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        { GuiStyle gs = base_.get_style(); gs.background_color = math::Vec4(0, 0, 0, 0);
+          gs.border_width = 0; base_.set_style(gs); }
+        border_->set_visible(style_.header_border_px > 0.0f && style_.header_border_color.w > 0.0f);
+        border_->set_preferred_size(math::Vec2(0.0f, style_.header_border_px));
+        header_->set_preferred_size(math::Vec2(0.0f, style_.header_height));
+        header_sizer_->set_padding(style_.header_pad_x, 0.0f, style_.header_pad_x, 0.0f);
+        refresh_title();
+    }
+
+    CollapseSectionStyle style_ = CollapseSectionStyle::default_style();
+    std::string title_text_;
+    GuiWidget* border_ = nullptr;
+    SectionHeader* header_ = nullptr;
+    GuiWidget* body_ = nullptr;
+    GuiWidget* extra_ = nullptr;
+    IBoxSizer* header_sizer_ = nullptr;
+    IBoxSizer* col_sizer_ = nullptr;
+    IGuiEventHandler* handler_ = nullptr;
+};
+
+// ============================================================================
 // Factory Functions
 // ============================================================================
+
+IGuiCollapseSection* create_collapse_section_widget() {
+    return new GuiCollapseSection();
+}
 
 IGuiSplitPanel* create_split_panel(SplitOrientation orientation) {
     return new GuiSplitPanel(orientation);

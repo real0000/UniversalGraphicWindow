@@ -76,12 +76,17 @@ public:
                              WidgetRenderInfo* overlay = nullptr);
 
 private:
+    // One vertex (13 floats): pos2 | uvw3 | rgba4 | sdf4.
+    void push_vert(float px, float py, float u, float vv, float layer,
+                   const math::Vec4& c, float s0, float s1, float s2, float s3);
     void emit_quad(float x, float y, float w, float h,
                    float u0, float v0, float u1, float v1,
                    float layer, const math::Vec4& c);
+    // Circle / rounded rect / ring all render as ONE SDF quad (6 verts) — no
+    // tessellation, smooth at any scale, AA free (see gui.hlsl).
+    static constexpr int kSdfBoxVerts = 6;
+    void emit_sdf_box(float cx, float cy, float hw, float hh, float radius, float border, const math::Vec4& c);
     void emit_circle(float cx, float cy, float radius, const math::Vec4& c);
-    static constexpr int kRoundRectCornerSegs = 4;                  // arc segments per corner
-    static constexpr int kRoundRectVerts = 18 + 4 * kRoundRectCornerSegs * 3;  // 3 bands + 4 arcs
     void emit_round_rect(float x, float y, float w, float h, float radius, const math::Vec4& c);
     void emit_line(float x0, float y0, float x1, float y1, float width, const math::Vec4& c);
     TextureHandle resolve_texture(const WidgetRenderInfo::TextureCmd& t);
