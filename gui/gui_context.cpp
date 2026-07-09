@@ -185,6 +185,7 @@ class GuiContext : public IGuiContext {
                                   const math::Box& parent_clip, const CollectXf& xf) {
         if (!w || !w->is_visible()) return;
         if (math::box_is_empty(w->get_bounds())) return;
+        w->refresh_bindings();   // pull any bound data provider before rendering
         const WidgetRenderInfo& ri = w->get_render_info(nullptr);
         if (!ri.is_valid()) return;
         int32_t local_max = 0;

@@ -230,6 +230,16 @@ public:
         for (auto& w : wires_) w.id = next_wire_id_++;
         base_.mark_dirty();
     }
+    void bind_nodes(std::function<std::vector<CanvasNode>()> provider) override {
+        nodes_provider_ = std::move(provider); base_.mark_dirty();
+    }
+    void bind_wires(std::function<std::vector<CanvasWire>()> provider) override {
+        wires_provider_ = std::move(provider); base_.mark_dirty();
+    }
+    void refresh_bindings() override {
+        if (nodes_provider_) set_nodes(nodes_provider_());
+        if (wires_provider_) set_wires(wires_provider_());
+    }
 
     void show_rubber_band(const math::Box& world_rect) override {
         if (rubber_on_ && box_equal(rubber_world_, world_rect)) return;
@@ -318,6 +328,8 @@ private:
     bool rubber_on_ = false;
     std::vector<CanvasWire> wires_;
     int next_wire_id_ = 0;
+    std::function<std::vector<CanvasNode>()> nodes_provider_;   // bound model sources (set once)
+    std::function<std::vector<CanvasWire>()> wires_provider_;
 };
 
 IGuiCanvasView* create_canvas_view_widget() { return new GuiCanvasView(); }

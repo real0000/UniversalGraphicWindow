@@ -96,6 +96,12 @@ public:
     virtual void bind_enabled(std::function<bool(int id)> fn) = 0;
     virtual void bind_visible(std::function<bool(int id)> fn) = 0;
 
+    // Bind a whole-bar provider (set ONCE): for a bar whose STRUCTURE varies (e.g. a
+    // breadcrumb's segments), the toolbar re-reads it before each render and
+    // set_items() the result. Pass {} to clear. Use this instead of set_items +
+    // bind_enabled/visible when the item set itself changes.
+    virtual void bind_items(std::function<std::vector<ToolbarItemModel>()> provider) = 0;
+
     virtual ~IGuiToolbar() = default;
 
     // Item management

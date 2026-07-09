@@ -24,6 +24,7 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
     float name_col_w_=150, row_h_=24, scroll_y_=0;
     PropertyGridStyle style_=PropertyGridStyle::default_style();
     IPropertyGridEventHandler* handler_=nullptr;
+    std::function<std::vector<PropertyModel>()> provider_;   // bound model source (set once)
     static const std::vector<std::string> empty_opts_;
     int editing_id_=-1;
     std::string edit_buf_;
@@ -416,6 +417,10 @@ public:
         set_scroll_offset(scroll_y_);
         base_.mark_dirty();
     }
+    void bind(std::function<std::vector<PropertyModel>()> provider) override {
+        provider_ = std::move(provider); base_.mark_dirty();
+    }
+    void refresh_bindings() override { if (provider_) set_properties(provider_()); }
     bool remove_property(int id) override { int i=find_idx(id); if(i<0)return false; props_.erase(props_.begin()+i); return true; }
     void clear_properties() override { props_.clear(); selected_=-1; }
     int get_property_count() const override { return (int)props_.size(); }

@@ -859,6 +859,14 @@ public:
     // and the separate collect_render_info() free function.
     virtual const WidgetRenderInfo& get_render_info(Window* window) const = 0;
 
+    // Called by the context once per collect, just before get_render_info(), so a
+    // widget can refresh its model from a bound data provider (set once by the app)
+    // instead of the app pushing on every change: the app mutates its own data and
+    // asks for a repaint, and the widget re-reads the provider here (a set_items/
+    // set_properties that no-ops when unchanged). Non-const on purpose (it updates
+    // the widget's model). Default no-op — only provider-bound widgets override.
+    virtual void refresh_bindings() {}
+
     // Mark this widget's cached render info as stale.
     // Implementations must also call mark_dirty() on their parent (if any)
     // so the entire ancestor chain is invalidated bottom-up.

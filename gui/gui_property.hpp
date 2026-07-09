@@ -100,6 +100,12 @@ public:
     // and may rebuild + push on every change (mirrors ListBox::set_items).
     virtual void set_properties(const std::vector<PropertyModel>& props) = 0;
 
+    // Bind a data provider (set ONCE): the grid re-reads it before each render (via
+    // refresh_bindings) and set_properties() the result, so the app mutates its own
+    // data + asks for a repaint and the inspector reacts. An in-progress inline edit
+    // is preserved (set_properties keeps it). Pass {} to clear.
+    virtual void bind(std::function<std::vector<PropertyModel>()> provider) = 0;
+
     // Property info
     virtual const char* get_property_name(int property_id) const = 0;
     virtual const char* get_property_category(int property_id) const = 0;

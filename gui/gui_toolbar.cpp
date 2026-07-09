@@ -33,6 +33,7 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
     ITextMeasurer* measurer_ = nullptr;
     mutable std::vector<math::Box> mrects_;   // per-model-item screen rect (visible items)
     std::function<bool(int)> enabled_fn_, visible_fn_;   // reactive state providers (set once)
+    std::function<std::vector<ToolbarItemModel>()> items_provider_;   // whole-bar provider (breadcrumb)
     // Live enabled/visible for a model item: the provider (if bound) wins over the
     // model's static flag, so the app sets structure once and the toolbar reacts.
     bool item_enabled(size_t i) const { return enabled_fn_ ? enabled_fn_(model_[i].id) : model_[i].enabled; }
@@ -205,6 +206,10 @@ public:
     }
     void bind_enabled(std::function<bool(int)> fn) override { enabled_fn_ = std::move(fn); base_.mark_dirty(); }
     void bind_visible(std::function<bool(int)> fn) override { visible_fn_ = std::move(fn); base_.mark_dirty(); }
+    void bind_items(std::function<std::vector<ToolbarItemModel>()> provider) override {
+        items_provider_ = std::move(provider); base_.mark_dirty();
+    }
+    void refresh_bindings() override { if (items_provider_) set_items(items_provider_()); }
     void get_toolbar_render_info(ToolbarRenderInfo* out) const override {
         if(!out) return; auto b=base_.get_bounds();
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;

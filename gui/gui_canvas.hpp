@@ -149,6 +149,13 @@ public:
     // repaints; ids in `wires` are ignored (reassigned).
     virtual void set_wires(const std::vector<CanvasWire>& wires) = 0;
 
+    // Bind node/wire data providers (set ONCE): the canvas re-reads them before each
+    // render (via refresh_bindings) and set_nodes()/set_wires() the result — so the
+    // app mutates its graph + asks for a repaint and the canvas reacts, without the
+    // app pushing on every change. Pass {} to clear.
+    virtual void bind_nodes(std::function<std::vector<CanvasNode>()> provider) = 0;
+    virtual void bind_wires(std::function<std::vector<CanvasWire>()> provider) = 0;
+
     // Rubber band (marquee) — a screen-crisp selection rectangle drawn above
     // the content. Rect is WORLD space; the canvas tracks view changes itself.
     virtual void show_rubber_band(const math::Box& world_rect) = 0;

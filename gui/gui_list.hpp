@@ -88,6 +88,11 @@ public:
     // from the model, so the app owns selection as data.
     virtual void set_items(const std::vector<ListItemModel>& items) = 0;
 
+    // Bind a data provider (set ONCE): the list re-reads it before each render
+    // (via refresh_bindings) and set_items() the result — so the app mutates its
+    // own data + asks for a repaint, and the list reacts. Pass {} to clear.
+    virtual void bind(std::function<std::vector<ListItemModel>()> provider) = 0;
+
     // Item info
     virtual const char* get_item_text(int item_id) const = 0;
     virtual void set_item_text(int item_id, const char* text) = 0;

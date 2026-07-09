@@ -17,6 +17,7 @@ class GuiListBox : public WidgetBase<IGuiListBox, WidgetType::ListBox> {
     bool sb_drag_=false;
     ListBoxStyle style_=ListBoxStyle::default_style();
     IListBoxEventHandler* handler_=nullptr;
+    std::function<std::vector<ListItemModel>()> provider_;   // bound model source (set once)
     mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
 public:
@@ -83,6 +84,10 @@ public:
         set_scroll_offset(scroll_y_);           // re-clamp against the new content height
         base_.mark_dirty();
     }
+    void bind(std::function<std::vector<ListItemModel>()> provider) override {
+        provider_ = std::move(provider); base_.mark_dirty();
+    }
+    void refresh_bindings() override { if (provider_) set_items(provider_()); }
     // Trailing "×" action hit zone for a row (right edge, one row_height wide).
     math::Box action_rect(int row) const {
         auto b=base_.get_bounds();
