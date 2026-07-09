@@ -42,6 +42,11 @@ public:
             float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
             int row = (style_.row_height > 0) ? (int)(rel_y / style_.row_height) : -1;
             if (row >= 0 && row < (int)items_.size()) {
+                // Trailing "×" action takes the click before selection.
+                if (items_[row].has_action && math::box_contains(action_rect(row), p)) {
+                    if (handler_) handler_->on_item_action(items_[row].id);
+                    return true;
+                }
                 int old = selected_;
                 selected_ = items_[row].id;
                 if (selected_ != old && handler_) handler_->on_item_selected(selected_);
@@ -51,6 +56,39 @@ public:
     }
     int add_item(const char* text,const char* icon) override {
         int id=next_id_++; items_.push_back({id,text?text:"",icon?icon:""}); return id;
+    }
+    // Idempotent whole-list rebind: if the incoming model matches the current rows
+    // (id/text/swatch/action/enabled + selection) nothing changes and no repaint is
+    // scheduled; otherwise the rows + selection are replaced and the widget redraws.
+    void set_items(const std::vector<ListItemModel>& model) override {
+        auto veq = [](const math::Vec4& a, const math::Vec4& b){
+            return a.x==b.x && a.y==b.y && a.z==b.z && a.w==b.w; };
+        int want_sel = -1;
+        for (const auto& m : model) if (m.selected) { want_sel = m.id; break; }
+        bool same = model.size()==items_.size() && want_sel==selected_;
+        if (same) for (size_t i=0;i<model.size();++i) {
+            const auto& m=model[i]; const auto& it=items_[i];
+            if (m.id!=it.id || m.text!=it.text || m.enabled!=it.enabled ||
+                m.has_action!=it.has_action || m.editable!=it.editable || !veq(m.swatch,it.swatch)) { same=false; break; }
+        }
+        if (same) return;                       // unchanged → no repaint (like set_nodes)
+        items_.clear(); items_.reserve(model.size());
+        for (const auto& m : model) {
+            WidgetItem it; it.id=m.id; it.text=m.text; it.enabled=m.enabled;
+            it.swatch=m.swatch; it.editable=m.editable; it.has_action=m.has_action;
+            items_.push_back(std::move(it));
+            if (m.id>=next_id_) next_id_=m.id+1;
+        }
+        selected_ = want_sel;
+        set_scroll_offset(scroll_y_);           // re-clamp against the new content height
+        base_.mark_dirty();
+    }
+    // Trailing "×" action hit zone for a row (right edge, one row_height wide).
+    math::Box action_rect(int row) const {
+        auto b=base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b)), bw=math::box_width(b);
+        float rh=style_.row_height, aw=rh;
+        return math::make_box(bx+bw-aw-2.0f, by+row*rh-scroll_y_, aw, rh);
     }
     int insert_item(int idx,const char* text,const char* icon) override {
         int id=next_id_++; if(idx<0)idx=0; if(idx>(int)items_.size())idx=(int)items_.size();
@@ -136,8 +174,24 @@ public:
             ri_.push_rect(bx, ry, bw, row_h, row_bg, d++, clip);
             math::Vec4 text_col = dis ? s.disabled_text_color
                                 : is_sel ? s.selected_text_color : s.text_color;
+            // Leading colour swatch (model rows): a small rounded dot; text indents past it.
+            float text_x = bx + s.item_padding;
+            if (items_[i].swatch.w > 0.0f) {
+                float sw = row_h * 0.42f, sxo = bx + s.item_padding, syo = ry + (row_h - sw) * 0.5f;
+                ri_.push_round_rect(sxo, syo, sw, sw, 2.0f, items_[i].swatch, d++, clip);
+                text_x = sxo + sw + s.item_padding * 0.75f;
+            }
+            // Trailing "×" delete affordance (model has_action).
+            float text_w = bx + bw - text_x - s.item_padding;
+            if (items_[i].has_action) {
+                float aw = row_h;
+                ri_.push_text("\xC3\x97", bx + bw - aw, ry, aw, row_h,
+                              dis ? s.disabled_text_color : s.text_color, s.font_size,
+                              Alignment::Center, d++, clip);   // × (U+00D7)
+                text_w -= aw;
+            }
             if (!items_[i].text.empty())
-                ri_.push_text(items_[i].text.c_str(), bx+s.item_padding, ry, bw-s.item_padding, row_h,
+                ri_.push_text(items_[i].text.c_str(), text_x, ry, text_w, row_h,
                               text_col, s.font_size, Alignment::CenterLeft, d++, clip);
         }
         // Embedded scrollbar

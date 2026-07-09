@@ -383,6 +383,12 @@ struct WidgetItem {
     std::string text, icon;
     bool enabled = true, checked = false;
     void* user_data = nullptr;
+    // Optional per-row decoration used by model-driven lists (ListBox::set_items):
+    // a leading colour swatch (alpha 0 = none), an inline-editable label, and a
+    // trailing action affordance ("×"/delete). Ignored by widgets that don't draw them.
+    math::Vec4 swatch = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    bool editable = false;
+    bool has_action = false;
 };
 
 } // namespace gui

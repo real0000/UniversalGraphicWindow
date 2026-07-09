@@ -47,11 +47,27 @@ struct ListBoxRenderInfo {
     float scroll_offset_y = 0.0f;
 };
 
+// Declarative row model for IGuiListBox::set_items — the app hands the widget a
+// whole list and the widget diffs/rebuilds/self-renders (no app-side row widgets).
+// selected is DATA (the app owns which id is selected); swatch/has_action decorate.
+struct ListItemModel {
+    int        id = -1;
+    std::string text;
+    math::Vec4 swatch = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);  // leading dot; alpha 0 = none
+    bool       editable = false;      // reserved: inline rename
+    bool       has_action = false;    // trailing "×" (delete) affordance
+    bool       selected = false;
+    bool       enabled = true;
+};
+
 class IListBoxEventHandler {
 public:
     virtual ~IListBoxEventHandler() = default;
     virtual void on_item_selected(int item_id) = 0;
     virtual void on_item_double_clicked(int item_id) = 0;
+    // Trailing action ("×") on a row was clicked (model has_action == true). Default
+    // no-op so existing handlers keep compiling.
+    virtual void on_item_action(int item_id) { (void)item_id; }
 };
 
 class IGuiListBox : public IGuiWidget {
@@ -64,6 +80,13 @@ public:
     virtual bool remove_item(int item_id) = 0;
     virtual void clear_items() = 0;
     virtual int get_item_count() const = 0;
+
+    // Model-driven population: replace the whole list from a declarative model, in
+    // one idempotent call (an unchanged model schedules no repaint — the app may
+    // rebuild + push on every event, mirroring IGuiCanvasView::set_nodes). The
+    // widget owns row rendering; the app never positions a row. `selected` is taken
+    // from the model, so the app owns selection as data.
+    virtual void set_items(const std::vector<ListItemModel>& items) = 0;
 
     // Item info
     virtual const char* get_item_text(int item_id) const = 0;
