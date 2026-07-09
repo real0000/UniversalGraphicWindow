@@ -89,6 +89,13 @@ public:
     // text measurer (set_text_measurer) to size labels.
     virtual void set_items(const std::vector<ToolbarItemModel>& items) = 0;
 
+    // Reactive state (provider set ONCE): the toolbar queries these per render for
+    // each item's LIVE enabled/visible, so the app sets the fixed button STRUCTURE +
+    // labels once via set_items and never re-pushes — it just mutates its own data
+    // and the toolbar reacts. Pass {} to clear. Overrides the model's enabled/visible.
+    virtual void bind_enabled(std::function<bool(int id)> fn) = 0;
+    virtual void bind_visible(std::function<bool(int id)> fn) = 0;
+
     virtual ~IGuiToolbar() = default;
 
     // Item management

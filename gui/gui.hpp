@@ -20,6 +20,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <functional>   // provider callbacks (e.g. IGuiToolbar::bind_enabled)
 
 #include "../math_util.hpp"
 #include "gui_theme.hpp"   // GuiColor roles + GuiTheme (draw commands carry a role)

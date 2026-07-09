@@ -32,6 +32,11 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
     bool model_mode_ = false;
     ITextMeasurer* measurer_ = nullptr;
     mutable std::vector<math::Box> mrects_;   // per-model-item screen rect (visible items)
+    std::function<bool(int)> enabled_fn_, visible_fn_;   // reactive state providers (set once)
+    // Live enabled/visible for a model item: the provider (if bound) wins over the
+    // model's static flag, so the app sets structure once and the toolbar reacts.
+    bool item_enabled(size_t i) const { return enabled_fn_ ? enabled_fn_(model_[i].id) : model_[i].enabled; }
+    bool item_visible(size_t i) const { return visible_fn_ ? visible_fn_(model_[i].id) : model_[i].visible; }
 
     // Lay the model row out over the current bounds: measure each label, give a
     // `stretch` item the leftover width, and fill mrects_ for render + hit-testing.
@@ -45,7 +50,7 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
         std::vector<float> w(model_.size(), 0.0f);
         float fixed_total = 0.0f; int stretch_n = 0, vis_n = 0;
         for (size_t i=0;i<model_.size();++i) {
-            if (!model_[i].visible) continue;
+            if (!item_visible(i)) continue;
             ++vis_n;
             if (model_[i].stretch) { ++stretch_n; continue; }
             float tw = model_[i].label.empty() ? 0.0f
@@ -59,7 +64,7 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
         const float vpad = 5.0f, iy = by + vpad, bhi = bh - 2.0f*vpad;
         float x = bx + pad;
         for (size_t i=0;i<model_.size();++i) {
-            if (!model_[i].visible) continue;
+            if (!item_visible(i)) continue;
             float iw = model_[i].stretch ? per_stretch : w[i];
             mrects_[i] = math::make_box(x, iy, iw, bhi);
             x += iw + gap;
@@ -67,7 +72,7 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
     }
     int hit_model(const math::Vec2& p) const {
         for (size_t i=0;i<mrects_.size();++i)
-            if (model_[i].visible && !model_[i].stretch && model_[i].enabled &&
+            if (item_visible(i) && !model_[i].stretch && item_enabled(i) &&
                 !math::box_is_empty(mrects_[i]) && math::box_contains(mrects_[i], p)) return (int)i;
         return -1;
     }
@@ -198,6 +203,8 @@ public:
         model_ = model; model_mode_ = true; hovered_idx_ = pressed_idx_ = -1;
         base_.mark_dirty();
     }
+    void bind_enabled(std::function<bool(int)> fn) override { enabled_fn_ = std::move(fn); base_.mark_dirty(); }
+    void bind_visible(std::function<bool(int)> fn) override { visible_fn_ = std::move(fn); base_.mark_dirty(); }
     void get_toolbar_render_info(ToolbarRenderInfo* out) const override {
         if(!out) return; auto b=base_.get_bounds();
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;
@@ -230,7 +237,8 @@ public:
             layout_model();
             ri_.push_rect(bx, by, bw, bh, s.background_color, d++, b);
             for (size_t i=0;i<model_.size();++i) {
-                if (!model_[i].visible || model_[i].stretch || math::box_is_empty(mrects_[i])) continue;
+                if (!item_visible(i) || model_[i].stretch || math::box_is_empty(mrects_[i])) continue;
+                const bool en = item_enabled(i);
                 const auto& r = mrects_[i];
                 float rx=math::x(math::box_min(r)), ry=math::y(math::box_min(r));
                 float rw=math::box_width(r), rh=math::box_height(r);
@@ -240,7 +248,7 @@ public:
                                  : s.button_color;
                 if (fill.w > 0.0f) ri_.push_round_rect(rx, ry, rw, rh, 4.0f, fill, d++, b);
                 math::Vec4 tc = model_[i].text_color.w > 0.0f ? model_[i].text_color
-                              : (model_[i].enabled ? s.icon_color : s.icon_disabled_color);
+                              : (en ? s.icon_color : s.icon_disabled_color);
                 if (!model_[i].label.empty())
                     ri_.push_text(model_[i].label.c_str(), rx, ry, rw, rh, tc, kModelFont,
                                   Alignment::Center, d++, b);
