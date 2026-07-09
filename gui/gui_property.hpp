@@ -61,6 +61,22 @@ struct PropertyGridRenderInfo {
     const char* edit_buffer = "";   // Current text being edited
 };
 
+// Declarative property row for IGuiPropertyGrid::set_properties — the app hands the
+// grid a whole form and it diffs/rebuilds/self-renders. Structured node editors map
+// to categories: e.g. an "If" node = a "Case 1" category with name/operator/value
+// rows. `id` is stable and echoed back by on_property_changed. svalue carries
+// String/Int/Float/Range as text; bvalue is Bool; options+enum_index are Enum.
+struct PropertyModel {
+    int         id = -1;
+    std::string category, name;
+    PropertyType type = PropertyType::String;
+    std::string svalue;
+    bool        bvalue = false;
+    std::vector<std::string> options;
+    int         enum_index = 0;
+    bool        read_only = false;
+};
+
 class IPropertyGridEventHandler {
 public:
     virtual ~IPropertyGridEventHandler() = default;
@@ -76,6 +92,13 @@ public:
     virtual bool remove_property(int property_id) = 0;
     virtual void clear_properties() = 0;
     virtual int get_property_count() const = 0;
+
+    // Model-driven population: replace the whole form from a declarative model in one
+    // idempotent call. When the STRUCTURE (ids/names/categories/types/options) is
+    // unchanged only values update in place — scroll position and an in-progress
+    // inline edit are preserved; a structural change rebuilds. The app owns the model
+    // and may rebuild + push on every change (mirrors ListBox::set_items).
+    virtual void set_properties(const std::vector<PropertyModel>& props) = 0;
 
     // Property info
     virtual const char* get_property_name(int property_id) const = 0;

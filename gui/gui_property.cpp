@@ -363,6 +363,59 @@ public:
         int id=next_id_++; Prop p; p.id=id; p.name=name?name:""; p.category=cat?cat:""; p.type=type;
         props_.push_back(p); return id;
     }
+    // Copy a model row's value into a Prop's typed field (svalue is text for
+    // String/Int/Float/Range; bvalue is Bool; options+enum_index are Enum).
+    static void apply_value(Prop& p, const PropertyModel& m) {
+        switch (m.type) {
+            case PropertyType::Int:   p.int_val   = std::atoi(m.svalue.c_str()); p.str_val=m.svalue; break;
+            case PropertyType::Float:
+            case PropertyType::Range: p.float_val = (float)std::atof(m.svalue.c_str()); p.str_val=m.svalue; break;
+            case PropertyType::Bool:  p.bool_val  = m.bvalue; break;
+            case PropertyType::Enum:  p.enum_opts = m.options; p.enum_idx = m.enum_index; break;
+            default:                  p.str_val   = m.svalue; break;
+        }
+    }
+    static bool value_equal(const Prop& p, const PropertyModel& m) {
+        switch (m.type) {
+            case PropertyType::Int:   return p.int_val   == std::atoi(m.svalue.c_str());
+            case PropertyType::Float:
+            case PropertyType::Range: return p.float_val == (float)std::atof(m.svalue.c_str());
+            case PropertyType::Bool:  return p.bool_val  == m.bvalue;
+            case PropertyType::Enum:  return p.enum_idx  == m.enum_index && p.enum_opts == m.options;
+            default:                  return p.str_val   == m.svalue;
+        }
+    }
+    // Idempotent whole-form rebind. Structure unchanged (same ids/names/categories/
+    // types/read-only/enum options) → only values update in place (scroll + an active
+    // inline edit are kept); structural change → rebuild. Unchanged → no repaint.
+    void set_properties(const std::vector<PropertyModel>& model) override {
+        bool struct_same = model.size()==props_.size();
+        if (struct_same) for (size_t i=0;i<model.size();++i) {
+            const auto& m=model[i]; const auto& p=props_[i];
+            if (m.id!=p.id || m.name!=p.name || m.category!=p.category || m.type!=p.type ||
+                m.read_only!=p.read_only ||
+                (m.type==PropertyType::Enum && m.options!=p.enum_opts)) { struct_same=false; break; }
+        }
+        if (struct_same) {
+            if (editing_id_ >= 0) return;                 // don't disturb an in-progress edit
+            bool changed = false;
+            for (size_t i=0;i<model.size();++i)
+                if (!value_equal(props_[i], model[i])) { apply_value(props_[i], model[i]); changed = true; }
+            if (changed) base_.mark_dirty();
+            return;
+        }
+        cancel_edit();
+        props_.clear(); props_.reserve(model.size());
+        for (const auto& m : model) {
+            Prop p; p.id=m.id; p.name=m.name; p.category=m.category; p.type=m.type; p.read_only=m.read_only;
+            apply_value(p, m);
+            props_.push_back(std::move(p));
+            if (m.id>=next_id_) next_id_=m.id+1;
+        }
+        if (selected_ >= 0 && find_idx(selected_) < 0) selected_ = -1;
+        set_scroll_offset(scroll_y_);
+        base_.mark_dirty();
+    }
     bool remove_property(int id) override { int i=find_idx(id); if(i<0)return false; props_.erase(props_.begin()+i); return true; }
     void clear_properties() override { props_.clear(); selected_=-1; }
     int get_property_count() const override { return (int)props_.size(); }
