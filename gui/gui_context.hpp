@@ -134,6 +134,14 @@ public:
     virtual math::Vec2 to_logical(const math::Vec2& physical) const = 0;
     virtual math::Vec2 to_physical(const math::Vec2& logical) const = 0;
 
+    // Semantic colour theme (GuiColor role → colour). Draw commands a widget
+    // tags with a role carry no colour value; the context fills the colour from
+    // this palette when it collects the frame, so retheming is a palette swap
+    // with zero widget changes (see gui_theme.hpp). Default: GuiTheme::dark().
+    // Installing a new theme marks the tree dirty so the next frame recolours.
+    virtual const GuiTheme& get_theme() const = 0;
+    virtual void set_theme(const GuiTheme& theme) = 0;
+
     // Queue a widget mutation to run on the UI (loop) thread, then wake the loop.
     // Thread-safe — call from worker threads (agent/network) to update the UI. The
     // task runs, the affected sizers re-flow, and only the changed region repaints;

@@ -118,6 +118,10 @@ struct CanvasWire {
 // transform scales them to the screen and culls sub-`text_min_px` text.
 // ============================================================================
 
+// Geometry only — the title, pin-label and selection COLOURS are semantic theme
+// roles (GuiColor::NodeTitle / PinLabel / Selection), resolved by the context from
+// its palette at collect time; a node's header/body/pin-dot colours stay per-node
+// DATA on CanvasNode/CanvasPin. So this struct holds no chrome colour value.
 struct CanvasNodeStyle {
     float      corner_radius;       // node body/header rounding (world units)
     float      header_height;       // header band height (world units)
@@ -127,10 +131,7 @@ struct CanvasNodeStyle {
     float      pin_font;            // pin label font (world units)
     float      title_pad;           // header title left inset (world units)
     float      pin_label_pad;       // pin label inset from the node edge (world units)
-    math::Vec4 title_color;         // header title colour
-    math::Vec4 pin_label_color;     // pin label colour
-    float      selection_border;    // selection outline thickness (screen px)
-    math::Vec4 selection_color;     // selection outline colour
+    float      selection_border;    // selection outline thickness (world units)
 
     static CanvasNodeStyle default_style() {
         CanvasNodeStyle s;
@@ -142,10 +143,7 @@ struct CanvasNodeStyle {
         s.pin_font        = 11.0f;
         s.title_pad       = 8.0f;
         s.pin_label_pad   = 8.0f;
-        s.title_color     = color_rgba8(240, 240, 244);
-        s.pin_label_color = color_rgba8(185, 188, 196);
         s.selection_border = 2.0f;
-        s.selection_color  = color_rgba8(255, 200, 80);
         return s;
     }
 };

@@ -1463,15 +1463,12 @@ namespace {
 class SectionHeader : public GuiWidget {
 public:
     SectionHeader() : GuiWidget(WidgetType::Container) {}
-    void bind(const std::string& text, const math::Vec4& fill, const math::Vec4& text_color,
+    void bind(const std::string& text, GuiColor fill_role, GuiColor text_role,
               float font_size, float pad_x) {
-        auto veq = [](const math::Vec4& a, const math::Vec4& b) {
-            return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
-        };
         if (text_ == text && font_ == font_size && pad_x_ == pad_x &&
-            veq(fill_, fill) && veq(text_color_, text_color)) return;   // idempotent rebind
+            fill_role_ == fill_role && text_role_ == text_role) return;   // idempotent rebind
         text_ = text; font_ = font_size; pad_x_ = pad_x;
-        fill_ = fill; text_color_ = text_color;
+        fill_role_ = fill_role; text_role_ = text_role;
         mark_dirty();
     }
     const WidgetRenderInfo& get_render_info(Window*) const override {
@@ -1482,17 +1479,17 @@ public:
         x = math::x(math::box_min(bounds_)); y = math::y(math::box_min(bounds_));
         w = math::box_width(bounds_); h = math::box_height(bounds_);
         int32_t d = 0;
-        render_info_.push_rect(x, y, w, h, fill_, d++, bounds_);
+        render_info_.push_rect(x, y, w, h, fill_role_, d++, bounds_);
         render_info_.push_text(text_.c_str(), x + pad_x_, y, w - 2.0f * pad_x_, h,
-                               text_color_, font_, Alignment::CenterLeft, d++, bounds_);
+                               text_role_, font_, Alignment::CenterLeft, d++, bounds_);
         render_info_.finalize();
         dirty_ = false;
         return render_info_;
     }
 private:
     std::string text_;
-    math::Vec4 fill_ = math::Vec4(0, 0, 0, 0);
-    math::Vec4 text_color_ = math::Vec4(1, 1, 1, 1);
+    GuiColor fill_role_ = GuiColor::None;
+    GuiColor text_role_ = GuiColor::None;
     float font_ = 12.0f, pad_x_ = 8.0f;
 };
 } // namespace
@@ -1597,20 +1594,23 @@ public:
 private:
     void refresh_title() {
         const char* glyph = body_->is_visible() ? style_.glyph_expanded : style_.glyph_collapsed;
-        header_->bind(std::string(glyph) + " " + title_text_, style_.header_color,
-                      style_.header_text_color, style_.font_size, style_.header_pad_x);
+        header_->bind(std::string(glyph) + " " + title_text_, style_.header_role,
+                      style_.header_text_role, style_.font_size, style_.header_pad_x);
         base_.mark_dirty();
     }
     void apply_style() {
-        auto bg = [](IGuiWidget* w, const math::Vec4& c) {
-            GuiStyle gs = w->get_style(); gs.background_color = c; gs.border_width = 0; w->set_style(gs);
+        // Background colour comes from the theme via a role (None → transparent).
+        auto bg_role = [](IGuiWidget* w, GuiColor role) {
+            GuiStyle gs = w->get_style();
+            gs.background_role = role;
+            gs.background_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);   // used only when role==None
+            gs.border_width = 0; w->set_style(gs);
         };
-        bg(border_, style_.header_border_color);
-        bg(body_, style_.body_color);
-        bg(extra_, math::Vec4(0.0f, 0.0f, 0.0f, 0.0f));
-        { GuiStyle gs = base_.get_style(); gs.background_color = math::Vec4(0, 0, 0, 0);
-          gs.border_width = 0; base_.set_style(gs); }
-        border_->set_visible(style_.header_border_px > 0.0f && style_.header_border_color.w > 0.0f);
+        bg_role(border_, style_.header_border_role);
+        bg_role(body_, style_.body_role);
+        bg_role(extra_, GuiColor::None);
+        bg_role(&base_, GuiColor::None);
+        border_->set_visible(style_.header_border_px > 0.0f && style_.header_border_role != GuiColor::None);
         border_->set_preferred_size(math::Vec2(0.0f, style_.header_border_px));
         header_->set_preferred_size(math::Vec2(0.0f, style_.header_height));
         header_sizer_->set_padding(style_.header_pad_x, 0.0f, style_.header_pad_x, 0.0f);

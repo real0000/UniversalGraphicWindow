@@ -77,13 +77,13 @@ public:
             if (n.selected) {   // rounded ring behind the body
                 const float bw = s.selection_border;
                 render_info_.push_round_rect(x - bw, y - bw, w + 2 * bw, h + 2 * bw,
-                                             s.corner_radius + bw, s.selection_color, d++, clip);
+                                             s.corner_radius + bw, GuiColor::Selection, d++, clip);
             }
             render_info_.push_round_rect(x, y, w, h, s.corner_radius, n.body_color, d++, clip);
             render_info_.push_round_rect(x, y, w, s.header_height, s.corner_radius, n.header_color, d++, clip);
             if (!n.title.empty())
                 render_info_.push_text(n.title.c_str(), x + s.title_pad, y, w - 2 * s.title_pad,
-                                       s.header_height, s.title_color, s.title_font,
+                                       s.header_height, GuiColor::NodeTitle, s.title_font,
                                        Alignment::CenterLeft, d++, clip);
             for (const auto& p : n.pins) {
                 const float py = y + s.header_height + s.row_height * (float(p.row) + 0.5f);
@@ -91,7 +91,7 @@ public:
                 render_info_.push_circle(px, py, s.pin_radius, p.dot_color, d++, clip);
                 if (!p.name.empty())
                     render_info_.push_text(p.name.c_str(), x + s.pin_label_pad, py - lineh * 0.5f,
-                                           w - 2 * s.pin_label_pad, lineh, s.pin_label_color, s.pin_font,
+                                           w - 2 * s.pin_label_pad, lineh, GuiColor::PinLabel, s.pin_font,
                                            p.output ? Alignment::CenterRight : Alignment::CenterLeft, d++, clip);
             }
         }

@@ -163,6 +163,12 @@ struct GuiStyle {
     math::Vec4 disabled_color;
     math::Vec4 focus_color;
 
+    // Semantic role for the background fill. When != None the context resolves the
+    // background colour from its theme at collect time (background_color is ignored),
+    // so a plain container/panel themes without holding a colour value. Default None
+    // keeps the literal background_color (behaviour-neutral).
+    GuiColor background_role = GuiColor::None;
+
     // Sizing
     float border_width = 1.0f;
     float corner_radius = 0.0f;
@@ -680,6 +686,52 @@ struct WidgetRenderInfo {
                    int32_t depth, const math::Box& clip) {
         if (!t || !t[0]) return;
         texts.push_back({t, math::make_box(x,y,w,h), col, font_size, align, depth, clip});
+    }
+
+    // ── Themed overloads (semantic colour ROLE instead of a literal) ──────────
+    // The colour is left unset here and filled from the context's GuiTheme when
+    // the frame is collected (see gui_theme.hpp / GuiContext::collect_recursive),
+    // so widgets emit "this is a panel fill" / "this is muted text" and hold no
+    // colour value. Identical geometry to the literal versions above.
+    void push_rect(float x, float y, float w, float h,
+                   GuiColor role, int32_t depth, const math::Box& clip) {
+        ColorCmd c; c.dest = math::make_box(x,y,w,h); c.shape = DrawShape::Rect;
+        c.depth = depth; c.clip = clip; c.role = role;
+        colors.push_back(c);
+    }
+    void push_circle(float cx, float cy, float radius,
+                     GuiColor role, int32_t depth, const math::Box& clip) {
+        const float d2 = radius * 2.0f;
+        ColorCmd c; c.dest = math::make_box(cx-radius,cy-radius,d2,d2); c.shape = DrawShape::Circle;
+        c.depth = depth; c.clip = clip; c.role = role;
+        colors.push_back(c);
+    }
+    void push_round_rect(float x, float y, float w, float h, float radius,
+                         GuiColor role, int32_t depth, const math::Box& clip) {
+        ColorCmd c; c.dest = math::make_box(x,y,w,h); c.shape = DrawShape::RoundRect;
+        c.depth = depth; c.clip = clip; c.corner_radius = radius; c.role = role;
+        colors.push_back(c);
+    }
+    void push_line(float x0, float y0, float x1, float y1, float w,
+                   GuiColor role, int32_t depth, const math::Box& clip) {
+        ColorCmd c; c.dest = math::make_box(x0,y0,0,0); c.shape = DrawShape::Line;
+        c.depth = depth; c.clip = clip; c.line_x1 = x1; c.line_y1 = y1; c.line_w = w; c.role = role;
+        colors.push_back(c);
+    }
+    void push_outline(float x, float y, float w, float h,
+                      GuiColor role, int32_t& depth, const math::Box& clip) {
+        push_rect(x,     y,     w, 1.f, role, depth++, clip);
+        push_rect(x,     y+h-1, w, 1.f, role, depth++, clip);
+        push_rect(x,     y,     1.f, h, role, depth++, clip);
+        push_rect(x+w-1, y,     1.f, h, role, depth++, clip);
+    }
+    void push_text(const char* t, float x, float y, float w, float h,
+                   GuiColor role, float font_size, Alignment align,
+                   int32_t depth, const math::Box& clip) {
+        if (!t || !t[0]) return;
+        TextCmd c; c.text = t; c.dest = math::make_box(x,y,w,h); c.font_size = font_size;
+        c.alignment = align; c.depth = depth; c.clip = clip; c.role = role;
+        texts.push_back(std::move(c));
     }
     // Image quad resolved from a file path (the renderer maps path/name → texture).
     void push_image_file(const char* path, float x, float y, float w, float h,

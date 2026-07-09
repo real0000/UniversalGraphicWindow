@@ -22,11 +22,14 @@ namespace gui {
 // event handler. Docks, side-panel sections and consoles are all this.
 // ============================================================================
 
+// Geometry + semantic colour ROLES only (no colour values): the context resolves
+// each role from its theme at collect time, so a re-theme is a palette swap. Set a
+// role to GuiColor::None to hide that element (e.g. no header border).
 struct CollapseSectionStyle {
-    math::Vec4  header_color;          // header bar fill
-    math::Vec4  header_border_color;   // 1px line above the header (alpha 0 = none)
-    math::Vec4  header_text_color;
-    math::Vec4  body_color;            // body fill behind the consumer's content
+    GuiColor    header_role        = GuiColor::ConsoleBarFill;   // header bar fill
+    GuiColor    header_border_role = GuiColor::PanelBorder;      // 1px line above the header
+    GuiColor    header_text_role   = GuiColor::TextMuted;        // header title text
+    GuiColor    body_role          = GuiColor::ConsoleBodyFill;  // body fill behind content
     float       header_height = 22.0f;
     float       header_border_px = 1.0f;
     float       header_pad_x = 8.0f;
@@ -34,14 +37,7 @@ struct CollapseSectionStyle {
     const char* glyph_collapsed = "\xE2\x96\xB8";   // ▸
     const char* glyph_expanded  = "\xE2\x96\xBE";   // ▾
 
-    static CollapseSectionStyle default_style() {
-        CollapseSectionStyle s;
-        s.header_color        = color_rgba8(30, 31, 34);
-        s.header_border_color = color_rgba8(62, 62, 68);
-        s.header_text_color   = color_rgba8(190, 192, 198);
-        s.body_color          = color_rgba8(22, 23, 25);
-        return s;
-    }
+    static CollapseSectionStyle default_style() { return CollapseSectionStyle(); }
 };
 
 class IGuiCollapseSection : public IGuiWidget {

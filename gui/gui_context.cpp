@@ -100,6 +100,7 @@ class GuiContext : public IGuiContext {
     Window* attached_window_=nullptr;
     float window_dpi_scale_=1.0f;  // Mirror of attached window's DPI scale (input to_ui path)
     float ui_scale_=1.0f;          // global render/layout scale (see set_ui_scale); 1 = logical==physical
+    GuiTheme theme_=GuiTheme::dark();  // semantic role→colour palette (see set_theme); resolved at collect
 
     // ---- Event-driven host (see set_host_window / post / pump) --------------
     Window* host_=nullptr;             // window whose loop drives us (may differ from attached_window_)
@@ -156,6 +157,7 @@ class GuiContext : public IGuiContext {
         float scale = 1.0f;
         float ox = 0.0f, oy = 0.0f;
         float text_min_px = 0.0f;
+        const GuiTheme* theme = nullptr;   // resolves ColorCmd/TextCmd roles → colour
         bool identity() const { return scale == 1.0f && ox == 0.0f && oy == 0.0f; }
         math::Box box(const math::Box& b) const {
             if (math::box_is_empty(b)) return b;   // empty = "no clip" identity — keep it
@@ -164,6 +166,16 @@ class GuiContext : public IGuiContext {
                                   math::box_width(b) * scale, math::box_height(b) * scale);
         }
     };
+
+    // Fill a themed command's colour from the palette. A role of None leaves the
+    // literal colour the widget pushed; anything else is looked up in the theme, so
+    // the widget layer never holds a chrome colour value (see gui_theme.hpp).
+    static void resolve_role(WidgetRenderInfo::ColorCmd& c, const GuiTheme* th) {
+        if (th && c.role != GuiColor::None) c.color = th->get(c.role);
+    }
+    static void resolve_role(WidgetRenderInfo::TextCmd& c, const GuiTheme* th) {
+        if (th && c.role != GuiColor::None) c.color = th->get(c.role);
+    }
 
     // `parent_clip` is the clip imposed by clip-enabled ancestors (empty = none), in
     // SCREEN space. A widget's own commands are clamped to it; clip-enabled widgets
@@ -180,10 +192,10 @@ class GuiContext : public IGuiContext {
             if (ref.depth > local_max) local_max = ref.depth;
         int32_t base = depth;
         if (xf.identity()) {
-            for (auto cmd : ri.colors)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.colors.push_back(cmd); }
+            for (auto cmd : ri.colors)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); resolve_role(cmd, xf.theme); out.colors.push_back(cmd); }
             for (auto cmd : ri.textures) { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.textures.push_back(cmd); }
             for (auto cmd : ri.slices)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.slices.push_back(cmd); }
-            for (auto cmd : ri.texts)    { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.texts.push_back(cmd); }
+            for (auto cmd : ri.texts)    { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); resolve_role(cmd, xf.theme); out.texts.push_back(cmd); }
         } else {
             // Transformed subtree: scale + translate every geometric field so the
             // widget renders exactly as if it had been laid out in screen space.
@@ -197,6 +209,7 @@ class GuiContext : public IGuiContext {
                     cmd.line_y1 = cmd.line_y1 * xf.scale + xf.oy;
                     cmd.line_w *= xf.scale;
                 }
+                resolve_role(cmd, xf.theme);
                 out.colors.push_back(cmd);
             }
             for (auto cmd : ri.textures) {
@@ -219,6 +232,7 @@ class GuiContext : public IGuiContext {
                 cmd.depth += base;
                 cmd.dest = xf.box(cmd.dest);
                 cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                resolve_role(cmd, xf.theme);
                 out.texts.push_back(cmd);
             }
         }
@@ -457,6 +471,16 @@ public:
         return math::Vec2(math::x(p) * ui_scale_, math::y(p) * ui_scale_);
     }
 
+    const GuiTheme& get_theme() const override { return theme_; }
+    void set_theme(const GuiTheme& theme) override {
+        theme_ = theme;
+        // Colours are resolved at collect from cached (unchanged) draw commands, so
+        // force a rebuild of the whole tree's render info to pick up the new palette.
+        root_.mark_dirty();
+        for (auto* ov : overlays_) if (ov) ov->mark_dirty();
+        if (host_) host_->request_redraw();
+    }
+
     void post(std::function<void()> fn) override {
         if (!fn) return;
         if (host_) {
@@ -530,6 +554,7 @@ public:
         // sizes → crisp glyphs) is scaled to physical px. 1.0 = logical==physical.
         CollectXf root_xf;
         root_xf.scale = (ui_scale_ > 0.0f) ? ui_scale_ : 1.0f;
+        root_xf.theme = &theme_;   // resolves widgets' semantic colour roles → colours
         collect_recursive(&root_, frame_ri_, depth, noclip, root_xf);
         for (auto* ov : overlays_) collect_recursive(ov, frame_ri_, depth, noclip, root_xf);
         frame_ri_.finalize();

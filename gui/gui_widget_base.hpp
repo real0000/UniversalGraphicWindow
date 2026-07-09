@@ -154,7 +154,8 @@ public:
         render_info_.clip_rect = clip_enabled_ ? clip_rect_ : bounds_;
         WidgetRenderInfo::ColorCmd bg;
         bg.dest  = bounds_;
-        bg.color = style_.background_color;
+        bg.color = style_.background_color;   // literal, unless role != None (themed at collect)
+        bg.role  = style_.background_role;
         bg.shape = DrawShape::Rect;
         bg.depth = 0;
         bg.clip  = render_info_.clip_rect;
