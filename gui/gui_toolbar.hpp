@@ -58,6 +58,22 @@ struct ToolbarRenderInfo {
     math::Box overflow_button_rect;
 };
 
+// Declarative item for the model-driven toolbar (IGuiToolbar::set_items) — a
+// variable-width LABELLED button bar (not fixed icon squares), reusable for a
+// breadcrumb (flat fill + a `stretch` trailing spacer + non-enabled ">" items).
+// The widget measures each label, lays the row out (a stretch item absorbs slack),
+// self-renders rounded buttons, and fires on_toolbar_item_clicked(id) on a click.
+struct ToolbarItemModel {
+    int         id = -1;
+    std::string label;                             // button text (also the glyph)
+    bool        enabled = true;                    // false → dim, not clickable ("Root >")
+    bool        visible = true;
+    bool        stretch = false;                   // flexible spacer; absorbs remaining width
+    math::Vec4  fill       = math::Vec4(0, 0, 0, 0);  // button fill; alpha 0 = style default
+    math::Vec4  text_color = math::Vec4(0, 0, 0, 0);  // label colour; alpha 0 = style default
+    float       min_width  = 0.0f;                 // 0 = size to the measured label
+};
+
 class IToolbarEventHandler {
 public:
     virtual ~IToolbarEventHandler() = default;
@@ -67,6 +83,12 @@ public:
 
 class IGuiToolbar : public IGuiWidget {
 public:
+    // Model-driven population: replace the whole bar from a declarative model, in
+    // one idempotent call (unchanged → no repaint). Switches the toolbar into the
+    // labelled variable-width layout; the app never positions a button. Needs a
+    // text measurer (set_text_measurer) to size labels.
+    virtual void set_items(const std::vector<ToolbarItemModel>& items) = 0;
+
     virtual ~IGuiToolbar() = default;
 
     // Item management

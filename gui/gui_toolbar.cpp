@@ -26,6 +26,52 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
     mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
 
+    // ── Model-driven labelled-button layout (set_items) ──────────────────────────
+    static constexpr float kModelFont = 13.0f;
+    std::vector<ToolbarItemModel> model_;
+    bool model_mode_ = false;
+    ITextMeasurer* measurer_ = nullptr;
+    mutable std::vector<math::Box> mrects_;   // per-model-item screen rect (visible items)
+
+    // Lay the model row out over the current bounds: measure each label, give a
+    // `stretch` item the leftover width, and fill mrects_ for render + hit-testing.
+    void layout_model() const {
+        mrects_.assign(model_.size(), math::make_box(0,0,0,0));
+        if (!measurer_ || model_.empty()) return;
+        auto b = base_.get_bounds();
+        const float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        const float bw=math::box_width(b), bh=math::box_height(b);
+        const float pad = style_.toolbar_padding, gap = style_.button_padding, btnpad = 12.0f;
+        std::vector<float> w(model_.size(), 0.0f);
+        float fixed_total = 0.0f; int stretch_n = 0, vis_n = 0;
+        for (size_t i=0;i<model_.size();++i) {
+            if (!model_[i].visible) continue;
+            ++vis_n;
+            if (model_[i].stretch) { ++stretch_n; continue; }
+            float tw = model_[i].label.empty() ? 0.0f
+                     : math::x(measurer_->measure_text(model_[i].label.c_str(), kModelFont));
+            w[i] = std::max(tw + 2.0f*btnpad, model_[i].min_width);
+            fixed_total += w[i];
+        }
+        float avail = bw - 2.0f*pad - gap*float(std::max(0, vis_n-1));
+        float extra = avail - fixed_total; if (extra < 0.0f) extra = 0.0f;
+        float per_stretch = stretch_n>0 ? extra/float(stretch_n) : 0.0f;
+        const float vpad = 5.0f, iy = by + vpad, bhi = bh - 2.0f*vpad;
+        float x = bx + pad;
+        for (size_t i=0;i<model_.size();++i) {
+            if (!model_[i].visible) continue;
+            float iw = model_[i].stretch ? per_stretch : w[i];
+            mrects_[i] = math::make_box(x, iy, iw, bhi);
+            x += iw + gap;
+        }
+    }
+    int hit_model(const math::Vec2& p) const {
+        for (size_t i=0;i<mrects_.size();++i)
+            if (model_[i].visible && !model_[i].stretch && model_[i].enabled &&
+                !math::box_is_empty(mrects_[i]) && math::box_contains(mrects_[i], p)) return (int)i;
+        return -1;
+    }
+
     // Find which item index a click x-position falls on (-1 if none)
     int hit_item(float rel_x) const {
         float ix = style_.toolbar_padding;
@@ -43,7 +89,12 @@ class GuiToolbar : public WidgetBase<IGuiToolbar, WidgetType::Custom> {
 public:
     bool handle_mouse_move(const math::Vec2& p) override {
         if (!base_.is_enabled() || !base_.is_visible()) { hovered_idx_ = -1; return false; }
-        if (!hit_test(p)) { hovered_idx_ = -1; return base_.handle_mouse_move(p); }
+        if (!hit_test(p)) { if(hovered_idx_!=-1){hovered_idx_=-1; base_.mark_dirty();} return base_.handle_mouse_move(p); }
+        if (model_mode_) {
+            int idx = hit_model(p);
+            if (idx != hovered_idx_) { hovered_idx_ = idx; base_.mark_dirty(); }
+            return base_.handle_mouse_move(p);
+        }
         auto b = base_.get_bounds();
         float rel_x = math::x(p) - math::x(math::box_min(b));
         int idx = hit_item(rel_x);
@@ -52,6 +103,18 @@ public:
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!base_.is_enabled() || !hit_test(p)) { pressed_idx_ = -1; return false; }
+        if (model_mode_) {
+            if (btn != MouseButton::Left) return base_.handle_mouse_button(btn, pressed, p);
+            int idx = hit_model(p);
+            if (pressed) { pressed_idx_ = idx; }
+            else {
+                if (pressed_idx_ >= 0 && pressed_idx_ == idx && handler_)
+                    handler_->on_toolbar_item_clicked(model_[idx].id);
+                pressed_idx_ = -1;
+            }
+            base_.mark_dirty();
+            return idx >= 0;
+        }
         if (btn == MouseButton::Left) {
             auto b = base_.get_bounds();
             float rel_x = math::x(p) - math::x(math::box_min(b));
@@ -119,6 +182,22 @@ public:
     const ToolbarStyle& get_toolbar_style() const override { return style_; }
     void set_toolbar_style(const ToolbarStyle& s) override { style_=s; }
     void set_toolbar_event_handler(IToolbarEventHandler* h) override { handler_=h; }
+    void set_text_measurer(ITextMeasurer* m) override { measurer_=m; }
+    // Idempotent whole-bar rebind (mirrors ListBox::set_items). Unchanged → no repaint.
+    void set_items(const std::vector<ToolbarItemModel>& model) override {
+        auto veq = [](const math::Vec4& a, const math::Vec4& b){
+            return a.x==b.x && a.y==b.y && a.z==b.z && a.w==b.w; };
+        bool same = model_mode_ && model.size()==model_.size();
+        if (same) for (size_t i=0;i<model.size();++i) {
+            const auto& a=model[i]; const auto& c=model_[i];
+            if (a.id!=c.id || a.label!=c.label || a.enabled!=c.enabled || a.visible!=c.visible ||
+                a.stretch!=c.stretch || a.min_width!=c.min_width || !veq(a.fill,c.fill) ||
+                !veq(a.text_color,c.text_color)) { same=false; break; }
+        }
+        if (same) return;
+        model_ = model; model_mode_ = true; hovered_idx_ = pressed_idx_ = -1;
+        base_.mark_dirty();
+    }
     void get_toolbar_render_info(ToolbarRenderInfo* out) const override {
         if(!out) return; auto b=base_.get_bounds();
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;
@@ -144,6 +223,30 @@ public:
         auto noclip=math::make_box(0,0,0,0);
         int32_t d=0;
         const auto& s=style_;
+        // Model-driven labelled-button path (set_items): variable-width rounded
+        // buttons with per-item fill/text colour; a stretch item draws nothing.
+        if (model_mode_) {
+            ri_.clip_rect = b;
+            layout_model();
+            ri_.push_rect(bx, by, bw, bh, s.background_color, d++, b);
+            for (size_t i=0;i<model_.size();++i) {
+                if (!model_[i].visible || model_[i].stretch || math::box_is_empty(mrects_[i])) continue;
+                const auto& r = mrects_[i];
+                float rx=math::x(math::box_min(r)), ry=math::y(math::box_min(r));
+                float rw=math::box_width(r), rh=math::box_height(r);
+                math::Vec4 fill = model_[i].fill.w > 0.0f ? model_[i].fill
+                                 : ((int)i==pressed_idx_) ? s.button_pressed_color
+                                 : ((int)i==hovered_idx_) ? s.button_hover_color
+                                 : s.button_color;
+                if (fill.w > 0.0f) ri_.push_round_rect(rx, ry, rw, rh, 4.0f, fill, d++, b);
+                math::Vec4 tc = model_[i].text_color.w > 0.0f ? model_[i].text_color
+                              : (model_[i].enabled ? s.icon_color : s.icon_disabled_color);
+                if (!model_[i].label.empty())
+                    ri_.push_text(model_[i].label.c_str(), rx, ry, rw, rh, tc, kModelFont,
+                                  Alignment::Center, d++, b);
+            }
+            ri_.finalize(); base_.clear_dirty(); return ri_;
+        }
         ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
         float ix = bx + s.toolbar_padding;
         for (int i = 0; i < (int)items_.size(); i++) {
