@@ -167,24 +167,7 @@ enum class ScrollBarOrientation : uint8_t {
     Vertical
 };
 
-struct ScrollBarStyle {
-    math::Vec4 track_color;
-    math::Vec4 thumb_color;
-    math::Vec4 thumb_hover_color;
-    math::Vec4 thumb_pressed_color;
-    float track_width = 12.0f;
-    float thumb_min_length = 20.0f;
-    float corner_radius = 6.0f;
-
-    static ScrollBarStyle default_style() {
-        ScrollBarStyle s;
-        s.track_color = math::Vec4(30 / 255.0f, 30 / 255.0f, 30 / 255.0f, 1.0f);
-        s.thumb_color = math::Vec4(80 / 255.0f, 80 / 255.0f, 80 / 255.0f, 1.0f);
-        s.thumb_hover_color = math::Vec4(120 / 255.0f, 120 / 255.0f, 120 / 255.0f, 1.0f);
-        s.thumb_pressed_color = math::Vec4(160 / 255.0f, 160 / 255.0f, 160 / 255.0f, 1.0f);
-        return s;
-    }
-};
+// ScrollBarStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct ScrollBarRenderInfo {
     const IGuiWidget* widget = nullptr;

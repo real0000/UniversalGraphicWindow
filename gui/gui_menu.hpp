@@ -24,48 +24,7 @@ enum class MenuItemType : uint8_t {
     Submenu
 };
 
-struct MenuStyle {
-    math::Vec4 background_color;
-    math::Vec4 border_color;
-    math::Vec4 item_text_color;
-    math::Vec4 item_hover_background;
-    math::Vec4 item_hover_text_color;
-    math::Vec4 item_disabled_text_color;
-    math::Vec4 separator_color;
-    math::Vec4 shortcut_text_color;
-    math::Vec4 check_color;
-    math::Vec4 submenu_arrow_color;
-    math::Vec4 shadow_color;
-    float item_height = 26.0f;
-    float separator_height = 7.0f;
-    float item_padding = 24.0f;
-    float icon_size = 16.0f;
-    float icon_column_width = 28.0f;
-    float shortcut_margin = 40.0f;
-    float submenu_arrow_size = 8.0f;
-    float corner_radius = 4.0f;
-    float border_width = 1.0f;
-    float shadow_offset = 2.0f;
-    float shadow_blur = 6.0f;
-    float min_width = 140.0f;
-    float font_size = 13.0f;
-
-    static MenuStyle default_style() {
-        MenuStyle s;
-        s.background_color = color_rgba8(37, 37, 38);
-        s.border_color = color_rgba8(63, 63, 70);
-        s.item_text_color = color_rgba8(241, 241, 241);
-        s.item_hover_background = color_rgba8(0, 122, 204);
-        s.item_hover_text_color = color_rgba8(255, 255, 255);
-        s.item_disabled_text_color = color_rgba8(110, 110, 110);
-        s.separator_color = color_rgba8(63, 63, 70);
-        s.shortcut_text_color = color_rgba8(160, 160, 160);
-        s.check_color = color_rgba8(0, 122, 204);
-        s.submenu_arrow_color = color_rgba8(160, 160, 160);
-        s.shadow_color = color_rgba8(0, 0, 0, 100);
-        return s;
-    }
-};
+// MenuStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct MenuItemRenderInfo {
     int item_id = -1;
@@ -165,26 +124,7 @@ public:
 // MenuBar Interface - Horizontal menu bar
 // ============================================================================
 
-struct MenuBarStyle {
-    math::Vec4 background_color;
-    math::Vec4 item_text_color;
-    math::Vec4 item_hover_background;
-    math::Vec4 item_hover_text_color;
-    math::Vec4 item_open_background;
-    float height = 28.0f;
-    float item_padding = 10.0f;
-    float font_size = 13.0f;
-
-    static MenuBarStyle default_style() {
-        MenuBarStyle s;
-        s.background_color = color_rgba8(45, 45, 48);
-        s.item_text_color = color_rgba8(241, 241, 241);
-        s.item_hover_background = color_rgba8(62, 62, 66);
-        s.item_hover_text_color = color_rgba8(255, 255, 255);
-        s.item_open_background = color_rgba8(37, 37, 38);
-        return s;
-    }
-};
+// MenuBarStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct MenuBarItemRenderInfo {
     int item_id = -1;

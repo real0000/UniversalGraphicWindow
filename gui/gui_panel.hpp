@@ -25,20 +25,7 @@ namespace gui {
 // Geometry + semantic colour ROLES only (no colour values): the context resolves
 // each role from its theme at collect time, so a re-theme is a palette swap. Set a
 // role to GuiColor::None to hide that element (e.g. no header border).
-struct CollapseSectionStyle {
-    GuiColor    header_role        = GuiColor::ConsoleBarFill;   // header bar fill
-    GuiColor    header_border_role = GuiColor::PanelBorder;      // 1px line above the header
-    GuiColor    header_text_role   = GuiColor::TextMuted;        // header title text
-    GuiColor    body_role          = GuiColor::ConsoleBodyFill;  // body fill behind content
-    float       header_height = 22.0f;
-    float       header_border_px = 1.0f;
-    float       header_pad_x = 8.0f;
-    float       font_size = 12.0f;
-    const char* glyph_collapsed = "\xE2\x96\xB8";   // ▸
-    const char* glyph_expanded  = "\xE2\x96\xBE";   // ▾
-
-    static CollapseSectionStyle default_style() { return CollapseSectionStyle(); }
-};
+// CollapseSectionStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 class IGuiCollapseSection : public IGuiWidget {
 public:
@@ -75,26 +62,7 @@ enum class SplitSizeUnit : uint8_t {
     Ratio               // 0.0 - 1.0 of total size
 };
 
-struct SplitterStyle {
-    math::Vec4 splitter_color;
-    math::Vec4 splitter_hover_color;
-    math::Vec4 splitter_drag_color;
-    math::Vec4 grip_color;
-    float splitter_thickness = 4.0f;
-    float hit_area_thickness = 8.0f;    // Larger than visual for easier grabbing
-    float grip_length = 30.0f;
-    float grip_dot_size = 2.0f;
-    int grip_dot_count = 3;
-
-    static SplitterStyle default_style() {
-        SplitterStyle s;
-        s.splitter_color = color_rgba8(45, 45, 48);
-        s.splitter_hover_color = color_rgba8(0, 122, 204);
-        s.splitter_drag_color = color_rgba8(0, 122, 204);
-        s.grip_color = color_rgba8(110, 110, 110);
-        return s;
-    }
-};
+// SplitterStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct SplitPanelRenderInfo {
     const IGuiWidget* widget = nullptr;
@@ -198,36 +166,7 @@ enum class DockPanelState : uint8_t {
     Hidden
 };
 
-struct DockPanelStyle {
-    math::Vec4 background_color;
-    math::Vec4 title_bar_color;
-    math::Vec4 title_bar_active_color;
-    math::Vec4 title_text_color;
-    math::Vec4 title_active_text_color;
-    math::Vec4 tab_bar_color;
-    math::Vec4 drop_indicator_color;
-    math::Vec4 auto_hide_tab_color;
-    float title_bar_height = 26.0f;
-    float tab_height = 24.0f;
-    float auto_hide_tab_width = 24.0f;
-    float min_dock_width = 100.0f;
-    float min_dock_height = 80.0f;
-    float drop_indicator_thickness = 3.0f;
-    float font_size = 12.0f;
-
-    static DockPanelStyle default_style() {
-        DockPanelStyle s;
-        s.background_color = color_rgba8(37, 37, 38);
-        s.title_bar_color = color_rgba8(45, 45, 48);
-        s.title_bar_active_color = color_rgba8(0, 122, 204);
-        s.title_text_color = color_rgba8(160, 160, 160);
-        s.title_active_text_color = color_rgba8(255, 255, 255);
-        s.tab_bar_color = color_rgba8(37, 37, 38);
-        s.drop_indicator_color = color_rgba8(0, 122, 204, 180);
-        s.auto_hide_tab_color = color_rgba8(45, 45, 48);
-        return s;
-    }
-};
+// DockPanelStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct DockPanelRenderInfo {
     int panel_id = -1;

@@ -21,94 +21,9 @@ enum class ButtonType : uint8_t {
     Checkbox        // Checkbox button
 };
 
-enum class ButtonStylePreset : uint8_t {
-    Default = 0,
-    Primary,     // Blue accent
-    Success,     // Green
-    Warning,     // Orange
-    Danger,      // Red
-    Ghost,       // Transparent fill, visible border
-    Flat         // No border, subtle hover
-};
+// ButtonStylePreset is defined in gui_styles.hpp (used by ButtonStyle::from_preset).
 
-struct ButtonStyle {
-    math::Vec4 background_color;
-    math::Vec4 hover_color;
-    math::Vec4 pressed_color;
-    math::Vec4 disabled_color;
-    math::Vec4 checked_color;           // For toggle/checkbox/radio when checked
-    math::Vec4 text_color;
-    math::Vec4 text_disabled_color;
-    math::Vec4 border_color;
-    math::Vec4 focus_border_color;
-    float border_width = 1.0f;
-    float corner_radius = 4.0f;
-    float padding = 8.0f;
-    float icon_size = 16.0f;
-    float icon_text_spacing = 6.0f;
-    float font_size = 13.0f;
-    Alignment text_alignment = Alignment::Center;   // label placement within the button
-
-    static ButtonStyle default_style() {
-        ButtonStyle s;
-        s.background_color = color_rgba8(60, 60, 60);
-        s.hover_color = color_rgba8(70, 70, 70);
-        s.pressed_color = color_rgba8(50, 50, 50);
-        s.disabled_color = color_rgba8(45, 45, 48);
-        s.checked_color = color_rgba8(0, 122, 204);
-        s.text_color = color_rgba8(241, 241, 241);
-        s.text_disabled_color = color_rgba8(110, 110, 110);
-        s.border_color = color_rgba8(80, 80, 80);
-        s.focus_border_color = color_rgba8(0, 122, 204);
-        return s;
-    }
-
-    static ButtonStyle from_preset(ButtonStylePreset preset) {
-        ButtonStyle s = default_style();
-        switch (preset) {
-            case ButtonStylePreset::Primary:
-                s.background_color = color_rgba8(0, 122, 204);
-                s.hover_color      = color_rgba8(0, 140, 230);
-                s.pressed_color    = color_rgba8(0, 100, 180);
-                s.border_color     = color_rgba8(0, 100, 170);
-                break;
-            case ButtonStylePreset::Success:
-                s.background_color = color_rgba8(40, 160, 80);
-                s.hover_color      = color_rgba8(50, 180, 90);
-                s.pressed_color    = color_rgba8(30, 140, 65);
-                s.border_color     = color_rgba8(30, 130, 60);
-                break;
-            case ButtonStylePreset::Warning:
-                s.background_color = color_rgba8(200, 130, 0);
-                s.hover_color      = color_rgba8(220, 148, 0);
-                s.pressed_color    = color_rgba8(175, 110, 0);
-                s.border_color     = color_rgba8(175, 110, 0);
-                s.text_color       = color_rgba8(255, 255, 255);
-                break;
-            case ButtonStylePreset::Danger:
-                s.background_color = color_rgba8(190, 40, 40);
-                s.hover_color      = color_rgba8(215, 50, 50);
-                s.pressed_color    = color_rgba8(165, 30, 30);
-                s.border_color     = color_rgba8(160, 30, 30);
-                break;
-            case ButtonStylePreset::Ghost:
-                s.background_color = color_rgba8(0, 0, 0, 0);
-                s.hover_color      = color_rgba8(255, 255, 255, 25);
-                s.pressed_color    = color_rgba8(255, 255, 255, 15);
-                s.border_color     = color_rgba8(150, 150, 150);
-                break;
-            case ButtonStylePreset::Flat:
-                s.background_color = color_rgba8(0, 0, 0, 0);
-                s.hover_color      = color_rgba8(255, 255, 255, 20);
-                s.pressed_color    = color_rgba8(255, 255, 255, 10);
-                s.border_color     = color_rgba8(0, 0, 0, 0);
-                s.border_width     = 0.0f;
-                break;
-            default: break;
-        }
-        return s;
-    }
-};
+// ButtonStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 // Per-state visual transform applied on top of the button's color
 struct ButtonTransitionState {
@@ -184,30 +99,7 @@ enum class SliderOrientation : uint8_t {
     Vertical
 };
 
-struct SliderStyle {
-    math::Vec4 track_color;
-    math::Vec4 track_fill_color;
-    math::Vec4 thumb_color;
-    math::Vec4 thumb_hover_color;
-    math::Vec4 thumb_pressed_color;
-    math::Vec4 tick_color;
-    float track_height = 4.0f;
-    float thumb_radius = 7.0f;
-    float tick_length = 6.0f;
-    float tick_width = 1.0f;
-    float track_corner_radius = 2.0f;
-
-    static SliderStyle default_style() {
-        SliderStyle s;
-        s.track_color = color_rgba8(63, 63, 70);
-        s.track_fill_color = color_rgba8(0, 122, 204);
-        s.thumb_color = color_rgba8(200, 200, 200);
-        s.thumb_hover_color = color_rgba8(0, 122, 204);
-        s.thumb_pressed_color = color_rgba8(0, 100, 180);
-        s.tick_color = color_rgba8(110, 110, 110);
-        return s;
-    }
-};
+// SliderStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct SliderRenderInfo {
     const IGuiWidget* widget = nullptr;
@@ -289,24 +181,7 @@ enum class ProgressBarMode : uint8_t {
     Indeterminate       // Unknown progress (animated)
 };
 
-struct ProgressBarStyle {
-    math::Vec4 track_color;
-    math::Vec4 fill_color;
-    math::Vec4 indeterminate_color;
-    math::Vec4 text_color;
-    float height = 20.0f;
-    float corner_radius = 4.0f;
-    float indeterminate_width = 0.3f;   // Width of indeterminate bar as ratio
-
-    static ProgressBarStyle default_style() {
-        ProgressBarStyle s;
-        s.track_color = color_rgba8(63, 63, 70);
-        s.fill_color = color_rgba8(0, 122, 204);
-        s.indeterminate_color = color_rgba8(0, 122, 204);
-        s.text_color = color_rgba8(241, 241, 241);
-        return s;
-    }
-};
+// ProgressBarStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct ProgressBarRenderInfo {
     const IGuiWidget* widget = nullptr;
@@ -362,38 +237,7 @@ enum class ColorPickerMode : uint8_t {
     Palette             // Predefined color swatches
 };
 
-struct ColorPickerStyle {
-    math::Vec4 background_color;
-    math::Vec4 border_color;
-    math::Vec4 label_color;
-    math::Vec4 input_background;
-    math::Vec4 input_text_color;
-    math::Vec4 swatch_border_color;
-    math::Vec4 selector_color;          // Ring/crosshair on color area
-    float wheel_outer_radius = 100.0f;
-    float wheel_inner_radius = 80.0f;
-    float sv_square_size = 140.0f;
-    float slider_height = 18.0f;
-    float swatch_size = 20.0f;
-    float swatch_spacing = 4.0f;
-    float alpha_checker_size = 6.0f;
-    float selector_radius = 5.0f;
-    float preview_height = 30.0f;
-    float font_size = 12.0f;
-    float padding = 8.0f;
-
-    static ColorPickerStyle default_style() {
-        ColorPickerStyle s;
-        s.background_color = color_rgba8(37, 37, 38);
-        s.border_color = color_rgba8(63, 63, 70);
-        s.label_color = color_rgba8(180, 180, 180);
-        s.input_background = color_rgba8(30, 30, 30);
-        s.input_text_color = color_rgba8(241, 241, 241);
-        s.swatch_border_color = color_rgba8(80, 80, 80);
-        s.selector_color = color_rgba8(255, 255, 255);
-        return s;
-    }
-};
+// ColorPickerStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct ColorPickerRenderInfo {
     const IGuiWidget* widget = nullptr;

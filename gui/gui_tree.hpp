@@ -20,35 +20,7 @@ enum class TreeViewSelectionMode : uint8_t {
     None
 };
 
-struct TreeViewStyle {
-    math::Vec4 row_background;
-    math::Vec4 row_alt_background;
-    math::Vec4 selected_background;
-    math::Vec4 hover_background;
-    math::Vec4 text_color;
-    math::Vec4 folder_text_color;   // text color for nodes with icon "folder" (0 alpha → use text_color)
-    math::Vec4 icon_color;
-    math::Vec4 line_color;          // Indent guide lines
-    float row_height = 22.0f;
-    float indent_width = 18.0f;
-    float icon_size = 16.0f;
-    float font_size = 13.0f;
-    bool show_lines = true;         // Draw indent guide lines
-    bool show_root_lines = false;   // Draw lines from root nodes
-
-    static TreeViewStyle default_style() {
-        TreeViewStyle s;
-        s.row_background = color_rgba8(45, 45, 48);
-        s.row_alt_background = color_rgba8(50, 50, 53);
-        s.selected_background = color_rgba8(0, 122, 204);
-        s.hover_background = color_rgba8(62, 62, 66);
-        s.text_color = color_rgba8(241, 241, 241);
-        s.folder_text_color = math::Vec4(0,0,0,0);   // default: fall back to text_color
-        s.icon_color = color_rgba8(200, 200, 200);
-        s.line_color = color_rgba8(80, 80, 80);
-        return s;
-    }
-};
+// TreeViewStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct TreeNodeRenderItem {
     int node_id = -1;

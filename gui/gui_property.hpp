@@ -27,33 +27,7 @@ enum class PropertyType : uint8_t {
     Category        // Group header, no value
 };
 
-struct PropertyGridStyle {
-    math::Vec4 category_background;
-    math::Vec4 category_text_color;
-    math::Vec4 name_text_color;
-    math::Vec4 value_text_color;
-    math::Vec4 row_background;
-    math::Vec4 row_alt_background;
-    math::Vec4 selected_background;
-    math::Vec4 separator_color;
-    float row_height = 24.0f;
-    float name_column_width = 150.0f;
-    float indent_width = 16.0f;
-    float font_size = 13.0f;
-
-    static PropertyGridStyle default_style() {
-        PropertyGridStyle s;
-        s.category_background = color_rgba8(37, 37, 38);
-        s.category_text_color = color_rgba8(220, 220, 220);
-        s.name_text_color = color_rgba8(200, 200, 200);
-        s.value_text_color = color_rgba8(241, 241, 241);
-        s.row_background = color_rgba8(45, 45, 48);
-        s.row_alt_background = color_rgba8(50, 50, 53);
-        s.selected_background = color_rgba8(0, 122, 204);
-        s.separator_color = color_rgba8(63, 63, 70);
-        return s;
-    }
-};
+// PropertyGridStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct PropertyRenderItem {
     int property_id = -1;

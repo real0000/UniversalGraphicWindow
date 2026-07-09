@@ -47,36 +47,7 @@ enum class PopupPlacement : uint8_t {
     Manual              // Use explicit position
 };
 
-struct DialogStyle {
-    math::Vec4 overlay_color;           // Dimmed background behind modal
-    math::Vec4 background_color;
-    math::Vec4 border_color;
-    math::Vec4 title_bar_color;
-    math::Vec4 title_text_color;
-    math::Vec4 shadow_color;
-    float border_width = 1.0f;
-    float corner_radius = 6.0f;
-    float title_bar_height = 32.0f;
-    float button_area_height = 44.0f;
-    float padding = 16.0f;
-    float shadow_offset = 4.0f;
-    float shadow_blur = 8.0f;
-    float min_width = 300.0f;
-    float min_height = 150.0f;
-    float font_size = 13.0f;
-    float title_font_size = 14.0f;
-
-    static DialogStyle default_style() {
-        DialogStyle s;
-        s.overlay_color = color_rgba8(0, 0, 0, 128);
-        s.background_color = color_rgba8(45, 45, 48);
-        s.border_color = color_rgba8(63, 63, 70);
-        s.title_bar_color = color_rgba8(37, 37, 38);
-        s.title_text_color = color_rgba8(241, 241, 241);
-        s.shadow_color = color_rgba8(0, 0, 0, 100);
-        return s;
-    }
-};
+// DialogStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct DialogRenderInfo {
     const IGuiWidget* widget = nullptr;

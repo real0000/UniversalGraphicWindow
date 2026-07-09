@@ -31,29 +31,7 @@ namespace gui {
 // CanvasStyle - Canvas-wide visuals (backdrop, grid, text culling, rubber band)
 // ============================================================================
 
-struct CanvasStyle {
-    math::Vec4 backdrop_color;      // canvas background fill
-    math::Vec4 grid_color;          // world-grid line colour
-    float      grid_spacing;        // world units between grid lines (0 = no grid)
-    float      grid_min_scale;      // hide the grid below this view scale
-    float      grid_line_px;        // grid line thickness in screen px
-    float      text_min_px;         // cull content text under this many screen px (0 = never)
-    math::Vec4 rubber_fill;         // rubber-band (marquee) interior
-    math::Vec4 rubber_border;       // rubber-band 1 px border
-
-    static CanvasStyle default_style() {
-        CanvasStyle s;
-        s.backdrop_color = color_rgba8(30, 31, 34);
-        s.grid_color     = color_rgba8(44, 46, 50);
-        s.grid_spacing   = 100.0f;
-        s.grid_min_scale = 0.3f;
-        s.grid_line_px   = 1.0f;
-        s.text_min_px    = 6.0f;
-        s.rubber_fill    = math::Vec4(0.35f, 0.55f, 0.9f, 0.18f);
-        s.rubber_border  = color_rgba8(110, 150, 230);
-        return s;
-    }
-};
+// CanvasStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 // ============================================================================
 // CanvasWireStyle / CanvasWire - Retained world-space connection curves
@@ -61,46 +39,7 @@ struct CanvasStyle {
 
 // Sizes are WORLD units unless suffixed _px; *_min_px clamps keep thin strokes
 // and small handles visible when zoomed far out (non-scaling minimum).
-struct CanvasWireStyle {
-    math::Vec4 color;               // stroke colour
-    float      width;               // stroke width (world units)
-    float      min_width_px;        // screen-px floor for the stroke
-    float      end_tangent_min;     // min horizontal end-tangent length (world units)
-    bool       handles;             // draw a handle ring on interior waypoints
-    float      handle_radius;       // handle outer radius (world units)
-    float      handle_min_px;       // screen-px floor for the outer radius
-    float      handle_hole_radius;  // handle inner "hole" radius (world units)
-    float      handle_hole_min_px;  // screen-px floor for the hole radius
-    math::Vec4 handle_hole_color;   // hole fill; alpha 0 = use CanvasStyle::backdrop_color
-
-    static CanvasWireStyle default_style() {
-        CanvasWireStyle s;
-        s.color              = color_rgba8(204, 204, 204);
-        s.width              = 2.0f;
-        s.min_width_px       = 1.5f;
-        s.end_tangent_min    = 30.0f;
-        s.handles            = false;
-        s.handle_radius      = 4.0f;
-        s.handle_min_px      = 3.0f;
-        s.handle_hole_radius = 2.0f;
-        s.handle_hole_min_px = 1.5f;
-        s.handle_hole_color  = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
-        return s;
-    }
-
-    bool operator==(const CanvasWireStyle& o) const {
-        auto veq = [](const math::Vec4& a, const math::Vec4& b) {
-            return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
-        };
-        return veq(color, o.color) && width == o.width && min_width_px == o.min_width_px &&
-               end_tangent_min == o.end_tangent_min && handles == o.handles &&
-               handle_radius == o.handle_radius && handle_min_px == o.handle_min_px &&
-               handle_hole_radius == o.handle_hole_radius &&
-               handle_hole_min_px == o.handle_hole_min_px &&
-               veq(handle_hole_color, o.handle_hole_color);
-    }
-    bool operator!=(const CanvasWireStyle& o) const { return !(*this == o); }
-};
+// CanvasWireStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct CanvasWire {
     int                     id = -1;
@@ -122,31 +61,7 @@ struct CanvasWire {
 // roles (GuiColor::NodeTitle / PinLabel / Selection), resolved by the context from
 // its palette at collect time; a node's header/body/pin-dot colours stay per-node
 // DATA on CanvasNode/CanvasPin. So this struct holds no chrome colour value.
-struct CanvasNodeStyle {
-    float      corner_radius;       // node body/header rounding (world units)
-    float      header_height;       // header band height (world units)
-    float      row_height;          // vertical spacing between pin rows (world units)
-    float      pin_radius;          // pin dot radius (world units)
-    float      title_font;          // header title font (world units → screen px)
-    float      pin_font;            // pin label font (world units)
-    float      title_pad;           // header title left inset (world units)
-    float      pin_label_pad;       // pin label inset from the node edge (world units)
-    float      selection_border;    // selection outline thickness (world units)
-
-    static CanvasNodeStyle default_style() {
-        CanvasNodeStyle s;
-        s.corner_radius   = 6.0f;
-        s.header_height   = 24.0f;
-        s.row_height      = 18.0f;
-        s.pin_radius      = 5.0f;
-        s.title_font      = 14.0f;
-        s.pin_font        = 11.0f;
-        s.title_pad       = 8.0f;
-        s.pin_label_pad   = 8.0f;
-        s.selection_border = 2.0f;
-        return s;
-    }
-};
+// CanvasNodeStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct CanvasPin {
     std::string name;                                  // label (empty = no label)

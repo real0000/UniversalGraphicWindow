@@ -21,36 +21,7 @@ enum class ListBoxSelectionMode : uint8_t {
     None
 };
 
-struct ListBoxStyle {
-    math::Vec4 row_background;
-    math::Vec4 row_alt_background;
-    math::Vec4 selected_background;
-    math::Vec4 hover_background;
-    math::Vec4 text_color;
-    math::Vec4 selected_text_color;
-    math::Vec4 disabled_text_color;   // dimmer text for disabled rows (e.g. group headers)
-    math::Vec4 icon_color;
-    math::Vec4 separator_color;
-    float row_height = 24.0f;
-    float icon_size = 16.0f;
-    float item_padding = 8.0f;
-    float font_size = 13.0f;
-    bool show_separator = false;
-
-    static ListBoxStyle default_style() {
-        ListBoxStyle s;
-        s.row_background = color_rgba8(45, 45, 48);
-        s.row_alt_background = color_rgba8(50, 50, 53);
-        s.selected_background = color_rgba8(0, 122, 204);
-        s.hover_background = color_rgba8(62, 62, 66);
-        s.text_color = color_rgba8(241, 241, 241);
-        s.selected_text_color = color_rgba8(255, 255, 255);
-        s.disabled_text_color = color_rgba8(140, 142, 150);
-        s.icon_color = color_rgba8(200, 200, 200);
-        s.separator_color = color_rgba8(63, 63, 70);
-        return s;
-    }
-};
+// ListBoxStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct ListBoxItemRenderInfo {
     int item_id = -1;
@@ -143,47 +114,7 @@ public:
 // ComboBox Interface - Dropdown selection
 // ============================================================================
 
-struct ComboBoxStyle {
-    math::Vec4 background_color;
-    math::Vec4 hover_background;
-    math::Vec4 open_background;
-    math::Vec4 text_color;
-    math::Vec4 placeholder_color;
-    math::Vec4 arrow_color;
-    math::Vec4 dropdown_background;
-    math::Vec4 dropdown_border_color;
-    math::Vec4 item_hover_background;
-    math::Vec4 item_selected_background;
-    math::Vec4 item_text_color;
-    math::Vec4 item_selected_text_color;
-    float height = 28.0f;
-    float dropdown_max_height = 200.0f;
-    float item_height = 24.0f;
-    float item_padding = 8.0f;
-    float arrow_size = 10.0f;
-    float icon_size = 16.0f;
-    float corner_radius = 4.0f;
-    float dropdown_corner_radius = 4.0f;
-    float border_width = 1.0f;
-    float font_size = 13.0f;
-
-    static ComboBoxStyle default_style() {
-        ComboBoxStyle s;
-        s.background_color = color_rgba8(45, 45, 48);
-        s.hover_background = color_rgba8(62, 62, 66);
-        s.open_background = color_rgba8(37, 37, 38);
-        s.text_color = color_rgba8(241, 241, 241);
-        s.placeholder_color = color_rgba8(130, 130, 130);
-        s.arrow_color = color_rgba8(160, 160, 160);
-        s.dropdown_background = color_rgba8(37, 37, 38);
-        s.dropdown_border_color = color_rgba8(63, 63, 70);
-        s.item_hover_background = color_rgba8(62, 62, 66);
-        s.item_selected_background = color_rgba8(0, 122, 204);
-        s.item_text_color = color_rgba8(241, 241, 241);
-        s.item_selected_text_color = color_rgba8(255, 255, 255);
-        return s;
-    }
-};
+// ComboBoxStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct ComboBoxItemRenderInfo {
     int item_id = -1;

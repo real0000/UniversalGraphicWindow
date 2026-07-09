@@ -27,40 +27,7 @@ enum class TabSizeMode : uint8_t {
     Fill            // Stretch to fill available space
 };
 
-struct TabStyle {
-    math::Vec4 tab_background;
-    math::Vec4 tab_hover_background;
-    math::Vec4 tab_active_background;
-    math::Vec4 tab_text_color;
-    math::Vec4 tab_active_text_color;
-    math::Vec4 tab_bar_background;
-    math::Vec4 indicator_color;         // Active tab indicator line
-    math::Vec4 close_button_color;
-    math::Vec4 close_button_hover_color;
-    float tab_height = 30.0f;
-    float tab_min_width = 60.0f;
-    float tab_max_width = 200.0f;
-    float tab_padding = 12.0f;
-    float indicator_height = 2.0f;
-    float icon_size = 16.0f;
-    float close_button_size = 14.0f;
-    float corner_radius = 0.0f;
-    float font_size = 13.0f;
-
-    static TabStyle default_style() {
-        TabStyle s;
-        s.tab_background = color_rgba8(45, 45, 48);
-        s.tab_hover_background = color_rgba8(62, 62, 66);
-        s.tab_active_background = color_rgba8(37, 37, 38);
-        s.tab_text_color = color_rgba8(160, 160, 160);
-        s.tab_active_text_color = color_rgba8(241, 241, 241);
-        s.tab_bar_background = color_rgba8(30, 30, 30);
-        s.indicator_color = color_rgba8(0, 122, 204);
-        s.close_button_color = color_rgba8(160, 160, 160);
-        s.close_button_hover_color = color_rgba8(241, 241, 241);
-        return s;
-    }
-};
+// TabStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct TabRenderItem {
     int tab_id = -1;

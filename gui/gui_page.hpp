@@ -79,20 +79,7 @@ struct PageTransition {
 // Page Style
 // ============================================================================
 
-struct PageStyle {
-    math::Vec4 background_color;
-    math::Vec4 overlay_color;           // For modal overlay
-    float overlay_opacity = 0.5f;
-    bool enable_gesture_navigation = true;  // Swipe to go back
-    float gesture_threshold = 0.3f;     // Swipe distance ratio to trigger navigation
-
-    static PageStyle default_style() {
-        PageStyle s;
-        s.background_color = color_rgba8(30, 30, 30);
-        s.overlay_color = color_rgba8(0, 0, 0);
-        return s;
-    }
-};
+// PageStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 // ============================================================================
 // Page Event Handler

@@ -23,6 +23,8 @@
 
 #include "../math_util.hpp"
 #include "gui_theme.hpp"   // GuiColor roles + GuiTheme (draw commands carry a role)
+#include "gui_enums.hpp"   // foundational enums (Alignment, WidgetType, MouseButton, …)
+#include "gui_styles.hpp"  // centralized widget style structs (presets in gui_styles.cpp)
 
 namespace window {
 
@@ -37,82 +39,9 @@ class IGuiWidget;
 class ISizer;            // gui_sizer.hpp (included at end of this header)
 class ITextMeasurer;     // defined below
 
-// ============================================================================
-// Enums
-// ============================================================================
-
-enum class GuiResult : uint8_t {
-    Success = 0,
-    ErrorUnknown,
-    ErrorNotInitialized,
-    ErrorInvalidParameter,
-    ErrorOutOfMemory,
-    ErrorWidgetNotFound,
-    ErrorLayoutFailed,
-    ErrorViewportNotFound
-};
-
-enum class Alignment : uint8_t {
-    TopLeft = 0,
-    TopCenter,
-    TopRight,
-    CenterLeft,
-    Center,
-    CenterRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight
-};
-
-enum class LayoutDirection : uint8_t {
-    Horizontal = 0,
-    Vertical
-};
-
-enum class SizeMode : uint8_t {
-    Fixed = 0,      // Fixed pixel size
-    Relative,       // Relative to parent (0.0-1.0)
-    Auto,           // Size to content
-    Fill            // Fill remaining space
-};
-
-enum class WidgetState : uint8_t {
-    Normal = 0,
-    Hovered,
-    Pressed,
-    Focused,
-    Disabled
-};
-
-enum class WidgetType : uint8_t {
-    Custom = 0,
-    Container,
-    Panel,
-    Button,
-    Label,          // Text display
-    TextInput,      // Editable text
-    Checkbox,
-    RadioButton,
-    Slider,
-    ProgressBar,
-    ScrollArea,
-    ListBox,
-    ComboBox,
-    TabControl,
-    TreeView,
-    Image,
-    Separator,
-    Spacer,
-    CanvasView      // pannable/zoomable world-coordinate container (gui_canvas.hpp)
-};
-
-enum class MouseButton : uint8_t {
-    Left = 0,
-    Right,
-    Middle,
-    X1,
-    X2
-};
+// Foundational enums (GuiResult, Alignment, LayoutDirection, SizeMode,
+// WidgetState, WidgetType, MouseButton) live in gui_enums.hpp; the widget style
+// structs live in gui_styles.hpp — both included at top level above.
 
 // ============================================================================
 // Color helpers (math::Vec4: x=r, y=g, z=b, w=a, floats 0-1)
@@ -148,67 +77,6 @@ struct GuiInputState {
     bool ctrl_held = false;
     bool shift_held = false;
     bool alt_held = false;
-};
-
-// ============================================================================
-// Style - Visual appearance (no text properties)
-// ============================================================================
-
-struct GuiStyle {
-    // Colors (math::Vec4: x=r, y=g, z=b, w=a)
-    math::Vec4 background_color;
-    math::Vec4 border_color;
-    math::Vec4 hover_color;
-    math::Vec4 pressed_color;
-    math::Vec4 disabled_color;
-    math::Vec4 focus_color;
-
-    // Semantic role for the background fill. When != None the context resolves the
-    // background colour from its theme at collect time (background_color is ignored),
-    // so a plain container/panel themes without holding a colour value. Default None
-    // keeps the literal background_color (behaviour-neutral).
-    GuiColor background_role = GuiColor::None;
-
-    // Sizing
-    float border_width = 1.0f;
-    float corner_radius = 0.0f;
-    math::Vec4 padding;       // x=left, y=top, z=right, w=bottom
-    math::Vec4 margin;        // x=left, y=top, z=right, w=bottom
-
-    // Create default style
-    static GuiStyle default_style() {
-        GuiStyle style;
-        style.background_color = color_rgba8(45, 45, 48);
-        style.border_color = color_rgba8(63, 63, 70);
-        style.hover_color = color_rgba8(62, 62, 66);
-        style.pressed_color = color_rgba8(27, 27, 28);
-        style.disabled_color = color_rgba8(78, 78, 80);
-        style.focus_color = color_rgba8(0, 122, 204);
-        style.padding = math::Vec4(8.0f, 4.0f, 8.0f, 4.0f);
-        style.margin = math::Vec4(2.0f);
-        return style;
-    }
-};
-
-// ============================================================================
-// Label Style - Text-specific properties (only for Label widgets)
-// ============================================================================
-
-struct LabelStyle {
-    math::Vec4 text_color;
-    math::Vec4 selection_color;       // For TextInput
-    float font_size = 14.0f;
-    const char* font_name = nullptr;
-    Alignment alignment = Alignment::CenterLeft;
-    bool wrap = false;          // Word wrap
-    bool ellipsis = false;      // Truncate with "..."
-
-    static LabelStyle default_style() {
-        LabelStyle style;
-        style.text_color = color_rgba8(241, 241, 241);
-        style.selection_color = color_rgba8(51, 153, 255, 128);
-        return style;
-    }
 };
 
 // ============================================================================

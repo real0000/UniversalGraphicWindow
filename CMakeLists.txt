@@ -727,6 +727,7 @@ endif()
 if(WINDOW_ENABLE_GUI)
     list(APPEND WINDOW_SOURCES
         gui/gui.cpp
+        gui/gui_styles.cpp
         gui/gui_context.cpp
         gui/gui_label.cpp
         gui/gui_controls.cpp

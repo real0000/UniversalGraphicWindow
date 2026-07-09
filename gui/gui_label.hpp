@@ -35,31 +35,7 @@ public:
 // Visual style for a single-line text input. Lets a caller reproduce a bespoke
 // field (rounded bg, custom outline, no focus ring, placeholder colour) instead
 // of the hardcoded default look.
-struct TextInputStyle {
-    math::Vec4 background_color;
-    math::Vec4 border_color;
-    math::Vec4 focus_border_color;   // drawn only when alpha > 0 (0 = no focus ring)
-    math::Vec4 text_color;
-    math::Vec4 placeholder_color;
-    math::Vec4 selection_color;
-    math::Vec4 cursor_color;
-    float font_size    = 14.0f;
-    float corner_radius = 0.0f;       // > 0 → rounded background
-    float padding       = 6.0f;       // left/right text inset
-    bool  hide_placeholder_on_focus = false;  // false = show placeholder even when focused+empty
-
-    static TextInputStyle default_style() {
-        TextInputStyle s;
-        s.background_color    = color_rgba8(30, 30, 30);
-        s.border_color        = color_rgba8(64, 64, 69);
-        s.focus_border_color  = color_rgba8(0, 122, 204);
-        s.text_color          = color_rgba8(240, 240, 240);
-        s.placeholder_color   = math::Vec4(0.5f, 0.5f, 0.5f, 0.7f);
-        s.selection_color     = color_rgba8(38, 79, 120);
-        s.cursor_color        = color_rgba8(240, 240, 240);
-        return s;
-    }
-};
+// TextInputStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 class IGuiTextInput : public IGuiLabel {
 public:
@@ -114,39 +90,7 @@ enum class EditBoxWordWrap : uint8_t {
     Character       // Wrap at character boundaries
 };
 
-struct EditBoxStyle {
-    math::Vec4 background_color;
-    math::Vec4 text_color;
-    math::Vec4 selection_color;
-    math::Vec4 cursor_color;
-    math::Vec4 line_number_background;
-    math::Vec4 line_number_color;
-    math::Vec4 current_line_highlight;
-    math::Vec4 border_color;
-    math::Vec4 gutter_border_color;
-    float font_size = 13.0f;
-    const char* font_name = nullptr;    // Monospace recommended
-    float line_height = 1.2f;           // Multiplier of font_size
-    float gutter_width = 50.0f;         // Line number gutter
-    float padding = 4.0f;
-    float cursor_width = 2.0f;
-    float tab_width = 4.0f;             // Tab width in spaces
-    Alignment text_alignment = Alignment::CenterLeft;   // vertical placement of each line's text
-
-    static EditBoxStyle default_style() {
-        EditBoxStyle s;
-        s.background_color = color_rgba8(30, 30, 30);
-        s.text_color = color_rgba8(212, 212, 212);
-        s.selection_color = color_rgba8(38, 79, 120);
-        s.cursor_color = color_rgba8(255, 255, 255);
-        s.line_number_background = color_rgba8(37, 37, 38);
-        s.line_number_color = color_rgba8(133, 133, 133);
-        s.current_line_highlight = color_rgba8(40, 40, 40);
-        s.border_color = color_rgba8(63, 63, 70);
-        s.gutter_border_color = color_rgba8(45, 45, 48);
-        return s;
-    }
-};
+// EditBoxStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct TextPosition {
     int line = 0;       // 0-based line index

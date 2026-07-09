@@ -29,40 +29,7 @@ enum class ToolbarItemType : uint8_t {
     Widget          // Embedded custom widget
 };
 
-struct ToolbarStyle {
-    math::Vec4 background_color;
-    math::Vec4 button_color;
-    math::Vec4 button_hover_color;
-    math::Vec4 button_pressed_color;
-    math::Vec4 button_toggled_color;
-    math::Vec4 button_disabled_color;
-    math::Vec4 icon_color;
-    math::Vec4 icon_disabled_color;
-    math::Vec4 separator_color;
-    math::Vec4 overflow_button_color;
-    float button_size = 28.0f;
-    float icon_size = 16.0f;
-    float separator_width = 1.0f;
-    float separator_padding = 4.0f;
-    float button_padding = 2.0f;
-    float button_corner_radius = 4.0f;
-    float toolbar_padding = 4.0f;
-
-    static ToolbarStyle default_style() {
-        ToolbarStyle s;
-        s.background_color = color_rgba8(45, 45, 48);
-        s.button_color = color_rgba8(45, 45, 48, 0);
-        s.button_hover_color = color_rgba8(62, 62, 66);
-        s.button_pressed_color = color_rgba8(27, 27, 28);
-        s.button_toggled_color = color_rgba8(0, 122, 204, 80);
-        s.button_disabled_color = color_rgba8(45, 45, 48, 0);
-        s.icon_color = color_rgba8(241, 241, 241);
-        s.icon_disabled_color = color_rgba8(110, 110, 110);
-        s.separator_color = color_rgba8(63, 63, 70);
-        s.overflow_button_color = color_rgba8(80, 80, 80);
-        return s;
-    }
-};
+// ToolbarStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct ToolbarItemRenderInfo {
     int item_id = -1;
@@ -165,28 +132,7 @@ enum class StatusBarPanelSizeMode : uint8_t {
     Fill            // Fill remaining space
 };
 
-struct StatusBarStyle {
-    math::Vec4 background_color;
-    math::Vec4 text_color;
-    math::Vec4 separator_color;
-    math::Vec4 hover_background;
-    math::Vec4 icon_color;
-    float height = 24.0f;
-    float panel_padding = 8.0f;
-    float separator_width = 1.0f;
-    float icon_size = 14.0f;
-    float font_size = 12.0f;
-
-    static StatusBarStyle default_style() {
-        StatusBarStyle s;
-        s.background_color = color_rgba8(0, 122, 204);
-        s.text_color = color_rgba8(255, 255, 255);
-        s.separator_color = color_rgba8(255, 255, 255, 60);
-        s.hover_background = color_rgba8(255, 255, 255, 30);
-        s.icon_color = color_rgba8(255, 255, 255);
-        return s;
-    }
-};
+// StatusBarStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
 struct StatusBarPanelRenderInfo {
     int panel_id = -1;
