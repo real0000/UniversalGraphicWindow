@@ -70,13 +70,15 @@ public:
         if (same) for (size_t i=0;i<model.size();++i) {
             const auto& m=model[i]; const auto& it=items_[i];
             if (m.id!=it.id || m.text!=it.text || m.enabled!=it.enabled ||
-                m.has_action!=it.has_action || m.editable!=it.editable || !veq(m.swatch,it.swatch)) { same=false; break; }
+                m.has_action!=it.has_action || m.editable!=it.editable ||
+                !veq(m.swatch,it.swatch) || !veq(m.text_color,it.text_color)) { same=false; break; }
         }
         if (same) return;                       // unchanged → no repaint (like set_nodes)
         items_.clear(); items_.reserve(model.size());
         for (const auto& m : model) {
             WidgetItem it; it.id=m.id; it.text=m.text; it.enabled=m.enabled;
             it.swatch=m.swatch; it.editable=m.editable; it.has_action=m.has_action;
+            it.text_color=m.text_color;
             items_.push_back(std::move(it));
             if (m.id>=next_id_) next_id_=m.id+1;
         }
@@ -179,6 +181,8 @@ public:
             ri_.push_rect(bx, ry, bw, row_h, row_bg, d++, clip);
             math::Vec4 text_col = dis ? s.disabled_text_color
                                 : is_sel ? s.selected_text_color : s.text_color;
+            if (!dis && !is_sel && items_[i].text_color.w > 0.0f)
+                text_col = items_[i].text_color;   // per-row severity colour (log/console rows)
             // Leading colour swatch (model rows): a small rounded dot; text indents past it.
             float text_x = bx + s.item_padding;
             if (items_[i].swatch.w > 0.0f) {

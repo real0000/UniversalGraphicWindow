@@ -58,6 +58,7 @@ struct ListItemModel {
     bool       has_action = false;    // trailing "×" (delete) affordance
     bool       selected = false;
     bool       enabled = true;
+    math::Vec4 text_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);  // per-row override; alpha 0 = style default
 };
 
 class IListBoxEventHandler {

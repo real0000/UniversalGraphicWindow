@@ -389,6 +389,9 @@ struct WidgetItem {
     math::Vec4 swatch = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
     bool editable = false;
     bool has_action = false;
+    // Optional per-row text colour override (alpha 0 = use the style's text colour).
+    // Lets a log/console list colour rows by severity without a per-row widget.
+    math::Vec4 text_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
 };
 
 } // namespace gui
