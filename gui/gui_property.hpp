@@ -107,6 +107,18 @@ public:
     virtual void on_property_array_remove(const char* array_key, int index) { (void)array_key; (void)index; }
 };
 
+// One element of a PropertyArray: its sub-rows plus per-card chrome overrides. `title`
+// replaces the generated "#N" card header when non-empty (e.g. a pin shows its name);
+// `movable`/`removable` gate the ↑↓ / × on THIS card (ANDed with the array-level
+// can_move/can_remove — a FIXED pin sets removable=false while its list still adds and
+// removes other pins). A card with no `fields` renders as just the header row.
+struct PropertyArrayElement {
+    std::string title;                      // card header label (empty → "#N")
+    bool        movable = true;
+    bool        removable = true;
+    std::vector<PropertyModel> fields;      // element's sub-rows (may be empty)
+};
+
 // A repeated group of sub-property rows with built-in add/reorder/delete chrome. The
 // grid renders a section header (title + "+"), and per element a "#N" card header
 // (↑ ↓ ×) followed by that element's fields — the app only declares the fields and
@@ -116,9 +128,9 @@ struct PropertyArray {
     std::string key;                        // opaque app routing tag (echoed by on_property_array_*)
     std::string title;                      // section header label
     bool        can_add = true;             // "+" on the section header
-    bool        can_move = true;            // "↑ ↓" on each card
-    bool        can_remove = true;          // "×" on each card
-    std::vector<std::vector<PropertyModel>> elements;   // per-element field rows
+    bool        can_move = true;            // "↑ ↓" on each card (gated per-element by movable)
+    bool        can_remove = true;          // "×" on each card (gated per-element by removable)
+    std::vector<PropertyArrayElement> elements;
 };
 
 // A full inspector form: flat scalar rows, then the array sections (in order).

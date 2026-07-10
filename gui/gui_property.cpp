@@ -493,13 +493,14 @@ public:
             array_routes_[h.id] = {arr.key, -1};
             flat.push_back(std::move(h));
             for (int i = 0; i < (int)arr.elements.size(); ++i) {
+                const PropertyArrayElement& el = arr.elements[i];
                 PropertyModel ch; ch.id = gen--; ch.type = PropertyType::Category; ch.read_only = true;
-                ch.name = "#" + std::to_string(i+1);
-                if (arr.can_move) { ch.actions.push_back({PA_UP, "^", mvc}); ch.actions.push_back({PA_DN, "v", mvc}); }
-                if (arr.can_remove) ch.actions.push_back({PA_DEL, "x", delc});
+                ch.name = el.title.empty() ? ("#" + std::to_string(i+1)) : el.title;
+                if (arr.can_move && el.movable) { ch.actions.push_back({PA_UP, "^", mvc}); ch.actions.push_back({PA_DN, "v", mvc}); }
+                if (arr.can_remove && el.removable) ch.actions.push_back({PA_DEL, "x", delc});
                 array_routes_[ch.id] = {arr.key, i};
                 flat.push_back(std::move(ch));
-                for (const auto& f : arr.elements[i]) flat.push_back(f);
+                for (const auto& f : el.fields) flat.push_back(f);
             }
         }
         set_properties(flat);
