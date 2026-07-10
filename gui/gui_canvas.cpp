@@ -318,6 +318,20 @@ public:
             base_.mark_dirty();
             return true;
         }
+        if (wp_drag_) {                                   // drag a bend handle
+            if (evt_) evt_->on_canvas_waypoint_dragged(wp_drag_wire_, wp_drag_point_, screen_to_world(pos));
+            return true;
+        }
+        if (conn_press_) {                                // press on a wire line → drag inserts a bend
+            if (std::abs(math::x(pos) - math::x(press_screen_)) +
+                std::abs(math::y(pos) - math::y(press_screen_)) > 4.0f) {
+                conn_press_ = false;
+                const int pidx = evt_ ? evt_->on_canvas_wire_insert(conn_wire_, press_world_) : -1;
+                if (pidx >= 0) { wp_drag_ = true; wp_drag_wire_ = conn_wire_; wp_drag_point_ = pidx;
+                                 if (evt_) evt_->on_canvas_waypoint_dragged(conn_wire_, pidx, screen_to_world(pos)); }
+            }
+            return true;
+        }
         if (node_press_ && want_drag_) {
             if (!node_dragging_ &&
                 std::abs(math::x(pos) - math::x(press_screen_)) +
@@ -384,6 +398,43 @@ private:
         return math::Vec2(p.output ? math::x(n.pos) + n.width : math::x(n.pos),
                           math::y(n.pos) + s.header_height + s.row_height * (float(p.row) + 0.5f));
     }
+    // A waypoint handle (interior wire point) under `w` → wire index + point index (>=1).
+    bool waypoint_at(const math::Vec2& w, int& wi, int& pi) const {
+        const float tol = std::max(6.0f, 8.0f / scale_);
+        const float wx = math::x(w), wy = math::y(w);
+        for (int i = 0; i < (int)wires_.size(); ++i) {
+            const auto& pts = wires_[(std::size_t)i].points;
+            for (int j = 1; j + 1 < (int)pts.size(); ++j)
+                if (std::abs(wx - math::x(pts[(std::size_t)j])) <= tol &&
+                    std::abs(wy - math::y(pts[(std::size_t)j])) <= tol) { wi = i; pi = j; return true; }
+        }
+        return false;
+    }
+    // A wire under `w` → wire index. Matches the app's orthogonal-run hit region (each
+    // segment tested as h-v-h through its midpoint), so click points stay identical to the
+    // immediate path even though the wire renders as a bezier.
+    bool wire_at(const math::Vec2& w, int& wi) const {
+        const float tol = 8.0f / scale_;
+        const float wx = math::x(w), wy = math::y(w);
+        const auto near_h = [&](float xa, float xb, float y) {
+            if (xb < xa) std::swap(xa, xb);
+            return wx >= xa - tol && wx <= xb + tol && std::abs(wy - y) <= tol;
+        };
+        const auto near_v = [&](float x, float ya, float yb) {
+            if (yb < ya) std::swap(ya, yb);
+            return wy >= ya - tol && wy <= yb + tol && std::abs(wx - x) <= tol;
+        };
+        for (int i = 0; i < (int)wires_.size(); ++i) {
+            const auto& pts = wires_[(std::size_t)i].points;
+            for (int j = 0; j + 1 < (int)pts.size(); ++j) {
+                const float ax = math::x(pts[(std::size_t)j]),   ay = math::y(pts[(std::size_t)j]);
+                const float bx = math::x(pts[(std::size_t)j+1]), by = math::y(pts[(std::size_t)j+1]);
+                const float mx = (ax + bx) * 0.5f;
+                if (near_h(ax, mx, ay) || near_v(mx, ay, by) || near_h(mx, bx, by)) { wi = i; return true; }
+            }
+        }
+        return false;
+    }
     // Synthesize a double-click (the X11 backend doesn't report click counts): a second
     // left press within 350 ms and 6 px of the first.
     bool detect_double(const math::Vec2& screen) {
@@ -419,10 +470,24 @@ private:
                 return true;
             }
         }
+        // Waypoint handle (before node): double-click removes the bend, else drag it.
+        {
+            int wi = -1, pi = -1;
+            if (waypoint_at(w, wi, pi)) {
+                if (dbl) { if (evt_) evt_->on_canvas_waypoint_removed(wi, pi); }
+                else     { wp_drag_ = true; wp_drag_wire_ = wi; wp_drag_point_ = pi; }
+                return true;
+            }
+        }
         if (const CanvasNode* n = node_at(w)) {
             node_press_ = true; press_node_id_ = n->id;
             want_drag_ = evt_ ? evt_->on_canvas_node_pressed(n->id, mods, dbl) : false;
             return true;
+        }
+        // Wire line (deferred): release-in-place selects; drag inserts a bend then drags it.
+        {
+            int wi = -1;
+            if (wire_at(w, wi)) { conn_press_ = true; conn_wire_ = wi; conn_mods_ = mods; return true; }
         }
         marquee_ = true; marquee_mods_ = mods; mq_start_world_ = mq_cur_world_ = w;
         if (evt_) evt_->on_canvas_background_pressed(w, mods);
@@ -438,6 +503,12 @@ private:
                     evt_->on_canvas_pin_connect(link_node_id_, link_pin_name_, tn->id, tp.name);
             }
             link_node_id_.clear(); link_pin_name_.clear();
+            return true;
+        }
+        if (wp_drag_) { wp_drag_ = false; return true; }        // waypoint drag ended
+        if (conn_press_) {                                      // released without dragging → select
+            conn_press_ = false;
+            if (evt_) evt_->on_canvas_wire_pressed(conn_wire_, conn_mods_);
             return true;
         }
         if (node_press_) {
@@ -557,6 +628,11 @@ private:
     math::Vec2  link_from_world_ = math::Vec2(0.0f, 0.0f);
     CanvasWire  preview_wire_;
     bool        preview_on_ = false;
+    // Connection select + waypoint edit (phase 4).
+    bool        wp_drag_ = false;                    // dragging a bend handle
+    int         wp_drag_wire_ = -1, wp_drag_point_ = -1;
+    bool        conn_press_ = false;                 // deferred wire-line press (select vs insert-bend)
+    int         conn_wire_ = -1, conn_mods_ = 0;
 };
 
 IGuiCanvasView* create_canvas_view_widget() { return new GuiCanvasView(); }

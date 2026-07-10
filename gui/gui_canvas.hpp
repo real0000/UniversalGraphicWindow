@@ -145,6 +145,28 @@ public:
                                        const std::string& to_node, const std::string& to_pin) {
         (void)from_node; (void)from_pin; (void)to_node; (void)to_pin;
     }
+
+    // ── Phase 4: connection select + waypoint edit ──────────────────────────────
+    // `wire_index` is the wire's position in the current list (matches the bind_wires
+    // provider's build order — the app maps it to its connection). A wire was pressed and
+    // released WITHOUT dragging → select that connection.
+    virtual void on_canvas_wire_pressed(int wire_index, int mods) { (void)wire_index; (void)mods; }
+    // A press+drag started on a wire LINE (not a handle) → insert a bend at `world` on that
+    // wire's connection and RETURN the new point's index in the wire's point list (points[0]
+    // is the from-endpoint, so a waypoint is >=1), or -1 to decline; the canvas then drags
+    // that point via on_canvas_waypoint_dragged.
+    virtual int on_canvas_wire_insert(int wire_index, const math::Vec2& world) {
+        (void)wire_index; (void)world; return -1;
+    }
+    // A waypoint handle (interior point `point_index`) is dragged to `world` (connection
+    // waypoint index = point_index - 1).
+    virtual void on_canvas_waypoint_dragged(int wire_index, int point_index, const math::Vec2& world) {
+        (void)wire_index; (void)point_index; (void)world;
+    }
+    // A waypoint handle was double-clicked → remove that bend.
+    virtual void on_canvas_waypoint_removed(int wire_index, int point_index) {
+        (void)wire_index; (void)point_index;
+    }
 };
 
 // ============================================================================
