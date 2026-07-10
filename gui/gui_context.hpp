@@ -82,6 +82,10 @@ public:
     // Input (specify which viewport receives input)
     virtual void set_input_state(int viewport_id, const GuiInputState& state) = 0;
     virtual const GuiInputState& get_input_state() const = 0;
+    // Current key-modifier bitmask, fed to widgets that need it (e.g. the canvas's
+    // modifier provider). attach_window sets this from platform events; an app that owns
+    // its own input routing (set_host_window) sets it before each dispatch_* call.
+    virtual void set_current_modifiers(int mods) = 0;
 
     // Dispatch scroll to the topmost widget under mouse_pos (depth-first hit-test).
     // Called automatically by begin_frame() when input_state has non-zero scroll delta.

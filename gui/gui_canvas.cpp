@@ -359,7 +359,7 @@ public:
     }
     bool handle_mouse_scroll(float dx, float dy) override {
         if (dy == 0.0f) return base_.handle_mouse_scroll(dx, dy);
-        zoom_about(last_mouse_, dy > 0.0f ? 1.1f : (1.0f / 1.1f));
+        zoom_about(last_mouse_, dy > 0.0f ? 1.15f : (1.0f / 1.15f));
         return true;
     }
 
@@ -448,7 +448,8 @@ private:
         return dbl;
     }
     bool left_press(const math::Vec2& screen) {
-        if (base_.handle_mouse_button(MouseButton::Left, true, screen)) return true;   // app overlays first
+        // The canvas owns left clicks (its internal content/node layers are opaque
+        // containers that would otherwise swallow the press before hit-testing).
         const math::Vec2 w = screen_to_world(screen);
         const bool dbl = detect_double(screen);
         const int mods = mods_provider_ ? mods_provider_() : 0;

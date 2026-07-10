@@ -598,6 +598,7 @@ public:
 
     void set_input_state(int, const GuiInputState& s) override { input_state_=s; }
     const GuiInputState& get_input_state() const override { return input_state_; }
+    void set_current_modifiers(int mods) override { cur_mods_ = mods; }
 
     IGuiWidget* get_root() override { return &root_; }
 
