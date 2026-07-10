@@ -101,11 +101,34 @@ struct CanvasNode {
 };
 
 // ============================================================================
+// ICanvasViewEventHandler - interaction callbacks
+//
+// The canvas owns its input: it hit-tests its retained node/wire model, runs the
+// camera (pan/zoom) and drag state machines itself, and reports SEMANTIC events here
+// so a node editor carries no mouse math. All positions are WORLD coordinates. Every
+// method defaults to a no-op — an app overrides only what it uses; the set grows as
+// interaction phases land.
+// ============================================================================
+
+class ICanvasViewEventHandler {
+public:
+    virtual ~ICanvasViewEventHandler() = default;
+    // The camera moved (middle/right-drag pan, or wheel zoom about the cursor). The
+    // canvas has already applied the view; persist origin/scale if you keep them.
+    virtual void on_canvas_view_changed(const math::Vec2& origin, float scale) { (void)origin; (void)scale; }
+};
+
+// ============================================================================
 // CanvasView Interface - world-space container + view + wires + rubber band
 // ============================================================================
 
 class IGuiCanvasView : public IGuiWidget {
 public:
+    // Interaction handler (see ICanvasViewEventHandler). null = camera-only (pan/zoom
+    // still work; node/pin/marquee callbacks simply have nowhere to go).
+    virtual void set_canvas_event_handler(ICanvasViewEventHandler* handler) = 0;
+    // Min/max view scale (screen px per world unit) the built-in zoom clamps to.
+    virtual void set_zoom_limits(float min_scale, float max_scale) = 0;
     // Style
     virtual const CanvasStyle& get_canvas_style() const = 0;
     virtual void set_canvas_style(const CanvasStyle& style) = 0;

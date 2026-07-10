@@ -274,7 +274,61 @@ public:
         refresh_transform();
     }
 
+    void set_canvas_event_handler(ICanvasViewEventHandler* h) override { evt_ = h; }
+    void set_zoom_limits(float mn, float mx) override {
+        if (mn > 0.0f) min_scale_ = mn;
+        if (mx > 0.0f) max_scale_ = mx;
+    }
+
+    // ---- Built-in interaction: camera pan (middle/right drag) + zoom (wheel). Node/
+    //      pin/marquee hit-testing lands in later phases; left button is left to the
+    //      app for now (returns false so it bubbles / the app handles it). ----------
+    bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& pos) override {
+        if (btn == MouseButton::Middle || btn == MouseButton::Right) {
+            if (pressed) { panning_ = true; pan_last_ = pos; }
+            else         { panning_ = false; }
+            return true;
+        }
+        return base_.handle_mouse_button(btn, pressed, pos);   // left → children / app
+    }
+    bool handle_mouse_move(const math::Vec2& pos) override {
+        last_mouse_ = pos;                                 // tracked for wheel-zoom centre
+        if (panning_) {
+            const float inv = 1.0f / scale_;
+            origin_ = math::Vec2(math::x(origin_) - (math::x(pos) - math::x(pan_last_)) * inv,
+                                 math::y(origin_) - (math::y(pos) - math::y(pan_last_)) * inv);
+            pan_last_ = pos;
+            refresh_transform();
+            base_.mark_dirty();
+            if (evt_) evt_->on_canvas_view_changed(origin_, scale_);
+            return true;
+        }
+        return base_.handle_mouse_move(pos);
+    }
+    bool handle_mouse_scroll(float dx, float dy) override {
+        if (dy == 0.0f) return base_.handle_mouse_scroll(dx, dy);
+        zoom_about(last_mouse_, dy > 0.0f ? 1.1f : (1.0f / 1.1f));
+        return true;
+    }
+
 private:
+    // Zoom keeping the world point under `screen` fixed (wheel + programmatic).
+    void zoom_about(const math::Vec2& screen, float factor) {
+        const math::Vec2 w = screen_to_world(screen);
+        float ns = scale_ * factor;
+        if (ns < min_scale_) ns = min_scale_;
+        if (ns > max_scale_) ns = max_scale_;
+        if (ns == scale_) return;
+        scale_ = ns;
+        const math::Box b = base_.get_bounds();
+        const float inv = 1.0f / scale_;
+        origin_ = math::Vec2(math::x(w) - (math::x(screen) - math::x(math::box_min(b))) * inv,
+                             math::y(w) - (math::y(screen) - math::y(math::box_min(b))) * inv);
+        refresh_transform();
+        base_.mark_dirty();
+        if (evt_) evt_->on_canvas_view_changed(origin_, scale_);
+    }
+
     static bool box_equal(const math::Box& a, const math::Box& b) {
         return math::x(math::box_min(a)) == math::x(math::box_min(b)) &&
                math::y(math::box_min(a)) == math::y(math::box_min(b)) &&
@@ -330,6 +384,12 @@ private:
     int next_wire_id_ = 0;
     std::function<std::vector<CanvasNode>()> nodes_provider_;   // bound model sources (set once)
     std::function<std::vector<CanvasWire>()> wires_provider_;
+    // Interaction state (built-in camera; node/pin/marquee phases extend this).
+    ICanvasViewEventHandler* evt_ = nullptr;
+    bool       panning_ = false;
+    math::Vec2 pan_last_   = math::Vec2(0.0f, 0.0f);
+    math::Vec2 last_mouse_ = math::Vec2(0.0f, 0.0f);
+    float      min_scale_ = 0.2f, max_scale_ = 3.0f;
 };
 
 IGuiCanvasView* create_canvas_view_widget() { return new GuiCanvasView(); }
