@@ -94,6 +94,18 @@ public:
     // own data + asks for a repaint, and the list reacts. Pass {} to clear.
     virtual void bind(std::function<std::vector<ListItemModel>()> provider) = 0;
 
+    // Custom row widgets (set ONCE): instead of the built-in row drawing, the app
+    // supplies a `factory` that builds ONE reusable row widget (e.g. a panel of
+    // label + buttons) and a `binder` that populates a row widget from its model
+    // entry each reconcile. The list owns the widgets' lifecycle: it grows a pool via
+    // the factory to match the model, parents them as its children, positions them by
+    // row_height (+ scroll) and hides off-view/extra rows; child widgets (buttons)
+    // take their own clicks, and a click on the bare row still fires on_item_selected.
+    // Pass {} to revert to built-in row drawing. Row height comes from the list style.
+    virtual void set_row_widget(
+        std::function<IGuiWidget*()> factory,
+        std::function<void(IGuiWidget* row, const ListItemModel& data)> binder) = 0;
+
     // Item info
     virtual const char* get_item_text(int item_id) const = 0;
     virtual void set_item_text(int item_id, const char* text) = 0;

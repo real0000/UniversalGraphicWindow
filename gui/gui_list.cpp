@@ -18,8 +18,45 @@ class GuiListBox : public WidgetBase<IGuiListBox, WidgetType::ListBox> {
     ListBoxStyle style_=ListBoxStyle::default_style();
     IListBoxEventHandler* handler_=nullptr;
     std::function<std::vector<ListItemModel>()> provider_;   // bound model source (set once)
+    // Custom row-widget template (set once): factory builds a reusable row widget,
+    // binder populates it from a row's model. When set, built-in row drawing is
+    // suppressed and the list manages a pool of row child widgets instead.
+    std::function<IGuiWidget*()> row_factory_;
+    std::function<void(IGuiWidget*, const ListItemModel&)> row_binder_;
+    std::vector<IGuiWidget*> row_widgets_;                   // pooled row widgets (children)
     mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
+    // Reconstruct a ListItemModel for row i (what the binder consumes).
+    ListItemModel item_model(int i) const {
+        const WidgetItem& it = items_[i];
+        ListItemModel m; m.id=it.id; m.text=it.text; m.swatch=it.swatch;
+        m.editable=it.editable; m.has_action=it.has_action; m.enabled=it.enabled;
+        m.selected=(it.id==selected_); m.text_color=it.text_color; return m;
+    }
+    // Grow/position/populate the row-widget pool to match the model. Called before
+    // each render (refresh_bindings). Rows fully off-view are hidden; extras hidden.
+    void reconcile_row_widgets() {
+        if (!row_factory_) return;
+        auto b=base_.get_bounds();
+        float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
+        float bw=math::box_width(b), bh=math::box_height(b);
+        float rh=style_.row_height;
+        while ((int)row_widgets_.size() < (int)items_.size()) {
+            IGuiWidget* w=row_factory_(); if(!w) break;
+            row_widgets_.push_back(w); base_.add_child(w);
+        }
+        for (int i=0;i<(int)row_widgets_.size();++i) {
+            IGuiWidget* w=row_widgets_[i]; if(!w) continue;
+            if (i<(int)items_.size()) {
+                float ry=by+i*rh-scroll_y_;
+                bool vis=(ry+rh>by)&&(ry<by+bh);
+                w->set_visible(vis);
+                if (vis) { w->set_bounds(math::make_box(bx,ry,bw,rh)); if(row_binder_) row_binder_(w,item_model(i)); }
+            } else {
+                w->set_visible(false);
+            }
+        }
+    }
 public:
     bool handle_mouse_move(const math::Vec2& p) override {
         if (sb_drag_) {
@@ -32,6 +69,22 @@ public:
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!base_.is_enabled() || !hit_test(p)) return false;
         if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; }
+        if (row_factory_) {
+            // Custom row widgets: their child buttons (delete/test) take the click
+            // first; a click on the bare row still selects it.
+            if (base_.handle_mouse_button(btn, pressed, p)) return true;
+            if (btn == MouseButton::Left && pressed) {
+                auto b = base_.get_bounds();
+                float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
+                int row = (style_.row_height > 0) ? (int)(rel_y / style_.row_height) : -1;
+                if (row >= 0 && row < (int)items_.size()) {
+                    int old = selected_;
+                    selected_ = items_[row].id;
+                    if (selected_ != old && handler_) handler_->on_item_selected(selected_);
+                }
+            }
+            return true;
+        }
         if (btn == MouseButton::Left && pressed) {
             float content_h = get_total_content_height();
             if (scrollbar_hit_test(base_.get_bounds(), content_h, p)) {
@@ -89,7 +142,15 @@ public:
     void bind(std::function<std::vector<ListItemModel>()> provider) override {
         provider_ = std::move(provider); base_.mark_dirty();
     }
-    void refresh_bindings() override { if (provider_) set_items(provider_()); }
+    void set_row_widget(std::function<IGuiWidget*()> factory,
+                        std::function<void(IGuiWidget*, const ListItemModel&)> binder) override {
+        row_factory_=std::move(factory); row_binder_=std::move(binder);
+        base_.mark_dirty();
+    }
+    void refresh_bindings() override {
+        if (provider_) set_items(provider_());
+        reconcile_row_widgets();
+    }
     // Trailing "×" action hit zone for a row (right edge, one row_height wide).
     math::Box action_rect(int row) const {
         auto b=base_.get_bounds();
@@ -168,8 +229,8 @@ public:
         const auto& s = style_;
         // Background
         ri_.push_rect(bx, by, bw, bh, s.row_background, d++, noclip);
-        // Rows
-        int count = (int)items_.size();
+        // Rows — suppressed when custom row widgets draw them (children render on top).
+        int count = row_factory_ ? 0 : (int)items_.size();
         float row_h = s.row_height;
         for (int i = 0; i < count; i++) {
             float ry = by + i * row_h - scroll_y_;
