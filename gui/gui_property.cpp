@@ -10,15 +10,28 @@ namespace gui {
 
 class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> {
     struct Prop {
-        int id=-1; std::string name, category, str_val;
+        int id=-1; std::string key, name, category, str_val;
         PropertyType type=PropertyType::String;
         int int_val=0; float float_val=0; bool bool_val=false;
         math::Vec2 vec2_val; math::Vec4 vec4_val;
-        std::vector<std::string> enum_opts; int enum_idx=0;
+        std::vector<std::string> enum_opts, enum_values; int enum_idx=0;
         float range_min=0, range_max=1;
         bool read_only=false;
         std::vector<PropertyAction> actions;   // right-aligned row buttons
     };
+    // Canonical value the app should store for a property (Bool→"true"/"false",
+    // Enum→selected value (or label), else the text). Backs get_property_value.
+    mutable std::string val_str_;
+    const char* canonical_value(const Prop& p) const {
+        if (p.type == PropertyType::Bool) { val_str_ = p.bool_val ? "true" : "false"; return val_str_.c_str(); }
+        if (p.type == PropertyType::Enum) {
+            int i = p.enum_idx;
+            if (i >= 0 && i < (int)p.enum_values.size()) { val_str_ = p.enum_values[i]; return val_str_.c_str(); }
+            if (i >= 0 && i < (int)p.enum_opts.size())   { val_str_ = p.enum_opts[i];   return val_str_.c_str(); }
+            val_str_.clear(); return val_str_.c_str();
+        }
+        val_str_ = p.str_val; return val_str_.c_str();
+    }
     // Right-aligned action-button rects for a value row (right→left), paired with id.
     void row_action_rects(const Prop& p, float bx, float bw, float ry,
                           std::vector<std::pair<math::Box,int>>& out) const {
@@ -36,6 +49,13 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
     PropertyGridStyle style_=PropertyGridStyle::default_style();
     IPropertyGridEventHandler* handler_=nullptr;
     std::function<std::vector<PropertyModel>()> provider_;   // bound model source (set once)
+    std::function<PropertyForm()> form_provider_;            // bound form source (set once)
+    // Array-section CRUD routing: generated section/card header rows (negative ids)
+    // map to (array_id, element index; -1 = section header). Action button ids encode
+    // the operation (PA_ADD/UP/DN/DEL).
+    enum { PA_ADD=1, PA_UP, PA_DN, PA_DEL };
+    struct ArrayRoute { std::string array_key; int index=-1; };   // index=-1 = section header
+    std::unordered_map<int, ArrayRoute> array_routes_;
     static const std::vector<std::string> empty_opts_;
     int editing_id_=-1;
     std::string edit_buf_;
@@ -295,7 +315,10 @@ public:
                         row_action_rects(prop, bx, bw, ry, arects);
                         for (auto& ar : arects)
                             if (math::box_contains(ar.first, p)) {
-                                if (handler_) handler_->on_property_action(prop.id, ar.second);
+                                // A generated array-section header routes to on_property_array_*;
+                                // any other action row is the app's own → on_property_action.
+                                if (!route_array_action(prop.id, ar.second))
+                                    if (handler_) handler_->on_property_action(prop.id, ar.second);
                                 return true;
                             }
                     }
@@ -399,7 +422,7 @@ public:
             case PropertyType::Float:
             case PropertyType::Range: p.float_val = (float)std::atof(m.svalue.c_str()); p.str_val=m.svalue; break;
             case PropertyType::Bool:  p.bool_val  = m.bvalue; break;
-            case PropertyType::Enum:  p.enum_opts = m.options; p.enum_idx = m.enum_index; break;
+            case PropertyType::Enum:  p.enum_opts = m.options; p.enum_values = m.option_values; p.enum_idx = m.enum_index; break;
             default:                  p.str_val   = m.svalue; break;
         }
     }
@@ -425,9 +448,9 @@ public:
         bool struct_same = model.size()==props_.size();
         if (struct_same) for (size_t i=0;i<model.size();++i) {
             const auto& m=model[i]; const auto& p=props_[i];
-            if (m.id!=p.id || m.name!=p.name || m.category!=p.category || m.type!=p.type ||
+            if (m.id!=p.id || m.key!=p.key || m.name!=p.name || m.category!=p.category || m.type!=p.type ||
                 m.read_only!=p.read_only || !actions_same(m.actions, p.actions) ||
-                (m.type==PropertyType::Enum && m.options!=p.enum_opts)) { struct_same=false; break; }
+                (m.type==PropertyType::Enum && (m.options!=p.enum_opts || m.option_values!=p.enum_values))) { struct_same=false; break; }
         }
         if (struct_same) {
             if (editing_id_ >= 0) return;                 // don't disturb an in-progress edit
@@ -440,7 +463,7 @@ public:
         cancel_edit();
         props_.clear(); props_.reserve(model.size());
         for (const auto& m : model) {
-            Prop p; p.id=m.id; p.name=m.name; p.category=m.category; p.type=m.type; p.read_only=m.read_only;
+            Prop p; p.id=m.id; p.key=m.key; p.name=m.name; p.category=m.category; p.type=m.type; p.read_only=m.read_only;
             p.actions=m.actions;
             apply_value(p, m);
             props_.push_back(std::move(p));
@@ -453,13 +476,64 @@ public:
     void bind(std::function<std::vector<PropertyModel>()> provider) override {
         provider_ = std::move(provider); base_.mark_dirty();
     }
-    void refresh_bindings() override { if (provider_) set_properties(provider_()); }
+    // Expand a form (scalars + array sections) into flat rows, generating a section
+    // header ("+") and per-element "#N" card header (↑ ↓ ×) via the action-row
+    // mechanism, and record the header→(array,index) routing. Reuses set_properties so
+    // an unchanged form still diffs to no repaint (generated ids are deterministic).
+    void set_form(const PropertyForm& form) override {
+        array_routes_.clear();
+        std::vector<PropertyModel> flat;
+        flat.reserve(form.props.size() + form.arrays.size()*4);
+        for (const auto& p : form.props) flat.push_back(p);
+        int gen = -1000000;
+        const math::Vec4 addc(0.24f,0.47f,0.78f,1.0f), mvc(0.21f,0.22f,0.25f,1.0f), delc(0.43f,0.19f,0.19f,1.0f);
+        for (const auto& arr : form.arrays) {
+            PropertyModel h; h.id = gen--; h.type = PropertyType::Category; h.read_only = true; h.name = arr.title;
+            if (arr.can_add) h.actions.push_back({PA_ADD, "+", addc});
+            array_routes_[h.id] = {arr.key, -1};
+            flat.push_back(std::move(h));
+            for (int i = 0; i < (int)arr.elements.size(); ++i) {
+                PropertyModel ch; ch.id = gen--; ch.type = PropertyType::Category; ch.read_only = true;
+                ch.name = "#" + std::to_string(i+1);
+                if (arr.can_move) { ch.actions.push_back({PA_UP, "^", mvc}); ch.actions.push_back({PA_DN, "v", mvc}); }
+                if (arr.can_remove) ch.actions.push_back({PA_DEL, "x", delc});
+                array_routes_[ch.id] = {arr.key, i};
+                flat.push_back(std::move(ch));
+                for (const auto& f : arr.elements[i]) flat.push_back(f);
+            }
+        }
+        set_properties(flat);
+    }
+    void bind_form(std::function<PropertyForm()> provider) override {
+        form_provider_ = std::move(provider); base_.mark_dirty();
+    }
+    void refresh_bindings() override {
+        if (form_provider_) set_form(form_provider_());
+        else if (provider_) set_properties(provider_());
+    }
+    // Translate an action-row click on a generated header into an array-CRUD callback.
+    // Returns true if the id was a generated array header (consumed).
+    bool route_array_action(int prop_id, int action_id) {
+        auto it = array_routes_.find(prop_id);
+        if (it == array_routes_.end()) return false;
+        const ArrayRoute rt = it->second;
+        if (handler_) {
+            const char* k = rt.array_key.c_str();
+            if (action_id == PA_ADD)      handler_->on_property_array_add(k);
+            else if (action_id == PA_UP)  handler_->on_property_array_move(k, rt.index, -1);
+            else if (action_id == PA_DN)  handler_->on_property_array_move(k, rt.index, +1);
+            else if (action_id == PA_DEL) handler_->on_property_array_remove(k, rt.index);
+        }
+        return true;
+    }
     bool remove_property(int id) override { int i=find_idx(id); if(i<0)return false; props_.erase(props_.begin()+i); return true; }
     void clear_properties() override { props_.clear(); selected_=-1; }
     int get_property_count() const override { return (int)props_.size(); }
     const char* get_property_name(int id) const override { int i=find_idx(id); return i>=0?props_[i].name.c_str():""; }
     const char* get_property_category(int id) const override { int i=find_idx(id); return i>=0?props_[i].category.c_str():""; }
     PropertyType get_property_type(int id) const override { int i=find_idx(id); return i>=0?props_[i].type:PropertyType::String; }
+    const char* get_property_key(int id) const override { int i=find_idx(id); return i>=0?props_[i].key.c_str():""; }
+    const char* get_property_value(int id) const override { int i=find_idx(id); return i>=0?canonical_value(props_[i]):""; }
     void set_string_value(int id,const char* v) override { int i=find_idx(id); if(i>=0)props_[i].str_val=v?v:""; }
     int get_int_value(int id) const override { int i=find_idx(id); return i>=0?props_[i].int_val:0; }
     void set_int_value(int id,int v) override { int i=find_idx(id); if(i>=0)props_[i].int_val=v; }
