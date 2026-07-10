@@ -66,6 +66,17 @@ struct PropertyGridRenderInfo {
 // to categories: e.g. an "If" node = a "Case 1" category with name/operator/value
 // rows. `id` is stable and echoed back by on_property_changed. svalue carries
 // String/Int/Float/Range as text; bvalue is Bool; options+enum_index are Enum.
+// A small action affordance on a property row (a right-aligned button). Lets a
+// structured editor put "+" on a section/card header and "↑ ↓ ×" on a card without
+// leaving the grid; a click fires on_property_action(row id, action.id). A row of
+// type Category renders as a plain header (name only, no value box) — use it for the
+// section ("Cases  [+]") and card ("#1  ↑ ↓ ×") header rows.
+struct PropertyAction {
+    int         id = 0;
+    std::string label;                                 // button glyph/text ("+", "×", "^", "v")
+    math::Vec4  color = math::Vec4(0, 0, 0, 0);        // fill; alpha 0 = style default
+};
+
 struct PropertyModel {
     int         id = -1;
     std::string category, name;
@@ -75,12 +86,16 @@ struct PropertyModel {
     std::vector<std::string> options;
     int         enum_index = 0;
     bool        read_only = false;
+    std::vector<PropertyAction> actions;               // right-aligned row buttons
 };
 
 class IPropertyGridEventHandler {
 public:
     virtual ~IPropertyGridEventHandler() = default;
     virtual void on_property_changed(int property_id) = 0;
+    // A row action button was clicked (PropertyModel::actions). Default no-op so
+    // existing handlers keep compiling.
+    virtual void on_property_action(int property_id, int action_id) { (void)property_id; (void)action_id; }
 };
 
 class IGuiPropertyGrid : public IGuiWidget {

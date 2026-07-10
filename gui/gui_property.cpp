@@ -17,7 +17,18 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         std::vector<std::string> enum_opts; int enum_idx=0;
         float range_min=0, range_max=1;
         bool read_only=false;
+        std::vector<PropertyAction> actions;   // right-aligned row buttons
     };
+    // Right-aligned action-button rects for a value row (right→left), paired with id.
+    void row_action_rects(const Prop& p, float bx, float bw, float ry,
+                          std::vector<std::pair<math::Box,int>>& out) const {
+        const float aw = row_h_ - 6.0f;
+        float ax = bx + bw - 4.0f;
+        for (int k = (int)p.actions.size() - 1; k >= 0; --k) {
+            ax -= aw + 3.0f;
+            out.push_back({ math::make_box(ax, ry + 3.0f, aw, row_h_ - 6.0f), p.actions[k].id });
+        }
+    }
     std::vector<Prop> props_;
     int next_id_=0, selected_=-1;
     std::unordered_map<std::string,bool> cat_expanded_;
@@ -79,10 +90,15 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
             if (!found) cats.push_back(p.category);
         }
         for (auto& cat : cats) {
-            out.push_back({true, cat, -1});
+            // An empty category name emits no header row — the props render flat, and a
+            // structured editor supplies its own header rows (Category-type props with
+            // actions). Named categories keep the collapsible header + expand state.
             bool expanded = true;
-            auto it = cat_expanded_.find(cat);
-            if (it != cat_expanded_.end()) expanded = it->second;
+            if (!cat.empty()) {
+                out.push_back({true, cat, -1});
+                auto it = cat_expanded_.find(cat);
+                if (it != cat_expanded_.end()) expanded = it->second;
+            }
             if (expanded) {
                 for (int i = 0; i < (int)props_.size(); ++i) {
                     if (props_[i].category == cat)
@@ -272,6 +288,17 @@ public:
                     cancel_edit();
                 } else {
                     auto& prop = props_[visible[row].prop_idx];
+                    // Row action buttons (× delete / + add / ↑ ↓ reorder) take the click first.
+                    if (!prop.actions.empty()) {
+                        std::vector<std::pair<math::Box,int>> arects;
+                        float ry = by_top + row*row_h_ - scroll_y_;
+                        row_action_rects(prop, bx, bw, ry, arects);
+                        for (auto& ar : arects)
+                            if (math::box_contains(ar.first, p)) {
+                                if (handler_) handler_->on_property_action(prop.id, ar.second);
+                                return true;
+                            }
+                    }
                     selected_ = prop.id;
 
                     if (prop.type == PropertyType::Bool && !prop.read_only) {
@@ -390,11 +417,16 @@ public:
     // types/read-only/enum options) → only values update in place (scroll + an active
     // inline edit are kept); structural change → rebuild. Unchanged → no repaint.
     void set_properties(const std::vector<PropertyModel>& model) override {
+        auto actions_same = [](const std::vector<PropertyAction>& a, const std::vector<PropertyAction>& b) {
+            if (a.size()!=b.size()) return false;
+            for (size_t k=0;k<a.size();++k) if (a[k].id!=b[k].id || a[k].label!=b[k].label) return false;
+            return true;
+        };
         bool struct_same = model.size()==props_.size();
         if (struct_same) for (size_t i=0;i<model.size();++i) {
             const auto& m=model[i]; const auto& p=props_[i];
             if (m.id!=p.id || m.name!=p.name || m.category!=p.category || m.type!=p.type ||
-                m.read_only!=p.read_only ||
+                m.read_only!=p.read_only || !actions_same(m.actions, p.actions) ||
                 (m.type==PropertyType::Enum && m.options!=p.enum_opts)) { struct_same=false; break; }
         }
         if (struct_same) {
@@ -409,6 +441,7 @@ public:
         props_.clear(); props_.reserve(model.size());
         for (const auto& m : model) {
             Prop p; p.id=m.id; p.name=m.name; p.category=m.category; p.type=m.type; p.read_only=m.read_only;
+            p.actions=m.actions;
             apply_value(p, m);
             props_.push_back(std::move(p));
             if (m.id>=next_id_) next_id_=m.id+1;
@@ -558,6 +591,26 @@ public:
                 }
                 ri_.push_text(visible[i].cat_name.c_str(), bx+16, ry, bw-16, row_h_,
                               s.category_text_color, 11.0f, Alignment::CenterLeft, d++, clip);
+            } else if (props_[visible[i].prop_idx].type == PropertyType::Category) {
+                // A Category-type PROP renders as an inline header (name only, no value
+                // box) that carries action buttons — a section ("Cases  [+]") or card
+                // ("#1  ↑ ↓ ×") header inside the form.
+                int idx = visible[i].prop_idx;
+                ri_.push_rect(bx, ry, bw, row_h_, s.category_background, d++, clip);
+                ri_.push_text(props_[idx].name.c_str(), bx+8, ry, bw-16, row_h_,
+                              s.category_text_color, 11.0f, Alignment::CenterLeft, d++, clip);
+                std::vector<std::pair<math::Box,int>> arects;
+                row_action_rects(props_[idx], bx, bw, ry, arects);
+                for (size_t k=0;k<arects.size();++k) {
+                    const auto& act = props_[idx].actions[props_[idx].actions.size()-1-k];
+                    math::Vec4 fill = act.color.w>0.0f ? act.color : math::Vec4(0.33f,0.35f,0.40f,1.0f);
+                    const auto& bb = arects[k].first;
+                    ri_.push_rect(math::x(math::box_min(bb)), math::y(math::box_min(bb)),
+                                  math::box_width(bb), math::box_height(bb), fill, d++, clip);
+                    ri_.push_text(act.label.c_str(), math::x(math::box_min(bb)), math::y(math::box_min(bb))-1,
+                                  math::box_width(bb), math::box_height(bb),
+                                  math::Vec4(0.93f,0.93f,0.95f,1.0f), 11.0f, Alignment::Center, d++, clip);
+                }
             } else {
                 int idx = visible[i].prop_idx;
                 bool is_sel = (props_[idx].id == selected_);
@@ -569,9 +622,26 @@ public:
                 math::Vec4 nc = props_[idx].read_only ? math::Vec4(s.name_text_color.x*0.6f,s.name_text_color.y*0.6f,s.name_text_color.z*0.6f,1.0f) : s.name_text_color;
                 ri_.push_text(props_[idx].name.c_str(), bx+8, ry, name_col_w_-8, row_h_,
                               nc, 11.0f, Alignment::CenterLeft, d++, clip);
-                // Value column
+                // Value column (leave room for any trailing action buttons)
+                float act_w = 0.0f;
+                for (const auto& a : props_[idx].actions) { (void)a; act_w += (row_h_-6.0f) + 3.0f; }
                 float vx = bx + name_col_w_ + 4;
-                float vw = bw - name_col_w_ - 8;
+                float vw = bw - name_col_w_ - 8 - act_w;
+                // Trailing action buttons (× delete etc.) on a value row.
+                if (!props_[idx].actions.empty()) {
+                    std::vector<std::pair<math::Box,int>> arects;
+                    row_action_rects(props_[idx], bx, bw, ry, arects);
+                    for (size_t k=0;k<arects.size();++k) {
+                        const auto& act = props_[idx].actions[props_[idx].actions.size()-1-k];
+                        math::Vec4 fill = act.color.w>0.0f ? act.color : math::Vec4(0.33f,0.35f,0.40f,1.0f);
+                        const auto& bb = arects[k].first;
+                        ri_.push_rect(math::x(math::box_min(bb)), math::y(math::box_min(bb)),
+                                      math::box_width(bb), math::box_height(bb), fill, d++, clip);
+                        ri_.push_text(act.label.c_str(), math::x(math::box_min(bb)), math::y(math::box_min(bb))-1,
+                                      math::box_width(bb), math::box_height(bb),
+                                      math::Vec4(0.93f,0.93f,0.95f,1.0f), 11.0f, Alignment::Center, d++, clip);
+                    }
+                }
                 if (props_[idx].type == PropertyType::Bool) {
                     float cbx = vx, cby = ry+row_h_*0.5f-5;
                     ri_.push_rect(cbx, cby, 10, 10, s.row_background, d++, clip);
