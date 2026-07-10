@@ -887,6 +887,11 @@ public:
     virtual bool handle_mouse_scroll(float delta_x, float delta_y) = 0;
     virtual bool handle_key(int key_code, bool pressed, int modifiers) = 0;
     virtual bool handle_text_input(const char* text) = 0;
+    // IME composition preedit (the underlined text being composed; empty = cancelled).
+    // Default: not handled — text-input widgets override to show it inline. The context's
+    // built-in keyboard handler routes preedit to the focused widget, so a focused editbox
+    // composes CJK on its own with no app-side IME code (like key/char already do).
+    virtual bool handle_preedit(const char* text, int cursor_codepoints) { (void)text; (void)cursor_codepoints; return false; }
 
     // Focus
     virtual bool is_focusable() const = 0;

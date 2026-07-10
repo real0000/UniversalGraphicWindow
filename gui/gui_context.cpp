@@ -333,6 +333,9 @@ class GuiContext : public IGuiContext {
             else                   { buf[0] = (char)(0xF0|(cp>>18));  buf[1] = (char)(0x80|((cp>>12)&0x3F)); buf[2] = (char)(0x80|((cp>>6)&0x3F)); buf[3] = (char)(0x80|(cp&0x3F)); }
             return ctx_->focused_->handle_text_input(buf);
         }
+        void on_preedit(const std::string& text, int cursor_codepoints) override {
+            if (ctx_->focused_) ctx_->focused_->handle_preedit(text.c_str(), cursor_codepoints);   // IME → focused editbox
+        }
     } keyboard_handler_{this};
 public:
     GuiResult initialize() override {

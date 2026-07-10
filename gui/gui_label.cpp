@@ -127,6 +127,11 @@ public:
         }
         return true;
     }
+    bool handle_preedit(const char* t, int cursor) override {   // IME composing (shown inline)
+        if (read_only_) return false;
+        if (t && *t) set_preedit(t, cursor); else clear_preedit();
+        return true;
+    }
     // code = window::Key; mods bit MOD_SHIFT extends the selection instead of collapsing it.
     bool handle_key(int code, bool pressed, int mods) override {
         if (!pressed) return false;
