@@ -44,6 +44,9 @@ inline bool has_flag(SizerFlag flags, SizerFlag f) {
     return (static_cast<uint8_t>(flags) & static_cast<uint8_t>(f)) != 0;
 }
 
+// Edge a dock-sizer item is pinned to (see IDockSizer). Center fills the leftover.
+enum class DockEdge : uint8_t { Left, Right, Top, Bottom, Center };
+
 // ============================================================================
 // SizerItem - One slot managed by a sizer
 // ============================================================================
@@ -60,6 +63,7 @@ struct SizerItem {
                                                // (Boost points aren't auto-zeroed — must init or add() leaks garbage)
     float       max_fraction = 0.0f;           // >0: clamp a fixed item's main size to fraction × content
                                                // (e.g. a side panel of preferred 260px capped at 34% of width)
+    DockEdge    dock_edge  = DockEdge::Center;  // dock sizers only (ignored by box/grid/flow/stack)
     bool        visible    = true;
 };
 
@@ -190,12 +194,33 @@ public:
 // Factory functions
 // ============================================================================
 
+// ============================================================================
+// IDockSizer - Dock / border layout (the retained equivalent of EdgeLayout)
+//
+// Each item is docked to an edge, reserving `size` px along that edge's axis and
+// spanning the perpendicular extent of whatever space is still free; edges are peeled
+// in add order, so a full-width Bottom bar added before a Left panel spans under it.
+// Center item(s) fill the leftover. A window's chrome docks its toolbar/panels/status
+// and the canvas takes the center — zero app-side edge math, laid out on resize by one
+// set_bounds()+layout(). A hidden docked widget yields its space (like every sizer).
+// ============================================================================
+
+class IDockSizer : public ISizer {
+public:
+    virtual void add_dock(IGuiWidget* widget, DockEdge edge, float size) = 0;
+    virtual void add_dock(ISizer* child_sizer, DockEdge edge, float size) = 0;
+    // Change a docked item's reserved size (e.g. a collapsible console band); re-layout
+    // to apply. Ignored for a Center item.
+    virtual void set_dock_size(IGuiWidget* widget, float size) = 0;
+};
+
 IBoxSizer*  create_box_sizer(LayoutDirection direction);
 // Overlay/stack sizer: EVERY visible item fills the whole padded rect. For slots
 // whose children swap by visibility (panel pages, a Send/Stop button pair).
 ISizer*     create_stack_sizer();
 IGridSizer* create_grid_sizer(int cols, float hgap = 0.0f, float vgap = 0.0f);
 IFlowSizer* create_flow_sizer(LayoutDirection direction = LayoutDirection::Horizontal);
+IDockSizer* create_dock_sizer();
 void        destroy_sizer(ISizer* sizer);
 
 } // namespace gui

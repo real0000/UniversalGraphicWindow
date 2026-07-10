@@ -659,11 +659,101 @@ public:
 };
 
 // ============================================================================
+// DockSizer - edge/border layout (retained EdgeLayout)
+// ============================================================================
+
+class DockSizer : public SizerBase, public IDockSizer {
+    // ---- Forward all SizerBase overrides to resolve the ISizer diamond ----
+    void add(IGuiWidget* w, int p, SizerFlag f, float b) override { SizerBase::add(w,p,f,b); }
+    void add(ISizer* s, int p, SizerFlag f, float b) override { SizerBase::add(s,p,f,b); }
+    void add_spacer(float sz) override { SizerBase::add_spacer(sz); }
+    void add_stretch(int p) override { SizerBase::add_stretch(p); }
+    void insert(int idx, IGuiWidget* w, int p, SizerFlag f, float b) override { SizerBase::insert(idx,w,p,f,b); }
+    void remove(IGuiWidget* w) override { SizerBase::remove(w); }
+    void remove_at(int i) override { SizerBase::remove_at(i); }
+    void clear() override { SizerBase::clear(); }
+    int get_item_count() const override { return SizerBase::get_item_count(); }
+    const SizerItem& get_item(int i) const override { return SizerBase::get_item(i); }
+    SizerItem* find_item(IGuiWidget* w) override { return SizerBase::find_item(w); }
+    void set_item_visible(IGuiWidget* w, bool v) override { SizerBase::set_item_visible(w,v); }
+    void set_item_max_fraction(IGuiWidget* w, float f) override { SizerBase::set_item_max_fraction(w,f); }
+    void set_bounds(const math::Box& b) override { SizerBase::set_bounds(b); }
+    math::Box get_bounds() const override { return SizerBase::get_bounds(); }
+    void set_padding(float a) override { SizerBase::set_padding(a); }
+    void set_padding(float h, float v) override { SizerBase::set_padding(h,v); }
+    void set_padding(float l, float t, float r, float b) override { SizerBase::set_padding(l,t,r,b); }
+    math::Vec4 get_padding() const override { return SizerBase::get_padding(); }
+    void set_gap(float g) override { SizerBase::set_gap(g); }
+    float get_gap() const override { return SizerBase::get_gap(); }
+
+    static void dock_add(SizerItem& it, DockEdge e, float size) {
+        it.dock_edge = e; it.fixed_size = math::Vec2(size, size);
+    }
+
+public:
+    void add_dock(IGuiWidget* w, DockEdge e, float size) override {
+        SizerBase::add(w, 0, SizerFlag::None, 0.0f); dock_add(items_.back(), e, size);
+    }
+    void add_dock(ISizer* s, DockEdge e, float size) override {
+        SizerBase::add(s, 0, SizerFlag::None, 0.0f); dock_add(items_.back(), e, size);
+    }
+    void set_dock_size(IGuiWidget* w, float size) override {
+        if (auto* it = find_item(w)) it->fixed_size = math::Vec2(size, size);
+    }
+
+    math::Vec2 get_min_size() const override {
+        float w = padding_.x + padding_.z, h = padding_.y + padding_.w;
+        float cx = 0.0f, cy = 0.0f;
+        for (const auto& it : items_) {
+            if (!item_shown(it)) continue;
+            const float sz = math::x(it.fixed_size);
+            switch (it.dock_edge) {
+                case DockEdge::Left: case DockEdge::Right:  w += sz; break;
+                case DockEdge::Top:  case DockEdge::Bottom: h += sz; break;
+                case DockEdge::Center: { auto p = item_pref_size(it);
+                    cx = std::max(cx, math::x(p)); cy = std::max(cy, math::y(p)); break; }
+            }
+        }
+        return math::Vec2(w + cx, h + cy);
+    }
+
+    void layout() override {
+        const math::Box r = content_rect();
+        float left   = math::x(math::box_min(r)), top = math::y(math::box_min(r));
+        float right  = left + math::box_width(r), bottom = top + math::box_height(r);
+        // Pass 1: peel edge items in add order (a hidden item yields its space).
+        for (auto& it : items_) {
+            if (!item_shown(it) || it.dock_edge == DockEdge::Center) continue;
+            const float sz = math::x(it.fixed_size);
+            math::Box box;
+            switch (it.dock_edge) {
+                case DockEdge::Left:   box = math::make_box(left, top, sz, bottom - top);        left   += sz; break;
+                case DockEdge::Right:  box = math::make_box(right - sz, top, sz, bottom - top);   right  -= sz; break;
+                case DockEdge::Top:    box = math::make_box(left, top, right - left, sz);         top    += sz; break;
+                case DockEdge::Bottom: box = math::make_box(left, bottom - sz, right - left, sz); bottom -= sz; break;
+                default: break;
+            }
+            item_set_bounds(it, box);
+        }
+        // Pass 2: center item(s) fill the leftover rect.
+        const math::Box center = math::make_box(left, top, std::max(0.0f, right - left),
+                                                std::max(0.0f, bottom - top));
+        for (auto& it : items_) {
+            if (item_shown(it) && it.dock_edge == DockEdge::Center) item_set_bounds(it, center);
+        }
+    }
+};
+
+// ============================================================================
 // Factories
 // ============================================================================
 
 IBoxSizer* create_box_sizer(LayoutDirection direction) {
     return new BoxSizer(direction);
+}
+
+IDockSizer* create_dock_sizer() {
+    return new DockSizer();
 }
 
 IGridSizer* create_grid_sizer(int cols, float hgap, float vgap) {
