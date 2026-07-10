@@ -86,6 +86,7 @@ class GuiContext : public IGuiContext {
     std::vector<IGuiWidget*> modal_stack_;
     std::vector<Viewport> viewports_;
     GuiInputState input_state_;
+    int cur_mods_ = 0;    // latest platform key-modifier bitmask (from mouse/key events)
     GuiStyle default_style_=GuiStyle::default_style();
     LabelStyle default_label_style_=LabelStyle::default_style();
     ITextMeasurer* text_measurer_=nullptr;
@@ -299,6 +300,7 @@ class GuiContext : public IGuiContext {
             bool pressed = (event.type == EventType::MouseDown);
             gui::MouseButton btn = static_cast<gui::MouseButton>(static_cast<uint8_t>(event.button));
             math::Vec2 pos = to_ui(event.x, event.y);
+            ctx_->cur_mods_ = static_cast<int>(event.modifiers);   // for widgets that need shift/ctrl (canvas)
             ctx_->dispatch_mouse_button(btn, pressed, pos);
             return false; // don't consume: let other handlers see it
         }
@@ -658,7 +660,9 @@ public:
         auto* p=create_list_box_widget(); owned_widgets_.emplace_back(p); return p;
     }
     IGuiCanvasView* create_canvas_view() override {
-        auto* p=create_canvas_view_widget(); owned_widgets_.emplace_back(p); return p;
+        auto* p=create_canvas_view_widget(); owned_widgets_.emplace_back(p);
+        p->set_modifier_provider([this]{ return cur_mods_; });   // feed shift/ctrl to canvas hit-testing
+        return p;
     }
     IGuiCollapseSection* create_collapse_section() override {
         auto* p=create_collapse_section_widget(); owned_widgets_.emplace_back(p); return p;

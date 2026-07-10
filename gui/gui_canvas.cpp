@@ -11,6 +11,8 @@
 
 #include "gui_widget_base.hpp"
 
+#include <chrono>
+
 namespace window {
 namespace gui {
 
@@ -50,6 +52,7 @@ public:
         set_style(st);
     }
     const CanvasNodeStyle& node_style() const { return style_; }
+    const std::vector<CanvasNode>& nodes() const { return nodes_; }   // for hit-testing
     void set_node_style(const CanvasNodeStyle& s) { style_ = s; reflow(); }
     void set_nodes(const std::vector<CanvasNode>& nodes) {
         if (nodes == nodes_) return;              // idempotent rebind
@@ -279,17 +282,19 @@ public:
         if (mn > 0.0f) min_scale_ = mn;
         if (mx > 0.0f) max_scale_ = mx;
     }
+    void set_modifier_provider(std::function<int()> p) override { mods_provider_ = std::move(p); }
 
-    // ---- Built-in interaction: camera pan (middle/right drag) + zoom (wheel). Node/
-    //      pin/marquee hit-testing lands in later phases; left button is left to the
-    //      app for now (returns false so it bubbles / the app handles it). ----------
+    // ---- Built-in interaction: camera (middle/right drag pan, wheel zoom) + left-button
+    //      node selection / drag / marquee. Pin-link + connection/waypoint land in later
+    //      phases; all decisions are made by the app via ICanvasViewEventHandler. --------
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& pos) override {
         if (btn == MouseButton::Middle || btn == MouseButton::Right) {
             if (pressed) { panning_ = true; pan_last_ = pos; }
             else         { panning_ = false; }
             return true;
         }
-        return base_.handle_mouse_button(btn, pressed, pos);   // left → children / app
+        if (btn == MouseButton::Left) return pressed ? left_press(pos) : left_release(pos);
+        return base_.handle_mouse_button(btn, pressed, pos);
     }
     bool handle_mouse_move(const math::Vec2& pos) override {
         last_mouse_ = pos;                                 // tracked for wheel-zoom centre
@@ -303,6 +308,29 @@ public:
             if (evt_) evt_->on_canvas_view_changed(origin_, scale_);
             return true;
         }
+        if (node_press_ && want_drag_) {
+            if (!node_dragging_ &&
+                std::abs(math::x(pos) - math::x(press_screen_)) +
+                std::abs(math::y(pos) - math::y(press_screen_)) > 4.0f)
+                node_dragging_ = true;
+            if (node_dragging_) {
+                const math::Vec2 w = screen_to_world(pos);
+                drag_moved_ = true;
+                if (evt_) evt_->on_canvas_nodes_dragged(
+                    math::Vec2(math::x(w) - math::x(press_world_), math::y(w) - math::y(press_world_)));
+            }
+            return true;
+        }
+        if (marquee_) {
+            const math::Vec2 w = screen_to_world(pos);
+            mq_cur_world_ = w;
+            const float x0 = std::min(math::x(mq_start_world_), math::x(w));
+            const float y0 = std::min(math::y(mq_start_world_), math::y(w));
+            const float x1 = std::max(math::x(mq_start_world_), math::x(w));
+            const float y1 = std::max(math::y(mq_start_world_), math::y(w));
+            show_rubber_band(math::make_box(x0, y0, x1 - x0, y1 - y0));
+            return true;
+        }
         return base_.handle_mouse_move(pos);
     }
     bool handle_mouse_scroll(float dx, float dy) override {
@@ -312,6 +340,65 @@ public:
     }
 
 private:
+    // Topmost node whose world rect contains `w` (draw order = model order → iterate back).
+    const CanvasNode* node_at(const math::Vec2& w) const {
+        const auto& ns = nodes_layer_.nodes();
+        for (auto it = ns.rbegin(); it != ns.rend(); ++it) {
+            const float x = math::x(it->pos), y = math::y(it->pos);
+            if (math::x(w) >= x && math::x(w) <= x + it->width &&
+                math::y(w) >= y && math::y(w) <= y + it->height) return &*it;
+        }
+        return nullptr;
+    }
+    // Synthesize a double-click (the X11 backend doesn't report click counts): a second
+    // left press within 350 ms and 6 px of the first.
+    bool detect_double(const math::Vec2& screen) {
+        const double t = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const bool dbl = (t - last_click_ms_ < 350.0) &&
+                         std::abs(math::x(screen) - math::x(last_click_pos_)) < 6.0f &&
+                         std::abs(math::y(screen) - math::y(last_click_pos_)) < 6.0f;
+        last_click_ms_ = dbl ? -1e30 : t;   // a double resets so a 3rd click starts fresh
+        last_click_pos_ = screen;
+        return dbl;
+    }
+    bool left_press(const math::Vec2& screen) {
+        if (base_.handle_mouse_button(MouseButton::Left, true, screen)) return true;   // app overlays first
+        const math::Vec2 w = screen_to_world(screen);
+        const bool dbl = detect_double(screen);
+        const int mods = mods_provider_ ? mods_provider_() : 0;
+        press_screen_ = screen; press_world_ = w;
+        node_dragging_ = drag_moved_ = false;
+        if (const CanvasNode* n = node_at(w)) {
+            node_press_ = true; press_node_id_ = n->id;
+            want_drag_ = evt_ ? evt_->on_canvas_node_pressed(n->id, mods, dbl) : false;
+            return true;
+        }
+        marquee_ = true; marquee_mods_ = mods; mq_start_world_ = mq_cur_world_ = w;
+        if (evt_) evt_->on_canvas_background_pressed(w, mods);
+        return true;
+    }
+    bool left_release(const math::Vec2& screen) {
+        if (node_press_) {
+            const bool moved = drag_moved_;
+            node_press_ = node_dragging_ = false;
+            if (evt_ && want_drag_) evt_->on_canvas_node_drag_end(moved);
+            want_drag_ = false;
+            return true;
+        }
+        if (marquee_) {
+            marquee_ = false;
+            hide_rubber_band();
+            const float x0 = std::min(math::x(mq_start_world_), math::x(mq_cur_world_));
+            const float y0 = std::min(math::y(mq_start_world_), math::y(mq_cur_world_));
+            const float x1 = std::max(math::x(mq_start_world_), math::x(mq_cur_world_));
+            const float y1 = std::max(math::y(mq_start_world_), math::y(mq_cur_world_));
+            if (evt_) evt_->on_canvas_marquee(math::make_box(x0, y0, x1 - x0, y1 - y0), marquee_mods_);
+            return true;
+        }
+        return base_.handle_mouse_button(MouseButton::Left, false, screen);
+    }
+
     // Zoom keeping the world point under `screen` fixed (wheel + programmatic).
     void zoom_about(const math::Vec2& screen, float factor) {
         const math::Vec2 w = screen_to_world(screen);
@@ -384,12 +471,24 @@ private:
     int next_wire_id_ = 0;
     std::function<std::vector<CanvasNode>()> nodes_provider_;   // bound model sources (set once)
     std::function<std::vector<CanvasWire>()> wires_provider_;
-    // Interaction state (built-in camera; node/pin/marquee phases extend this).
+    // Interaction state.
     ICanvasViewEventHandler* evt_ = nullptr;
+    std::function<int()> mods_provider_;                 // context-wired current key mods
     bool       panning_ = false;
     math::Vec2 pan_last_   = math::Vec2(0.0f, 0.0f);
     math::Vec2 last_mouse_ = math::Vec2(0.0f, 0.0f);
     float      min_scale_ = 0.2f, max_scale_ = 3.0f;
+    // Left-button node/marquee drag state.
+    bool        node_press_ = false, node_dragging_ = false, want_drag_ = false, drag_moved_ = false;
+    bool        marquee_ = false;
+    int         marquee_mods_ = 0;
+    std::string press_node_id_;
+    math::Vec2  press_screen_   = math::Vec2(0.0f, 0.0f);
+    math::Vec2  press_world_    = math::Vec2(0.0f, 0.0f);
+    math::Vec2  mq_start_world_ = math::Vec2(0.0f, 0.0f);
+    math::Vec2  mq_cur_world_   = math::Vec2(0.0f, 0.0f);
+    double      last_click_ms_  = -1e30;
+    math::Vec2  last_click_pos_ = math::Vec2(0.0f, 0.0f);
 };
 
 IGuiCanvasView* create_canvas_view_widget() { return new GuiCanvasView(); }

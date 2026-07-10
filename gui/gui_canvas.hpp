@@ -116,6 +116,25 @@ public:
     // The camera moved (middle/right-drag pan, or wheel zoom about the cursor). The
     // canvas has already applied the view; persist origin/scale if you keep them.
     virtual void on_canvas_view_changed(const math::Vec2& origin, float scale) { (void)origin; (void)scale; }
+
+    // ── Phase 2: node selection + drag + marquee (left button) ──────────────────
+    // A node card was left-pressed. mods = platform key-modifier bitmask (shift/ctrl);
+    // dbl = double-click. Update your selection here. RETURN true to let the canvas begin
+    // dragging the selection as the pointer moves past a small threshold; return false to
+    // suppress the drag (e.g. a shift-toggle, or a double-click that entered a group).
+    virtual bool on_canvas_node_pressed(const std::string& node_id, int mods, bool dbl) {
+        (void)node_id; (void)mods; (void)dbl; return false;
+    }
+    // The node drag advanced: `world_delta` is the displacement since the press. Move the
+    // selection to its press-time position + this delta (fires only after the threshold).
+    virtual void on_canvas_nodes_dragged(const math::Vec2& world_delta) { (void)world_delta; }
+    virtual void on_canvas_node_drag_end(bool moved) { (void)moved; }
+    // A left press that hit no node (background), at `world` with `mods`.
+    virtual void on_canvas_background_pressed(const math::Vec2& world, int mods) { (void)world; (void)mods; }
+    // Marquee released: select the nodes intersecting `world_rect`. `mods` is the press-
+    // time key-modifier bitmask — the app decides what shift/ctrl mean (additive keep). A
+    // zero-size rect (a click without dragging) means "deselect".
+    virtual void on_canvas_marquee(const math::Box& world_rect, int mods) { (void)world_rect; (void)mods; }
 };
 
 // ============================================================================
@@ -129,6 +148,10 @@ public:
     virtual void set_canvas_event_handler(ICanvasViewEventHandler* handler) = 0;
     // Min/max view scale (screen px per world unit) the built-in zoom clamps to.
     virtual void set_zoom_limits(float min_scale, float max_scale) = 0;
+    // Context-wired: a pull source for the current key-modifier bitmask (shift/ctrl),
+    // used to tag node-press / marquee callbacks. The context sets this on creation; apps
+    // don't call it.
+    virtual void set_modifier_provider(std::function<int()> provider) = 0;
     // Style
     virtual const CanvasStyle& get_canvas_style() const = 0;
     virtual void set_canvas_style(const CanvasStyle& style) = 0;
