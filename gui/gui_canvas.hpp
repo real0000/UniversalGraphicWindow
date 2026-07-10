@@ -135,6 +135,16 @@ public:
     // time key-modifier bitmask — the app decides what shift/ctrl mean (additive keep). A
     // zero-size rect (a click without dragging) means "deselect".
     virtual void on_canvas_marquee(const math::Box& world_rect, int mods) { (void)world_rect; (void)mods; }
+
+    // ── Phase 3: pin drag → wire creation ──────────────────────────────────────
+    // A drag that began on an OUTPUT pin was released over an INPUT pin — make the
+    // connection. from_pin/to_pin are CanvasPin::name (the app's pin ids). The canvas
+    // draws the rubber wire itself while dragging; a drop on nothing / an output just
+    // cancels (no callback).
+    virtual void on_canvas_pin_connect(const std::string& from_node, const std::string& from_pin,
+                                       const std::string& to_node, const std::string& to_pin) {
+        (void)from_node; (void)from_pin; (void)to_node; (void)to_pin;
+    }
 };
 
 // ============================================================================

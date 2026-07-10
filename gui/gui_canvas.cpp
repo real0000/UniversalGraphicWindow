@@ -225,8 +225,13 @@ public:
     void clear_wires() override {
         if (!wires_.empty()) { wires_.clear(); base_.mark_dirty(); }
     }
-    int wire_count() const override { return (int)wires_.size(); }
-    const CanvasWire& get_wire(int index) const override { return wires_[(std::size_t)index]; }
+    // The transient link-preview wire (Phase 3) rides at the end of the enumeration so
+    // the renderer draws it without knowing, and set_wires() (provider rebind) can't
+    // clobber it — it lives outside wires_.
+    int wire_count() const override { return (int)wires_.size() + (preview_on_ ? 1 : 0); }
+    const CanvasWire& get_wire(int index) const override {
+        return index < (int)wires_.size() ? wires_[(std::size_t)index] : preview_wire_;
+    }
     void set_wires(const std::vector<CanvasWire>& wires) override {
         if (wires_equal(wires)) return;    // idempotent rebind: no repaint scheduled
         wires_ = wires;
@@ -308,6 +313,11 @@ public:
             if (evt_) evt_->on_canvas_view_changed(origin_, scale_);
             return true;
         }
+        if (linking_) {
+            preview_wire_.points = { link_from_world_, screen_to_world(pos) };
+            base_.mark_dirty();
+            return true;
+        }
         if (node_press_ && want_drag_) {
             if (!node_dragging_ &&
                 std::abs(math::x(pos) - math::x(press_screen_)) +
@@ -350,6 +360,30 @@ private:
         }
         return nullptr;
     }
+    // Pin dot under `w` (same geometry the nodes layer renders: px = output ? x+w : x,
+    // py = y + header + row*(row+0.5)). Returns the node + fills the pin index.
+    const CanvasNode* pin_at(const math::Vec2& w, int& pin_index) const {
+        const CanvasNodeStyle& s = nodes_layer_.node_style();
+        const float tol = std::max(s.pin_radius * 1.8f, 10.0f / scale_);
+        const auto& ns = nodes_layer_.nodes();
+        for (auto it = ns.rbegin(); it != ns.rend(); ++it) {
+            const float x = math::x(it->pos), y = math::y(it->pos), nw = it->width;
+            for (int i = 0; i < (int)it->pins.size(); ++i) {
+                const CanvasPin& p = it->pins[(std::size_t)i];
+                const float px = p.output ? x + nw : x;
+                const float py = y + s.header_height + s.row_height * (float(p.row) + 0.5f);
+                if (std::abs(math::x(w) - px) <= tol && std::abs(math::y(w) - py) <= tol) {
+                    pin_index = i; return &*it;
+                }
+            }
+        }
+        return nullptr;
+    }
+    math::Vec2 pin_world(const CanvasNode& n, const CanvasPin& p) const {
+        const CanvasNodeStyle& s = nodes_layer_.node_style();
+        return math::Vec2(p.output ? math::x(n.pos) + n.width : math::x(n.pos),
+                          math::y(n.pos) + s.header_height + s.row_height * (float(p.row) + 0.5f));
+    }
     // Synthesize a double-click (the X11 backend doesn't report click counts): a second
     // left press within 350 ms and 6 px of the first.
     bool detect_double(const math::Vec2& screen) {
@@ -369,6 +403,22 @@ private:
         const int mods = mods_provider_ ? mods_provider_() : 0;
         press_screen_ = screen; press_world_ = w;
         node_dragging_ = drag_moved_ = false;
+        // Pin grab (before node select): an OUTPUT pin starts a rubber wire; an INPUT pin
+        // just consumes (links are drawn output→input, matching the app).
+        {
+            int pi = -1;
+            if (const CanvasNode* pn = pin_at(w, pi)) {
+                const CanvasPin& p = pn->pins[(std::size_t)pi];
+                if (p.output) {
+                    linking_ = true; link_node_id_ = pn->id; link_pin_name_ = p.name;
+                    link_from_world_ = pin_world(*pn, p);
+                    preview_on_ = true; preview_wire_.style = CanvasWireStyle::default_style();
+                    preview_wire_.points = { link_from_world_, w };
+                    base_.mark_dirty();
+                }
+                return true;
+            }
+        }
         if (const CanvasNode* n = node_at(w)) {
             node_press_ = true; press_node_id_ = n->id;
             want_drag_ = evt_ ? evt_->on_canvas_node_pressed(n->id, mods, dbl) : false;
@@ -379,6 +429,17 @@ private:
         return true;
     }
     bool left_release(const math::Vec2& screen) {
+        if (linking_) {
+            linking_ = false; preview_on_ = false; base_.mark_dirty();
+            int pi = -1;
+            if (const CanvasNode* tn = pin_at(screen_to_world(screen), pi)) {
+                const CanvasPin& tp = tn->pins[(std::size_t)pi];
+                if (!tp.output && evt_)                                   // output→input only
+                    evt_->on_canvas_pin_connect(link_node_id_, link_pin_name_, tn->id, tp.name);
+            }
+            link_node_id_.clear(); link_pin_name_.clear();
+            return true;
+        }
         if (node_press_) {
             const bool moved = drag_moved_;
             node_press_ = node_dragging_ = false;
@@ -489,6 +550,13 @@ private:
     math::Vec2  mq_cur_world_   = math::Vec2(0.0f, 0.0f);
     double      last_click_ms_  = -1e30;
     math::Vec2  last_click_pos_ = math::Vec2(0.0f, 0.0f);
+    // Pin-link drag (phase 3): a rubber preview wire from an output pin to the cursor,
+    // enumerated after wires_ so the renderer draws it and set_wires can't clobber it.
+    bool        linking_ = false;
+    std::string link_node_id_, link_pin_name_;
+    math::Vec2  link_from_world_ = math::Vec2(0.0f, 0.0f);
+    CanvasWire  preview_wire_;
+    bool        preview_on_ = false;
 };
 
 IGuiCanvasView* create_canvas_view_widget() { return new GuiCanvasView(); }
