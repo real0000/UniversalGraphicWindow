@@ -293,6 +293,10 @@ public:
     //      node selection / drag / marquee. Pin-link + connection/waypoint land in later
     //      phases; all decisions are made by the app via ICanvasViewEventHandler. --------
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& pos) override {
+        // Only claim events inside the canvas; a gesture that started inside keeps
+        // receiving them (its release may land outside the bounds).
+        const bool gesture = panning_ || linking_ || node_press_ || wp_drag_ || conn_press_ || marquee_;
+        if (!gesture && !base_.hit_test(pos)) return false;
         if (btn == MouseButton::Middle || btn == MouseButton::Right) {
             if (pressed) { panning_ = true; pan_last_ = pos; }
             else         { panning_ = false; }

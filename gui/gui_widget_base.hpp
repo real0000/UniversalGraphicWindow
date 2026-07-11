@@ -209,7 +209,12 @@ public:
                 event_handler_->on_gui_event(ev);
             }
         }
-        return true;
+        // Passive containers let the click fall through to whatever is beneath
+        // them in z-order; only a widget that actually REACTS (an explicit click
+        // handler here, or an interactive subclass that returns true itself)
+        // consumes. Opaque panels swallowing every in-bounds press starved the
+        // widgets stacked under/behind them (list rows, toolbar, breadcrumb).
+        return event_handler_ != nullptr;
     }
     bool handle_mouse_scroll(float dx, float dy) override {
         for (auto it = children_.rbegin(); it != children_.rend(); ++it)

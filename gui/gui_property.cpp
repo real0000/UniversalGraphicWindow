@@ -380,7 +380,8 @@ public:
                 cancel_edit();
             }
         }
-        return base_.handle_mouse_button(btn, pressed, p);
+        base_.handle_mouse_button(btn, pressed, p);
+        return true;   // in-bounds click belongs to the grid (entry is hit-guarded)
     }
     bool handle_key(int code, bool pressed, int mods) override {
         if (!pressed) return base_.handle_key(code, pressed, mods);

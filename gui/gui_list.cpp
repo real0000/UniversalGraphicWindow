@@ -80,9 +80,10 @@ public:
                 float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
                 int row = (row_pitch() > 0) ? (int)(rel_y / row_pitch()) : -1;
                 if (row >= 0 && row < (int)items_.size() && items_[row].enabled) {
-                    int old = selected_;
                     selected_ = items_[row].id;
-                    if (selected_ != old && handler_) handler_->on_item_selected(selected_);
+                    // fire on EVERY click (an action-style list, e.g. the node
+                    // palette, acts on each click of the same row)
+                    if (handler_) handler_->on_item_selected(selected_);
                 }
             }
             return true;
@@ -103,12 +104,12 @@ public:
                     if (handler_) handler_->on_item_action(items_[row].id);
                     return true;
                 }
-                int old = selected_;
                 selected_ = items_[row].id;
-                if (selected_ != old && handler_) handler_->on_item_selected(selected_);
+                if (handler_) handler_->on_item_selected(selected_);   // every click (see above)
             }
         }
-        return base_.handle_mouse_button(btn, pressed, p);
+        base_.handle_mouse_button(btn, pressed, p);
+        return true;   // in-bounds click belongs to the list (entry is hit-guarded)
     }
     int add_item(const char* text,const char* icon) override {
         int id=next_id_++; items_.push_back({id,text?text:"",icon?icon:""}); return id;
