@@ -140,7 +140,23 @@ public:
     void set_enabled(bool e) override { enabled_ = e; }
     WidgetState get_state() const override { return state_; }
     const GuiStyle& get_style() const override { return style_; }
-    void set_style(const GuiStyle& s) override { style_ = s; }
+    // Dirty-on-change: a re-bound style (e.g. a list row's selection background)
+    // must invalidate the cached render info — without this the new look only
+    // appears when something else (scroll/resize) happens to dirty the widget.
+    static bool style_eq(const GuiStyle& a, const GuiStyle& b) {
+        auto veq = [](const math::Vec4& x, const math::Vec4& y) {
+            return x.x == y.x && x.y == y.y && x.z == y.z && x.w == y.w; };
+        return veq(a.background_color, b.background_color) && veq(a.border_color, b.border_color) &&
+               veq(a.hover_color, b.hover_color) && veq(a.pressed_color, b.pressed_color) &&
+               veq(a.disabled_color, b.disabled_color) && veq(a.focus_color, b.focus_color) &&
+               a.background_role == b.background_role &&
+               a.border_width == b.border_width && a.corner_radius == b.corner_radius &&
+               veq(a.padding, b.padding) && veq(a.margin, b.margin);
+    }
+    void set_style(const GuiStyle& s) override {
+        if (style_eq(style_, s)) return;
+        style_ = s; mark_dirty();
+    }
     SizeMode get_width_mode() const override { return width_mode_; }
     SizeMode get_height_mode() const override { return height_mode_; }
     void set_size_mode(SizeMode w, SizeMode h) override { width_mode_ = w; height_mode_ = h; }

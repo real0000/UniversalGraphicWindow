@@ -21,9 +21,22 @@ class GuiLabel : public WidgetBase<IGuiLabel, WidgetType::Label> {
     mutable WidgetRenderInfo ri_;
 public:
     const char* get_text() const override { return text_.c_str(); }
-    void set_text(const char* t) override { text_ = t ? t : ""; }
+    // Dirty-on-change (see GuiWidget::set_style): re-bound text/looks must repaint.
+    void set_text(const char* t) override {
+        const char* nt = t ? t : "";
+        if (text_ == nt) return;
+        text_ = nt; base_.mark_dirty();
+    }
     const LabelStyle& get_label_style() const override { return label_style_; }
-    void set_label_style(const LabelStyle& s) override { label_style_ = s; }
+    void set_label_style(const LabelStyle& s) override {
+        const LabelStyle& o = label_style_;
+        const bool same = o.text_color.x == s.text_color.x && o.text_color.y == s.text_color.y &&
+                          o.text_color.z == s.text_color.z && o.text_color.w == s.text_color.w &&
+                          o.font_size == s.font_size && o.alignment == s.alignment &&
+                          o.wrap == s.wrap && o.ellipsis == s.ellipsis && o.font_name == s.font_name;
+        label_style_ = s;
+        if (!same) base_.mark_dirty();
+    }
     void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
     void set_preferred_size(const math::Vec2& s) override { explicit_pref_ = s; }
 
