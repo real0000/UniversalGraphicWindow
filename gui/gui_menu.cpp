@@ -161,6 +161,13 @@ public:
     }
     void hide() override { if(!open_) return; open_=false; if(handler_) handler_->on_menu_closed(); }
     bool is_open() const override { return open_; }
+    bool activate_item(int id) override {          // semantic click (enabled items only)
+        int i = find_idx(id);
+        if (i < 0 || !items_[i].enabled) return false;
+        if (handler_) handler_->on_menu_item_clicked(items_[i].id);
+        hide();
+        return true;
+    }
     void set_item_user_data(int id, void* d) override { int i=find_idx(id); if(i>=0) items_[i].user_data=d; }
     void* get_item_user_data(int id) const override { int i=find_idx(id); return i>=0?items_[i].user_data:nullptr; }
     const MenuStyle& get_menu_style() const override { return style_; }

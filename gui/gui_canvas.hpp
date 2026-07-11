@@ -136,6 +136,14 @@ public:
     // zero-size rect (a click without dragging) means "deselect".
     virtual void on_canvas_marquee(const math::Box& world_rect, int mods) { (void)world_rect; (void)mods; }
 
+    // A right press that did NOT pan (release within the drag threshold): open a
+    // context menu. `node_id` is the topmost node/group card under the point ("" =
+    // bare canvas); `world`/`screen` locate it in both spaces (screen = logical px).
+    virtual void on_canvas_context_menu(const std::string& node_id, const math::Vec2& world,
+                                        const math::Vec2& screen) {
+        (void)node_id; (void)world; (void)screen;
+    }
+
     // ── Phase 3: pin drag → wire creation ──────────────────────────────────────
     // A drag that began on an OUTPUT pin was released over an INPUT pin — make the
     // connection. from_pin/to_pin are CanvasPin::name (the app's pin ids). The canvas

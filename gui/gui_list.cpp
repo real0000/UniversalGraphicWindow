@@ -15,6 +15,11 @@ class GuiListBox : public WidgetBase<IGuiListBox, WidgetType::ListBox> {
     std::vector<int> multi_sel_;
     float scroll_y_=0;
     bool sb_drag_=false;
+    // Drag-out (palette rows): press arms a candidate; moving past the threshold
+    // tracks with on_item_drag; release fires on_item_drop (or a plain click).
+    bool drag_out_=false, drag_active_=false;
+    int  drag_id_=-1;
+    math::Vec2 drag_press_{0.0f, 0.0f};
     ListBoxStyle style_=ListBoxStyle::default_style();
     IListBoxEventHandler* handler_=nullptr;
     std::function<std::vector<ListItemModel>()> provider_;   // bound model source (set once)
@@ -66,10 +71,26 @@ public:
             set_scroll_offset(scrollbar_offset_from_mouse(base_.get_bounds(), content_h, math::y(p)));
             return true;
         }
+        if (drag_id_ >= 0) {
+            if (!drag_active_ &&
+                std::abs(math::x(p) - math::x(drag_press_)) +
+                std::abs(math::y(p) - math::y(drag_press_)) > 6.0f)
+                drag_active_ = true;
+            if (drag_active_) { if (handler_) handler_->on_item_drag(drag_id_, p); return true; }
+        }
         return base_.handle_mouse_move(p);
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
-        if (!base_.is_enabled() || !hit_test(p)) return false;
+        if (!base_.is_enabled()) return false;
+        // An active row drag keeps receiving events; its release may land anywhere
+        // (that's the drop point).
+        if (drag_id_ >= 0 && btn == MouseButton::Left && !pressed) {
+            const int id = drag_id_; const bool dropped = drag_active_;
+            drag_id_ = -1; drag_active_ = false;
+            if (dropped) { if (handler_) handler_->on_item_drop(id, p); return true; }
+            // fall through: an in-place release completes a plain click
+        }
+        if (!hit_test(p)) return false;
         if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; }
         if (row_factory_) {
             // Custom row widgets: their child buttons (delete/test) take the click
@@ -84,6 +105,7 @@ public:
                     // fire on EVERY click (an action-style list, e.g. the node
                     // palette, acts on each click of the same row)
                     if (handler_) handler_->on_item_selected(selected_);
+                    if (drag_out_) { drag_id_ = selected_; drag_press_ = p; drag_active_ = false; }
                 }
             }
             return true;
@@ -106,6 +128,7 @@ public:
                 }
                 selected_ = items_[row].id;
                 if (handler_) handler_->on_item_selected(selected_);   // every click (see above)
+                if (drag_out_) { drag_id_ = selected_; drag_press_ = p; drag_active_ = false; }
             }
         }
         base_.handle_mouse_button(btn, pressed, p);
@@ -196,6 +219,14 @@ public:
     bool activate_item_action(int item_id) override {
         for (const auto& it : items_) if (it.id == item_id) {
             if (handler_) handler_->on_item_action(item_id);
+            return true;
+        }
+        return false;
+    }
+    void set_item_drag_out(bool enabled) override { drag_out_ = enabled; }
+    bool activate_item_drop(int item_id, const math::Vec2& pos) override {
+        for (const auto& it : items_) if (it.id == item_id) {
+            if (handler_) handler_->on_item_drop(item_id, pos);
             return true;
         }
         return false;

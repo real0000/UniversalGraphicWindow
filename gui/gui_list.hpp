@@ -71,6 +71,11 @@ public:
     // Trailing action ("×") on a row was clicked (model has_action == true). Default
     // no-op so existing handlers keep compiling.
     virtual void on_item_action(int item_id) { (void)item_id; }
+    // Drag-out (set_item_drag_out): a row is being dragged past the threshold /
+    // was dropped. `pos` is in the tree's logical px — the app hit-tests its own
+    // drop targets (e.g. a palette row dropped onto the canvas). Default no-ops.
+    virtual void on_item_drag(int item_id, const math::Vec2& pos) { (void)item_id; (void)pos; }
+    virtual void on_item_drop(int item_id, const math::Vec2& pos) { (void)item_id; (void)pos; }
 };
 
 class IGuiListBox : public IGuiWidget {
@@ -118,12 +123,20 @@ public:
     virtual bool is_item_enabled(int item_id) const = 0;
     virtual void set_item_enabled(int item_id, bool enabled) = 0;
 
+    // Rows can be dragged OUT of the list (a palette): a press that moves past a
+    // small threshold fires on_item_drag while tracking and on_item_drop at release
+    // (a plain click still selects). Off by default.
+    virtual void set_item_drag_out(bool enabled) = 0;
+
     // Semantic driving (automation / scripting): fire the SAME handler a click would, by
     // item id — no geometry needed. activate_item = select (on_item_selected);
     // activate_item_action = the trailing "×"/action row (on_item_action). False if the
     // id isn't present.
     virtual bool activate_item(int item_id) = 0;
     virtual bool activate_item_action(int item_id) = 0;
+    // Semantic drag-out: fire on_item_drop(item_id, pos) exactly like releasing a
+    // real row drag at `pos` (logical px).
+    virtual bool activate_item_drop(int item_id, const math::Vec2& pos) = 0;
 
     // Selection
     virtual ListBoxSelectionMode get_selection_mode() const = 0;

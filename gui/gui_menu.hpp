@@ -98,6 +98,10 @@ public:
     // Submenu access
     virtual IGuiMenu* get_submenu(int item_id) const = 0;
 
+    // Semantic driving (automation / scripting): fire on_menu_item_clicked exactly
+    // like clicking the item (enabled items only). False if the id isn't present.
+    virtual bool activate_item(int item_id) = 0;
+
     // Show / hide (context menu usage)
     virtual void show_at(const math::Vec2& position) = 0;
     virtual void show_relative_to(const IGuiWidget* anchor, PopupPlacement placement) = 0;

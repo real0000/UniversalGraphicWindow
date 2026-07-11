@@ -298,8 +298,16 @@ public:
         const bool gesture = panning_ || linking_ || node_press_ || wp_drag_ || conn_press_ || marquee_;
         if (!gesture && !base_.hit_test(pos)) return false;
         if (btn == MouseButton::Middle || btn == MouseButton::Right) {
-            if (pressed) { panning_ = true; pan_last_ = pos; }
-            else         { panning_ = false; }
+            if (pressed) { panning_ = true; pan_last_ = pan_press_ = pos; pan_moved_ = false; }
+            else {
+                panning_ = false;
+                // Right press that never panned = a context-menu request at the point.
+                if (btn == MouseButton::Right && !pan_moved_ && evt_) {
+                    const math::Vec2 w = screen_to_world(pos);
+                    const CanvasNode* n = node_at(w);
+                    evt_->on_canvas_context_menu(n ? n->id : std::string(), w, pos);
+                }
+            }
             return true;
         }
         if (btn == MouseButton::Left) return pressed ? left_press(pos) : left_release(pos);
@@ -308,6 +316,8 @@ public:
     bool handle_mouse_move(const math::Vec2& pos) override {
         last_mouse_ = pos;                                 // tracked for wheel-zoom centre
         if (panning_) {
+            if (std::abs(math::x(pos) - math::x(pan_press_)) +
+                std::abs(math::y(pos) - math::y(pan_press_)) > 4.0f) pan_moved_ = true;
             const float inv = 1.0f / scale_;
             origin_ = math::Vec2(math::x(origin_) - (math::x(pos) - math::x(pan_last_)) * inv,
                                  math::y(origin_) - (math::y(pos) - math::y(pan_last_)) * inv);
@@ -612,7 +622,9 @@ private:
     ICanvasViewEventHandler* evt_ = nullptr;
     std::function<int()> mods_provider_;                 // context-wired current key mods
     bool       panning_ = false;
+    bool       pan_moved_ = false;                        // exceeded the click threshold
     math::Vec2 pan_last_   = math::Vec2(0.0f, 0.0f);
+    math::Vec2 pan_press_  = math::Vec2(0.0f, 0.0f);
     math::Vec2 last_mouse_ = math::Vec2(0.0f, 0.0f);
     float      min_scale_ = 0.2f, max_scale_ = 3.0f;
     // Left-button node/marquee drag state.
