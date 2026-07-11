@@ -179,6 +179,8 @@ PropertyGridStyle PropertyGridStyle::default_style() {
     s.row_alt_background = color_rgba8(50, 50, 53);
     s.selected_background = color_rgba8(0, 122, 204);
     s.separator_color = color_rgba8(63, 63, 70);
+    s.field_background = color_rgba8(30, 31, 35);          // stacked-mode value box
+    s.field_border_color = color_rgba8(58, 60, 66);
     return s;
 }
 
@@ -195,6 +197,10 @@ ListBoxStyle ListBoxStyle::default_style() {
     s.disabled_text_color = color_rgba8(140, 142, 150);
     s.icon_color = color_rgba8(200, 200, 200);
     s.separator_color = color_rgba8(63, 63, 70);
+    s.background_color = s.row_background;                 // legacy look: solid fill
+    s.border_color = math::Vec4(0.25f, 0.25f, 0.27f, 1.0f);
+    s.action_background = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);   // plain "×" glyph by default
+    s.action_text_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);   // 0 = text_color
     return s;
 }
 

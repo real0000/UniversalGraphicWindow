@@ -219,6 +219,18 @@ struct PropertyGridStyle {
     float name_column_width = 150.0f;
     float indent_width = 16.0f;
     float font_size = 13.0f;
+    // ── Stacked (form/inspector) layout: the label renders ABOVE a boxed value
+    // field instead of the two-column table. All *_ fields below apply only when
+    // stacked; the table look is unchanged (stacked defaults false).
+    bool  stacked = false;
+    math::Vec4 field_background;        // value box fill
+    math::Vec4 field_border_color;      // value box outline (alpha 0 = none)
+    float field_corner_radius = 4.0f;
+    float field_height = 26.0f;         // value box height
+    float label_height = 16.0f;         // label line height above the box
+    float label_font   = 11.0f;         // label font px (value text uses font_size)
+    float row_gap      = 8.0f;          // gap below each field
+    float side_padding = 10.0f;         // left/right content inset
 
     static PropertyGridStyle default_style();
 };
@@ -235,7 +247,17 @@ struct ListBoxStyle {
     math::Vec4 disabled_text_color;   // dimmer text for disabled rows (e.g. group headers)
     math::Vec4 icon_color;
     math::Vec4 separator_color;
+    math::Vec4 background_color;      // full-box fill behind the rows (alpha 0 = none)
+    math::Vec4 border_color;          // widget outline (alpha 0 = none)
+    // Trailing "×" action affordance: filled button look when action_background has
+    // alpha (rounded rect of action_size, action_text_color glyph); plain glyph otherwise.
+    math::Vec4 action_background;
+    math::Vec4 action_text_color;
+    float action_size = 0.0f;         // button square edge (0 = row_height)
+    float action_corner_radius = 3.0f;
     float row_height = 24.0f;
+    float row_gap = 0.0f;             // vertical gap between rows (card look)
+    float row_corner_radius = 0.0f;   // rounded row card (0 = square strip)
     float icon_size = 16.0f;
     float item_padding = 8.0f;
     float font_size = 13.0f;

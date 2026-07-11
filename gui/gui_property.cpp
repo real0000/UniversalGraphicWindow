@@ -33,13 +33,21 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         val_str_ = p.str_val; return val_str_.c_str();
     }
     // Right-aligned action-button rects for a value row (right→left), paired with id.
-    void row_action_rects(const Prop& p, float bx, float bw, float ry,
+    void row_action_rects(const Prop& p, float bx, float bw, float ry, float rh,
                           std::vector<std::pair<math::Box,int>>& out) const {
-        const float aw = row_h_ - 6.0f;
-        float ax = bx + bw - 4.0f;
+        const float aw = rh - 6.0f;
+        float ax = bx + bw - 4.0f - (style_.stacked ? style_.side_padding - 4.0f : 0.0f);
         for (int k = (int)p.actions.size() - 1; k >= 0; --k) {
             ax -= aw + 3.0f;
-            out.push_back({ math::make_box(ax, ry + 3.0f, aw, row_h_ - 6.0f), p.actions[k].id });
+            out.push_back({ math::make_box(ax, ry + 3.0f, aw, rh - 6.0f), p.actions[k].id });
+        }
+    }
+    // The action strip rides the header line (Category rows) or the value box
+    // (stacked field rows): resolve the strip's y/height for a row.
+    void action_strip(const Prop& pr, float ry, float& ay, float& ah) const {
+        ay = ry; ah = row_h_;
+        if (style_.stacked && pr.type != PropertyType::Category) {
+            ay = ry + style_.label_height; ah = style_.field_height;
         }
     }
     std::vector<Prop> props_;
@@ -148,10 +156,33 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         return val_cache_.back().c_str();
     }
 
+    // ── row geometry — the ONE place that knows how tall each visible row is.
+    // Table mode: every row is row_h_. Stacked mode: label line + value box + gap
+    // (headers keep row_h_; Bool rows are a single checkbox line).
+    float row_extent(const VisRow& v) const {
+        if (!style_.stacked) return row_h_;
+        if (v.is_cat) return row_h_;
+        const Prop& pr = props_[v.prop_idx];
+        if (pr.type == PropertyType::Category) return row_h_ + style_.row_gap * 0.5f;
+        if (pr.type == PropertyType::Bool)     return style_.field_height * 0.85f + style_.row_gap;
+        return style_.label_height + style_.field_height + style_.row_gap;
+    }
+    float row_offset(const std::vector<VisRow>& vis, int row) const {
+        float y = 0; for (int i = 0; i < row && i < (int)vis.size(); ++i) y += row_extent(vis[i]);
+        return y;
+    }
+    int row_at(const std::vector<VisRow>& vis, float rel_y) const {
+        float y = 0;
+        for (int i = 0; i < (int)vis.size(); ++i) { y += row_extent(vis[i]); if (rel_y < y) return i; }
+        return -1;
+    }
+    float content_height(const std::vector<VisRow>& vis) const {
+        float y = 0; for (const auto& v : vis) y += row_extent(v); return y;
+    }
     void clamp_scroll() {
         std::vector<VisRow> visible;
         collect_visible(visible);
-        float content_h = (float)visible.size() * row_h_;
+        float content_h = content_height(visible);
         float view_h = math::box_height(base_.get_bounds());
         float max_scroll = content_h - view_h;
         if (max_scroll < 0) max_scroll = 0;
@@ -192,9 +223,11 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
     }
 
     void scroll_to_row(int row) {
+        std::vector<VisRow> visible;
+        collect_visible(visible);
         float view_h = math::box_height(base_.get_bounds());
-        float row_top = row * row_h_;
-        float row_bot = row_top + row_h_;
+        float row_top = row_offset(visible, row);
+        float row_bot = row_top + (row < (int)visible.size() ? row_extent(visible[row]) : row_h_);
         if (row_top < scroll_y_) scroll_y_ = row_top;
         else if (row_bot > scroll_y_ + view_h) scroll_y_ = row_bot - view_h;
         clamp_scroll();
@@ -265,10 +298,10 @@ public:
             float bh = math::box_height(b);
             float rel_x = math::x(p) - bx;
             float rel_y = math::y(p) - by_top + scroll_y_;
-            int row = (row_h_ > 0) ? (int)(rel_y / row_h_) : -1;
 
             std::vector<VisRow> visible;
             collect_visible(visible);
+            int row = row_at(visible, rel_y);
 
             // If enum popup is open, handle clicks inside/outside it first
             if (enum_popup_id_ >= 0) {
@@ -281,13 +314,15 @@ public:
                 if (popup_row >= 0) {
                     auto& pop_p = props_[visible[popup_row].prop_idx];
                     int num_opts = (int)pop_p.enum_opts.size();
-                    float pop_y = by_top + (popup_row + 1) * row_h_ - scroll_y_;
-                    float pop_x = bx + name_col_w_;
-                    float pop_w = bw - name_col_w_;
-                    float pop_h = num_opts * row_h_;
+                    const float opt_h = style_.stacked ? style_.field_height : row_h_;
+                    float pop_y = by_top + row_offset(visible, popup_row) + row_extent(visible[popup_row])
+                                  - (style_.stacked ? style_.row_gap : 0.0f) - scroll_y_;
+                    float pop_x = style_.stacked ? bx + style_.side_padding : bx + name_col_w_;
+                    float pop_w = style_.stacked ? bw - style_.side_padding * 2 : bw - name_col_w_;
+                    float pop_h = num_opts * opt_h;
                     float px = math::x(p), py = math::y(p);
                     if (px >= pop_x && px < pop_x + pop_w && py >= pop_y && py < pop_y + pop_h) {
-                        int opt = (int)((py - pop_y) / row_h_);
+                        int opt = (int)((py - pop_y) / opt_h);
                         if (opt >= 0 && opt < num_opts) {
                             pop_p.enum_idx = opt;
                             if (handler_) handler_->on_property_changed(pop_p.id);
@@ -311,8 +346,9 @@ public:
                     // Row action buttons (× delete / + add / ↑ ↓ reorder) take the click first.
                     if (!prop.actions.empty()) {
                         std::vector<std::pair<math::Box,int>> arects;
-                        float ry = by_top + row*row_h_ - scroll_y_;
-                        row_action_rects(prop, bx, bw, ry, arects);
+                        float ry = by_top + row_offset(visible, row) - scroll_y_;
+                        float ay, ah; action_strip(prop, ry, ay, ah);
+                        row_action_rects(prop, bx, bw, ay, ah, arects);
                         for (auto& ar : arects)
                             if (math::box_contains(ar.first, p)) {
                                 // A generated array-section header routes to on_property_array_*;
@@ -324,15 +360,17 @@ public:
                     }
                     selected_ = prop.id;
 
+                    // Stacked: the whole row is the value zone; table: right of the name column.
+                    const bool in_value = style_.stacked || rel_x > name_col_w_;
                     if (prop.type == PropertyType::Bool && !prop.read_only) {
                         prop.bool_val = !prop.bool_val;
                         if (handler_) handler_->on_property_changed(prop.id);
                         cancel_edit();
-                    } else if (prop.type == PropertyType::Enum && rel_x > name_col_w_ && !prop.read_only) {
+                    } else if (prop.type == PropertyType::Enum && in_value && !prop.read_only) {
                         // Open dropdown popup
                         cancel_edit();
                         enum_popup_id_ = prop.id;
-                    } else if (rel_x > name_col_w_ && !prop.read_only) {
+                    } else if (in_value && !prop.read_only) {
                         start_editing(prop.id);
                     } else if (editing_id_ != prop.id) {
                         cancel_edit();
@@ -448,7 +486,9 @@ public:
         bool struct_same = model.size()==props_.size();
         if (struct_same) for (size_t i=0;i<model.size();++i) {
             const auto& m=model[i]; const auto& p=props_[i];
-            if (m.id!=p.id || m.key!=p.key || m.name!=p.name || m.category!=p.category || m.type!=p.type ||
+            // id==-1 = "app didn't assign one" → the grid gives it a stable position id
+            // (below), so don't treat that default as a structure change.
+            if ((m.id!=-1 && m.id!=p.id) || m.key!=p.key || m.name!=p.name || m.category!=p.category || m.type!=p.type ||
                 m.read_only!=p.read_only || !actions_same(m.actions, p.actions) ||
                 (m.type==PropertyType::Enum && (m.options!=p.enum_opts || m.option_values!=p.enum_values))) { struct_same=false; break; }
         }
@@ -463,7 +503,10 @@ public:
         cancel_edit();
         props_.clear(); props_.reserve(model.size());
         for (const auto& m : model) {
-            Prop p; p.id=m.id; p.key=m.key; p.name=m.name; p.category=m.category; p.type=m.type; p.read_only=m.read_only;
+            // App props default id to -1 (they route by key); give each a UNIQUE stable id
+            // = its position, so find_idx / on_property_changed don't collide. Generated
+            // array-header ids (<= -1000000, in array_routes_) and explicit ids are kept.
+            Prop p; p.id=(m.id==-1)?(int)props_.size():m.id; p.key=m.key; p.name=m.name; p.category=m.category; p.type=m.type; p.read_only=m.read_only;
             p.actions=m.actions;
             apply_value(p, m);
             props_.push_back(std::move(p));
@@ -566,7 +609,7 @@ public:
     float get_total_content_height() const override {
         std::vector<VisRow> visible;
         collect_visible(visible);
-        return (float)visible.size() * row_h_;
+        return content_height(visible);
     }
     float get_name_column_width() const override { return name_col_w_; }
     void set_name_column_width(float w) override { name_col_w_=w; }
@@ -689,16 +732,118 @@ public:
         int32_t d=0;
         const auto& s=style_;
         ri_.push_rect(bx, by, bw, bh, s.row_background, d++, noclip);
-        // Column divider
-        ri_.push_rect(bx+name_col_w_, by, 1, bh, s.separator_color, d++, noclip);
+        // Column divider (table layout only — stacked has no name column)
+        if (!s.stacked)
+            ri_.push_rect(bx+name_col_w_, by, 1, bh, s.separator_color, d++, noclip);
 
         std::vector<VisRow> visible;
         collect_visible(visible);
-        float content_h = (float)visible.size() * row_h_;
+        float content_h = content_height(visible);
 
+        float run_y = 0.0f;
         for (int i = 0; i < (int)visible.size(); i++) {
-            float ry = by + i * row_h_ - scroll_y_;
-            if (ry + row_h_ < by || ry > by + bh) continue;
+            const float ext = row_extent(visible[i]);
+            float ry = by + run_y - scroll_y_;
+            run_y += ext;
+            if (ry + ext < by || ry > by + bh) continue;
+            if (s.stacked && !visible[i].is_cat) {   // ── stacked form row ──
+                int idx = visible[i].prop_idx;
+                const Prop& pr = props_[idx];
+                const float sx = bx + s.side_padding, sw = bw - s.side_padding * 2;
+                if (pr.type == PropertyType::Category) {
+                    // Inline section header: small-caps grey + action buttons.
+                    ri_.push_text(pr.name.c_str(), sx, ry, sw, row_h_,
+                                  s.category_text_color, s.label_font, Alignment::CenterLeft, d++, clip);
+                    std::vector<std::pair<math::Box,int>> arects;
+                    row_action_rects(pr, bx, bw, ry, row_h_, arects);
+                    for (size_t k=0;k<arects.size();++k) {
+                        const auto& act = pr.actions[pr.actions.size()-1-k];
+                        math::Vec4 fill = act.color.w>0.0f ? act.color : math::Vec4(0.33f,0.35f,0.40f,1.0f);
+                        const auto& bb = arects[k].first;
+                        ri_.push_round_rect(math::x(math::box_min(bb)), math::y(math::box_min(bb)),
+                                            math::box_width(bb), math::box_height(bb), 3.0f, fill, d++, clip);
+                        ri_.push_text(act.label.c_str(), math::x(math::box_min(bb)), math::y(math::box_min(bb))-1,
+                                      math::box_width(bb), math::box_height(bb),
+                                      math::Vec4(0.93f,0.93f,0.95f,1.0f), s.label_font, Alignment::Center, d++, clip);
+                    }
+                    continue;
+                }
+                if (pr.type == PropertyType::Bool) {
+                    // Single line: [checkbox] label
+                    const float ch = 13.0f, cy = ry + (ext - s.row_gap - ch) * 0.5f;
+                    if (pr.bool_val) {
+                        ri_.push_round_rect(sx, cy, ch, ch, 3.0f, math::Vec4(0.23f,0.38f,0.66f,1.0f), d++, clip);
+                        ri_.push_text("\xC3\x97", sx, cy - 1.0f, ch, ch,
+                                      math::Vec4(0.95f,0.96f,0.98f,1.0f), s.label_font, Alignment::Center, d++, clip);
+                    } else {
+                        ri_.push_round_rect(sx, cy, ch, ch, 3.0f, s.field_background, d++, clip);
+                        if (s.field_border_color.w > 0.0f)
+                            ri_.push_outline(sx, cy, ch, ch, s.field_border_color, d, clip);
+                    }
+                    ri_.push_text(pr.name.c_str(), sx + ch + 8.0f, ry, sw - ch - 8.0f, ext - s.row_gap,
+                                  s.value_text_color, s.font_size, Alignment::CenterLeft, d++, clip);
+                    continue;
+                }
+                // Label line (skip when unnamed) …
+                if (!pr.name.empty())
+                    ri_.push_text(pr.name.c_str(), sx, ry, sw, s.label_height,
+                                  s.name_text_color, s.label_font, Alignment::CenterLeft, d++, clip);
+                const float fy = ry + s.label_height, fh = s.field_height;
+                float act_w = 0.0f;
+                for (const auto& a : pr.actions) { (void)a; act_w += (fh-6.0f) + 3.0f; }
+                if (pr.read_only && pr.type == PropertyType::String) {
+                    // read-only text (subtitle/info): plain value, no box
+                    ri_.push_text(format_value(idx), sx, fy, sw - act_w, fh,
+                                  s.value_text_color, s.font_size, Alignment::CenterLeft, d++, clip);
+                } else {
+                    // … then the boxed value field.
+                    ri_.push_round_rect(sx, fy, sw, fh, s.field_corner_radius, s.field_background, d++, clip);
+                    if (s.field_border_color.w > 0.0f)
+                        ri_.push_outline(sx, fy, sw, fh, s.field_border_color, d, clip);
+                    const float tx = sx + 8.0f;
+                    float tw = sw - 16.0f - act_w;
+                    bool editing = (editing_id_ == pr.id);
+                    if (editing) {
+                        WidgetRenderInfo::TextCmd tc;
+                        tc.text = edit_buf_;
+                        tc.dest = math::make_box(tx, fy, tw, fh);
+                        tc.color = s.value_text_color;
+                        tc.font_size = s.font_size;
+                        tc.alignment = Alignment::CenterLeft;
+                        tc.depth = d++;
+                        tc.clip = clip;
+                        tc.show_cursor = true;
+                        tc.cursor_pos = edit_cursor_;
+                        tc.cursor_color = s.value_text_color;
+                        ri_.texts.push_back(tc);
+                    } else {
+                        if (pr.type == PropertyType::Enum) tw -= 14.0f;   // room for the chevron
+                        math::Vec4 vc = pr.read_only
+                            ? math::Vec4(s.value_text_color.x*0.6f,s.value_text_color.y*0.6f,s.value_text_color.z*0.6f,1.0f)
+                            : s.value_text_color;
+                        ri_.push_text(format_value(idx), tx, fy, tw, fh,
+                                      vc, s.font_size, Alignment::CenterLeft, d++, clip);
+                        if (pr.type == PropertyType::Enum && !pr.read_only)
+                            ri_.push_text("v", sx + sw - 16.0f, fy, 14.0f, fh,
+                                          s.name_text_color, 9.0f, Alignment::Center, d++, clip);
+                    }
+                }
+                if (!pr.actions.empty()) {
+                    std::vector<std::pair<math::Box,int>> arects;
+                    row_action_rects(pr, bx, bw, fy, fh, arects);
+                    for (size_t k=0;k<arects.size();++k) {
+                        const auto& act = pr.actions[pr.actions.size()-1-k];
+                        math::Vec4 fill = act.color.w>0.0f ? act.color : math::Vec4(0.33f,0.35f,0.40f,1.0f);
+                        const auto& bb = arects[k].first;
+                        ri_.push_round_rect(math::x(math::box_min(bb)), math::y(math::box_min(bb)),
+                                            math::box_width(bb), math::box_height(bb), 3.0f, fill, d++, clip);
+                        ri_.push_text(act.label.c_str(), math::x(math::box_min(bb)), math::y(math::box_min(bb))-1,
+                                      math::box_width(bb), math::box_height(bb),
+                                      math::Vec4(0.93f,0.93f,0.95f,1.0f), s.label_font, Alignment::Center, d++, clip);
+                    }
+                }
+                continue;
+            }
             if (visible[i].is_cat) {
                 // Category header
                 ri_.push_rect(bx, ry, bw, row_h_, s.category_background, d++, clip);
@@ -727,7 +872,7 @@ public:
                 ri_.push_text(props_[idx].name.c_str(), bx+8, ry, bw-16, row_h_,
                               s.category_text_color, 11.0f, Alignment::CenterLeft, d++, clip);
                 std::vector<std::pair<math::Box,int>> arects;
-                row_action_rects(props_[idx], bx, bw, ry, arects);
+                row_action_rects(props_[idx], bx, bw, ry, row_h_, arects);
                 for (size_t k=0;k<arects.size();++k) {
                     const auto& act = props_[idx].actions[props_[idx].actions.size()-1-k];
                     math::Vec4 fill = act.color.w>0.0f ? act.color : math::Vec4(0.33f,0.35f,0.40f,1.0f);
@@ -757,7 +902,7 @@ public:
                 // Trailing action buttons (× delete etc.) on a value row.
                 if (!props_[idx].actions.empty()) {
                     std::vector<std::pair<math::Box,int>> arects;
-                    row_action_rects(props_[idx], bx, bw, ry, arects);
+                    row_action_rects(props_[idx], bx, bw, ry, row_h_, arects);
                     for (size_t k=0;k<arects.size();++k) {
                         const auto& act = props_[idx].actions[props_[idx].actions.size()-1-k];
                         math::Vec4 fill = act.color.w>0.0f ? act.color : math::Vec4(0.33f,0.35f,0.40f,1.0f);
@@ -848,24 +993,26 @@ public:
             if (popup_row >= 0) {
                 auto& pop_p = props_[visible[popup_row].prop_idx];
                 int num_opts = (int)pop_p.enum_opts.size();
-                float pop_y_top = by + (popup_row + 1) * row_h_ - scroll_y_;
-                float pop_x = bx + name_col_w_;
-                float pop_w = bw - name_col_w_;
-                float pop_h = num_opts * row_h_;
+                const float opt_h = s.stacked ? s.field_height : row_h_;
+                float pop_y_top = by + row_offset(visible, popup_row) + row_extent(visible[popup_row])
+                                  - (s.stacked ? s.row_gap : 0.0f) - scroll_y_;
+                float pop_x = s.stacked ? bx + s.side_padding : bx + name_col_w_;
+                float pop_w = s.stacked ? bw - s.side_padding * 2 : bw - name_col_w_;
+                float pop_h = num_opts * opt_h;
                 // Keep popup inside widget vertically
                 if (pop_y_top + pop_h > by + bh)
-                    pop_y_top = by + (popup_row) * row_h_ - scroll_y_ - pop_h;
+                    pop_y_top = by + row_offset(visible, popup_row) - scroll_y_ - pop_h;
                 int32_t pd = 2000; // very high depth — on top of everything
                 auto noclip2 = math::make_box(0,0,0,0);
                 ri_.push_rect(pop_x, pop_y_top, pop_w, pop_h, math::Vec4(0.18f,0.18f,0.2f,1.0f), pd++, noclip2);
                 ri_.push_outline(pop_x, pop_y_top, pop_w, pop_h, math::Vec4(0.4f,0.4f,0.5f,1.0f), pd, noclip2);
                 for (int oi = 0; oi < num_opts; ++oi) {
-                    float oy = pop_y_top + oi * row_h_;
+                    float oy = pop_y_top + oi * opt_h;
                     bool cur = (oi == pop_p.enum_idx);
                     if (cur)
-                        ri_.push_rect(pop_x+1, oy+1, pop_w-2, row_h_-2, math::Vec4(0.25f,0.4f,0.7f,0.5f), pd++, noclip2);
-                    ri_.push_text(pop_p.enum_opts[oi].c_str(), pop_x+6, oy, pop_w-10, row_h_,
-                                  s.value_text_color, 11.0f, Alignment::CenterLeft, pd++, noclip2);
+                        ri_.push_rect(pop_x+1, oy+1, pop_w-2, opt_h-2, math::Vec4(0.25f,0.4f,0.7f,0.5f), pd++, noclip2);
+                    ri_.push_text(pop_p.enum_opts[oi].c_str(), pop_x+6, oy, pop_w-10, opt_h,
+                                  s.value_text_color, s.stacked ? s.font_size : 11.0f, Alignment::CenterLeft, pd++, noclip2);
                     if (oi > 0)
                         ri_.push_rect(pop_x, oy, pop_w, 1, math::Vec4(0.3f,0.3f,0.33f,0.5f), pd++, noclip2);
                 }
