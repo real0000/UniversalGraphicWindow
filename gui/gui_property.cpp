@@ -626,6 +626,58 @@ public:
         return n;
     }
 
+    // ── semantic driving (automation) — apply a change by KEY, fire the handler ──────
+    int find_by_key(const char* key) const {
+        if (key) for (const auto& p : props_) if (p.key == key) return p.id;
+        return -1;
+    }
+    bool commit_text(const char* key, const char* text) override {
+        int i = find_idx(find_by_key(key)); if (i < 0) return false;
+        Prop& p = props_[i];
+        const std::string t = text ? text : "";
+        if (p.type == PropertyType::Int)        p.int_val   = std::atoi(t.c_str());
+        else if (p.type == PropertyType::Float) p.float_val = (float)std::atof(t.c_str());
+        p.str_val = t;                                    // canonical_value returns str_val for these
+        if (handler_) handler_->on_property_changed(p.id);
+        return true;
+    }
+    bool select_enum(const char* key, int opt) override {
+        int i = find_idx(find_by_key(key)); if (i < 0) return false;
+        Prop& p = props_[i];
+        if (p.type != PropertyType::Enum || opt < 0 || opt >= (int)p.enum_opts.size()) return false;
+        p.enum_idx = opt;
+        if (handler_) handler_->on_property_changed(p.id);
+        return true;
+    }
+    bool toggle_bool(const char* key) override {
+        int i = find_idx(find_by_key(key)); if (i < 0) return false;
+        Prop& p = props_[i];
+        if (p.type != PropertyType::Bool) return false;
+        p.bool_val = !p.bool_val;
+        if (handler_) handler_->on_property_changed(p.id);
+        return true;
+    }
+    bool invoke_array_add(const char* array_key) override {
+        if (!handler_ || !array_key) return false; handler_->on_property_array_add(array_key); return true;
+    }
+    bool invoke_array_remove(const char* array_key, int index) override {
+        if (!handler_ || !array_key) return false; handler_->on_property_array_remove(array_key, index); return true;
+    }
+    bool invoke_array_move(const char* array_key, int index, int delta) override {
+        if (!handler_ || !array_key) return false; handler_->on_property_array_move(array_key, index, delta); return true;
+    }
+    int get_enum_options(const char* key, const char** out_values, const char** out_labels, int max) const override {
+        int i = find_idx(find_by_key(key)); if (i < 0) return 0;
+        const Prop& p = props_[i];
+        if (p.type != PropertyType::Enum) return 0;
+        int n = std::min(max, (int)p.enum_opts.size());
+        for (int k = 0; k < n; ++k) {
+            if (out_labels) out_labels[k] = p.enum_opts[k].c_str();
+            if (out_values) out_values[k] = (k < (int)p.enum_values.size()) ? p.enum_values[k].c_str() : p.enum_opts[k].c_str();
+        }
+        return n;
+    }
+
     const WidgetRenderInfo& get_render_info(Window*) const override {
         ri_.invalidate();
         val_cache_.clear();

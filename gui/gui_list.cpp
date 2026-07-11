@@ -175,6 +175,22 @@ public:
     void set_selection_mode(ListBoxSelectionMode m) override { sel_mode_=m; }
     int get_selected_item() const override { return selected_; }
     void set_selected_item(int id) override { selected_=id; }
+    bool activate_item(int item_id) override {
+        for (const auto& it : items_) if (it.id == item_id) {
+            selected_ = item_id;
+            if (handler_) handler_->on_item_selected(item_id);
+            base_.mark_dirty();
+            return true;
+        }
+        return false;
+    }
+    bool activate_item_action(int item_id) override {
+        for (const auto& it : items_) if (it.id == item_id) {
+            if (handler_) handler_->on_item_action(item_id);
+            return true;
+        }
+        return false;
+    }
     void get_selected_items(std::vector<int>& out) const override { out=multi_sel_; }
     void set_selected_items(const std::vector<int>& ids) override { multi_sel_=ids; }
     void clear_selection() override { selected_=-1; multi_sel_.clear(); }

@@ -116,6 +116,13 @@ public:
     virtual bool is_item_enabled(int item_id) const = 0;
     virtual void set_item_enabled(int item_id, bool enabled) = 0;
 
+    // Semantic driving (automation / scripting): fire the SAME handler a click would, by
+    // item id — no geometry needed. activate_item = select (on_item_selected);
+    // activate_item_action = the trailing "×"/action row (on_item_action). False if the
+    // id isn't present.
+    virtual bool activate_item(int item_id) = 0;
+    virtual bool activate_item_action(int item_id) = 0;
+
     // Selection
     virtual ListBoxSelectionMode get_selection_mode() const = 0;
     virtual void set_selection_mode(ListBoxSelectionMode mode) = 0;

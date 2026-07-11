@@ -252,6 +252,19 @@ public:
     // Render info
     virtual void get_property_grid_render_info(PropertyGridRenderInfo* out_info) const = 0;
     virtual int get_visible_property_items(PropertyRenderItem* out_items, int max_items) const = 0;
+
+    // Semantic driving (automation / scripting) — apply an edit by KEY exactly as a user
+    // interaction would and fire the SAME handler callbacks, so a driver never needs the
+    // grid's internal geometry. Return false if no row matches `key`.
+    virtual bool commit_text(const char* key, const char* text) = 0;   // String/Int/Float row
+    virtual bool select_enum(const char* key, int option_index) = 0;   // Enum row → on_property_changed
+    virtual bool toggle_bool(const char* key) = 0;                     // Bool row → on_property_changed
+    virtual bool invoke_array_add(const char* array_key) = 0;          // section "+" → on_property_array_add
+    virtual bool invoke_array_remove(const char* array_key, int index) = 0;
+    virtual bool invoke_array_move(const char* array_key, int index, int delta) = 0;
+    // Options of an Enum row (by key), for a driver to pick by value/label. Returns count
+    // (0 if not an enum / not found); fills out_values/out_labels up to max.
+    virtual int  get_enum_options(const char* key, const char** out_values, const char** out_labels, int max) const = 0;
 };
 
 } // namespace gui
