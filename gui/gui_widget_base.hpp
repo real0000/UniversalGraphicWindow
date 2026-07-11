@@ -318,6 +318,7 @@ public:
     math::Box get_bounds() const override { return base_.get_bounds(); }
     void set_bounds(const math::Box& b) override { base_.set_bounds(b); }
     math::Vec2 get_preferred_size() const override { return base_.get_preferred_size(); }
+    void set_preferred_size(const math::Vec2& s) override { base_.set_preferred_size(s); }
     math::Vec2 get_min_size() const override { return base_.get_min_size(); }
     math::Vec2 get_max_size() const override { return base_.get_max_size(); }
     void set_min_size(const math::Vec2& s) override { base_.set_min_size(s); }
