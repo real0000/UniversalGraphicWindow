@@ -393,6 +393,10 @@ struct WidgetItem {
     // Optional per-row text colour override (alpha 0 = use the style's text colour).
     // Lets a log/console list colour rows by severity without a per-row widget.
     math::Vec4 text_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    // Optional per-row background override (alpha 0 = style default) + centred text —
+    // accent rows ("+ New …" button-like entries) without a per-row widget.
+    math::Vec4 row_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    bool centered = false;
 };
 
 } // namespace gui

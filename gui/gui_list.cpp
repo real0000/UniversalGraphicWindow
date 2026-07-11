@@ -26,12 +26,14 @@ class GuiListBox : public WidgetBase<IGuiListBox, WidgetType::ListBox> {
     std::vector<IGuiWidget*> row_widgets_;                   // pooled row widgets (children)
     mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)items_.size();++i) if(items_[i].id==id) return i; return -1; }
+    float row_pitch() const { return style_.row_height + style_.row_gap; }
     // Reconstruct a ListItemModel for row i (what the binder consumes).
     ListItemModel item_model(int i) const {
         const WidgetItem& it = items_[i];
         ListItemModel m; m.id=it.id; m.text=it.text; m.swatch=it.swatch;
         m.editable=it.editable; m.has_action=it.has_action; m.enabled=it.enabled;
-        m.selected=(it.id==selected_); m.text_color=it.text_color; return m;
+        m.selected=(it.id==selected_); m.text_color=it.text_color;
+        m.row_color=it.row_color; m.center=it.centered; return m;
     }
     // Grow/position/populate the row-widget pool to match the model. Called before
     // each render (refresh_bindings). Rows fully off-view are hidden; extras hidden.
@@ -40,7 +42,7 @@ class GuiListBox : public WidgetBase<IGuiListBox, WidgetType::ListBox> {
         auto b=base_.get_bounds();
         float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b));
         float bw=math::box_width(b), bh=math::box_height(b);
-        float rh=style_.row_height;
+        float rh=style_.row_height, pitch=row_pitch();
         while ((int)row_widgets_.size() < (int)items_.size()) {
             IGuiWidget* w=row_factory_(); if(!w) break;
             row_widgets_.push_back(w); base_.add_child(w);
@@ -48,7 +50,7 @@ class GuiListBox : public WidgetBase<IGuiListBox, WidgetType::ListBox> {
         for (int i=0;i<(int)row_widgets_.size();++i) {
             IGuiWidget* w=row_widgets_[i]; if(!w) continue;
             if (i<(int)items_.size()) {
-                float ry=by+i*rh-scroll_y_;
+                float ry=by+i*pitch-scroll_y_;
                 bool vis=(ry+rh>by)&&(ry<by+bh);
                 w->set_visible(vis);
                 if (vis) { w->set_bounds(math::make_box(bx,ry,bw,rh)); if(row_binder_) row_binder_(w,item_model(i)); }
@@ -76,8 +78,8 @@ public:
             if (btn == MouseButton::Left && pressed) {
                 auto b = base_.get_bounds();
                 float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
-                int row = (style_.row_height > 0) ? (int)(rel_y / style_.row_height) : -1;
-                if (row >= 0 && row < (int)items_.size()) {
+                int row = (row_pitch() > 0) ? (int)(rel_y / row_pitch()) : -1;
+                if (row >= 0 && row < (int)items_.size() && items_[row].enabled) {
                     int old = selected_;
                     selected_ = items_[row].id;
                     if (selected_ != old && handler_) handler_->on_item_selected(selected_);
@@ -94,7 +96,7 @@ public:
             }
             auto b = base_.get_bounds();
             float rel_y = math::y(p) - math::y(math::box_min(b)) + scroll_y_;
-            int row = (style_.row_height > 0) ? (int)(rel_y / style_.row_height) : -1;
+            int row = (row_pitch() > 0) ? (int)(rel_y / row_pitch()) : -1;
             if (row >= 0 && row < (int)items_.size()) {
                 // Trailing "×" action takes the click before selection.
                 if (items_[row].has_action && math::box_contains(action_rect(row), p)) {
@@ -124,14 +126,15 @@ public:
             const auto& m=model[i]; const auto& it=items_[i];
             if (m.id!=it.id || m.text!=it.text || m.enabled!=it.enabled ||
                 m.has_action!=it.has_action || m.editable!=it.editable ||
-                !veq(m.swatch,it.swatch) || !veq(m.text_color,it.text_color)) { same=false; break; }
+                !veq(m.swatch,it.swatch) || !veq(m.text_color,it.text_color) ||
+                !veq(m.row_color,it.row_color) || m.center!=it.centered) { same=false; break; }
         }
         if (same) return;                       // unchanged → no repaint (like set_nodes)
         items_.clear(); items_.reserve(model.size());
         for (const auto& m : model) {
             WidgetItem it; it.id=m.id; it.text=m.text; it.enabled=m.enabled;
             it.swatch=m.swatch; it.editable=m.editable; it.has_action=m.has_action;
-            it.text_color=m.text_color;
+            it.text_color=m.text_color; it.row_color=m.row_color; it.centered=m.center;
             items_.push_back(std::move(it));
             if (m.id>=next_id_) next_id_=m.id+1;
         }
@@ -151,12 +154,17 @@ public:
         if (provider_) set_items(provider_());
         reconcile_row_widgets();
     }
+    // Pooled custom row widgets live in base_'s child list; expose them so the
+    // context's collect/focus traversal reaches them (the WidgetBase wrapper
+    // default hides children — same forwarding the CanvasView does).
+    int get_child_count() const override { return base_.get_child_count(); }
+    IGuiWidget* get_child(int i) const override { return base_.get_child(i); }
     // Trailing "×" action hit zone for a row (right edge, one row_height wide).
     math::Box action_rect(int row) const {
         auto b=base_.get_bounds();
         float bx=math::x(math::box_min(b)), by=math::y(math::box_min(b)), bw=math::box_width(b);
         float rh=style_.row_height, aw=rh;
-        return math::make_box(bx+bw-aw-2.0f, by+row*rh-scroll_y_, aw, rh);
+        return math::make_box(bx+bw-aw-2.0f, by+row*row_pitch()-scroll_y_, aw, rh);
     }
     int insert_item(int idx,const char* text,const char* icon) override {
         int id=next_id_++; if(idx<0)idx=0; if(idx>(int)items_.size())idx=(int)items_.size();
@@ -201,21 +209,24 @@ public:
         scroll_y_ = std::max(0.0f, std::min(offset, max_scroll));
     }
     float get_total_content_height() const override {
-        return (float)items_.size() * style_.row_height;
+        const int n = (int)items_.size();
+        return n <= 0 ? 0.0f : (float)n * row_pitch() - style_.row_gap;
     }
     bool handle_mouse_scroll(float, float dy) override {
-        float step = style_.row_height * 2;
+        if (get_total_content_height() <= math::box_height(base_.get_bounds()) + 0.5f)
+            return false;   // content fits: let an enclosing ScrollView take the wheel
+        float step = row_pitch() * 2;
         set_scroll_offset(scroll_y_ - dy * step);
         return true;
     }
     void scroll_to_item(int id) override {
         int i = find_idx(id);
-        if (i >= 0) set_scroll_offset((float)i * style_.row_height);
+        if (i >= 0) set_scroll_offset((float)i * row_pitch());
     }
     void ensure_item_visible(int id) override {
         int i = find_idx(id);
         if (i < 0) return;
-        float item_top = (float)i * style_.row_height;
+        float item_top = (float)i * row_pitch();
         float item_bot = item_top + style_.row_height;
         float view_h = math::box_height(base_.get_bounds());
         if (item_top < scroll_y_) set_scroll_offset(item_top);
@@ -243,23 +254,30 @@ public:
         auto noclip = math::make_box(0,0,0,0);
         int32_t d = 0;
         const auto& s = style_;
-        // Background
-        ri_.push_rect(bx, by, bw, bh, s.row_background, d++, noclip);
+        // Background (alpha-gated: transparent lists ride the panel fill)
+        if (s.background_color.w > 0.0f)
+            ri_.push_rect(bx, by, bw, bh, s.background_color, d++, noclip);
         // Rows — suppressed when custom row widgets draw them (children render on top).
         int count = row_factory_ ? 0 : (int)items_.size();
-        float row_h = s.row_height;
+        float row_h = s.row_height, pitch = row_pitch();
         for (int i = 0; i < count; i++) {
-            float ry = by + i * row_h - scroll_y_;
+            float ry = by + i * pitch - scroll_y_;
             if (ry + row_h < by || ry > by + bh) continue;
             bool is_sel = (items_[i].id == selected_);
             bool dis = !items_[i].enabled;
             math::Vec4 row_bg = (is_sel && !dis) ? s.selected_background
+                              : items_[i].row_color.w > 0.0f ? items_[i].row_color   // accent row
                               : (i%2==0) ? s.row_background : s.row_alt_background;
-            ri_.push_rect(bx, ry, bw, row_h, row_bg, d++, clip);
+            if (row_bg.w > 0.0f) {
+                if (s.row_corner_radius > 0.0f)
+                    ri_.push_round_rect(bx, ry, bw, row_h, s.row_corner_radius, row_bg, d++, clip);
+                else
+                    ri_.push_rect(bx, ry, bw, row_h, row_bg, d++, clip);
+            }
             math::Vec4 text_col = dis ? s.disabled_text_color
                                 : is_sel ? s.selected_text_color : s.text_color;
-            if (!dis && !is_sel && items_[i].text_color.w > 0.0f)
-                text_col = items_[i].text_color;   // per-row severity colour (log/console rows)
+            if (!is_sel && items_[i].text_color.w > 0.0f)
+                text_col = items_[i].text_color;   // per-row severity/accent colour
             // Leading colour swatch (model rows): a small rounded dot; text indents past it.
             float text_x = bx + s.item_padding;
             if (items_[i].swatch.w > 0.0f) {
@@ -267,21 +285,35 @@ public:
                 ri_.push_round_rect(sxo, syo, sw, sw, 2.0f, items_[i].swatch, d++, clip);
                 text_x = sxo + sw + s.item_padding * 0.75f;
             }
-            // Trailing "×" delete affordance (model has_action).
+            // Trailing "×" delete affordance (model has_action): a filled square button
+            // when the style gives it a background, else the plain glyph.
             float text_w = bx + bw - text_x - s.item_padding;
             if (items_[i].has_action) {
                 float aw = row_h;
-                ri_.push_text("\xC3\x97", bx + bw - aw, ry, aw, row_h,
-                              dis ? s.disabled_text_color : s.text_color, s.font_size,
-                              Alignment::Center, d++, clip);   // × (U+00D7)
+                const math::Vec4 axc = s.action_text_color.w > 0.0f ? s.action_text_color
+                                     : dis ? s.disabled_text_color : s.text_color;
+                if (s.action_background.w > 0.0f) {
+                    const float asz = s.action_size > 0.0f ? s.action_size : row_h - 8.0f;
+                    const float axm = bx + bw - aw - 2.0f + (aw - asz) * 0.5f;
+                    const float aym = ry + (row_h - asz) * 0.5f;
+                    ri_.push_round_rect(axm, aym, asz, asz, s.action_corner_radius,
+                                        s.action_background, d++, clip);
+                    ri_.push_text("\xC3\x97", axm, aym, asz, asz, axc,
+                                  s.font_size * 0.92f, Alignment::Center, d++, clip);
+                } else {
+                    ri_.push_text("\xC3\x97", bx + bw - aw, ry, aw, row_h, axc,
+                                  s.font_size, Alignment::Center, d++, clip);   // × (U+00D7)
+                }
                 text_w -= aw;
             }
             if (!items_[i].text.empty())
                 ri_.push_text(items_[i].text.c_str(), text_x, ry, text_w, row_h,
-                              text_col, s.font_size, Alignment::CenterLeft, d++, clip);
+                              text_col, s.font_size,
+                              items_[i].centered ? Alignment::Center : Alignment::CenterLeft,
+                              d++, clip);
         }
         // Embedded scrollbar
-        float content_h = (float)count * row_h;
+        float content_h = (float)count * pitch;
         if (content_h > bh) {
             const float sb_w = 10.0f;
             float sb_x = bx + bw - sb_w - 1;
@@ -294,7 +326,8 @@ public:
             ri_.push_rect(sb_x, by + track_range*pos_ratio, sb_w, thumb_h,
                           math::Vec4(0.4f,0.4f,0.42f,0.7f), d++, noclip);
         }
-        ri_.push_outline(bx, by, bw, bh, math::Vec4(0.25f,0.25f,0.27f,1.0f), d, noclip);
+        if (s.border_color.w > 0.0f)
+            ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
         ri_.finalize();
         base_.clear_dirty();
         return ri_;

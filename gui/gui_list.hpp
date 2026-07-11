@@ -59,6 +59,8 @@ struct ListItemModel {
     bool       selected = false;
     bool       enabled = true;
     math::Vec4 text_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);  // per-row override; alpha 0 = style default
+    math::Vec4 row_color = math::Vec4(0.0f, 0.0f, 0.0f, 0.0f);   // per-row bg override (accent rows); alpha 0 = style default
+    bool       center = false;        // centre the row text (accent/button-like rows)
 };
 
 class IListBoxEventHandler {
