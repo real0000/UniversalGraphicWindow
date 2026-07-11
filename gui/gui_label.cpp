@@ -91,8 +91,9 @@ private:
     ITextMeasurer* measurer_ = nullptr;   // maps a click x → caret char index
     mutable WidgetRenderInfo ri_;
     // Key codes from window::Key enum
-    enum : int { K_Enter=308, K_Backspace=309, K_Delete=310,
+    enum : int { K_Escape=300, K_Enter=308, K_Backspace=309, K_Delete=310,
                  K_Home=312, K_End=313, K_Left=316, K_Right=317 };
+    ITextInputEventHandler* input_handler_ = nullptr;
     enum { MOD_SHIFT = 1 };   // handle_key modifier bits (see the chat's on_key)
     int  sel_lo() const { return std::min(anchor_, cursor_); }
     int  sel_hi() const { return std::max(anchor_, cursor_); }
@@ -117,6 +118,7 @@ public:
     void set_text_measurer(ITextMeasurer* m) override { measurer_ = m; }
     // Click positions the caret (drops selection); drag extends it (rubber-band select).
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
+        if (!base_.is_visible()) return false;
         if (btn == MouseButton::Left && pressed && base_.hit_test(p)) {
             base_.set_focus(true);
             if (preedit_.empty()) { cursor_ = caret_from_x(math::x(p)); clamp_caret(); }
@@ -132,36 +134,47 @@ public:
         return WidgetBase::handle_mouse_move(p);
     }
     bool handle_text_input(const char* t) override {
+        if (!base_.is_visible()) return false;   // a hidden (dismissed) editor takes nothing
         if (!read_only_ && t) {
             if (has_sel()) delete_selection();
             std::string s(t);
             if (max_length_ > 0 && (int)(text_.size() + s.size()) > max_length_) return false;
             text_.insert(cursor_, s); cursor_ += (int)s.size(); anchor_ = cursor_;
+            base_.mark_dirty();
         }
         return true;
     }
     bool handle_preedit(const char* t, int cursor) override {   // IME composing (shown inline)
-        if (read_only_) return false;
+        if (read_only_ || !base_.is_visible()) return false;
         if (t && *t) set_preedit(t, cursor); else clear_preedit();
         return true;
     }
     // code = window::Key; mods bit MOD_SHIFT extends the selection instead of collapsing it.
     bool handle_key(int code, bool pressed, int mods) override {
-        if (!pressed) return false;
+        if (!pressed || !base_.is_visible()) return false;
         const bool shift = (mods & MOD_SHIFT) != 0;
-        auto move = [&](int to) { cursor_ = std::max(0, std::min(to, (int)text_.size())); if (!shift) anchor_ = cursor_; };
+        auto move = [&](int to) { cursor_ = std::max(0, std::min(to, (int)text_.size())); if (!shift) anchor_ = cursor_; base_.mark_dirty(); };
         switch (code) {
-            case K_Left:  if (!shift && has_sel()) { cursor_ = anchor_ = sel_lo(); } else move(prev_i(cursor_)); return true;
-            case K_Right: if (!shift && has_sel()) { cursor_ = anchor_ = sel_hi(); } else move(next_i(cursor_)); return true;
+            case K_Left:  if (!shift && has_sel()) { cursor_ = anchor_ = sel_lo(); base_.mark_dirty(); } else move(prev_i(cursor_)); return true;
+            case K_Right: if (!shift && has_sel()) { cursor_ = anchor_ = sel_hi(); base_.mark_dirty(); } else move(next_i(cursor_)); return true;
             case K_Home:  move(0); return true;
             case K_End:   move((int)text_.size()); return true;
-            case K_Backspace: if (!read_only_) { if (has_sel()) delete_selection(); else delete_backward(1); } return true;
-            case K_Delete:    if (!read_only_) { if (has_sel()) delete_selection(); else delete_forward(1); } return true;
+            case K_Backspace: if (!read_only_) { if (has_sel()) delete_selection(); else delete_backward(1); base_.mark_dirty(); } return true;
+            case K_Delete:    if (!read_only_) { if (has_sel()) delete_selection(); else delete_forward(1); base_.mark_dirty(); } return true;
+            case K_Enter:  if (input_handler_) { input_handler_->on_text_commit(text_.c_str()); return true; } return false;
+            case K_Escape: if (input_handler_) { input_handler_->on_text_cancel(); return true; } return false;
         }
         return false;
     }
+    void set_text_input_event_handler(ITextInputEventHandler* h) override { input_handler_ = h; }
     const char* get_text() const override { return text_.c_str(); }
-    void set_text(const char* t) override { text_ = t ? t : ""; cursor_ = snap(std::min(cursor_, (int)text_.size())); anchor_ = cursor_; }
+    void set_text(const char* t) override {
+        const char* nt = t ? t : "";
+        if (text_ == nt) return;               // dirty-on-change (idempotent rebinds)
+        text_ = nt;
+        cursor_ = snap(std::min(cursor_, (int)text_.size())); anchor_ = cursor_;
+        base_.mark_dirty();
+    }
     const LabelStyle& get_label_style() const override { return label_style_; }
     void set_label_style(const LabelStyle& s) override { label_style_ = s; }
     const TextInputStyle& get_text_input_style() const override { return ti_style_; }

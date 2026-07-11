@@ -37,9 +37,22 @@ public:
 // of the hardcoded default look.
 // TextInputStyle is defined in gui_styles.hpp (presets in gui_styles.cpp).
 
+// Enter/Escape hooks for a single-line input embedded by another widget (e.g. the
+// PropertyGrid's field editor): Enter commits the text, Escape abandons the edit.
+// Default no-ops so plain inputs keep their behaviour.
+class ITextInputEventHandler {
+public:
+    virtual ~ITextInputEventHandler() = default;
+    virtual void on_text_commit(const char* text) { (void)text; }
+    virtual void on_text_cancel() {}
+};
+
 class IGuiTextInput : public IGuiLabel {
 public:
     virtual ~IGuiTextInput() = default;
+
+    // Enter → on_text_commit, Escape → on_text_cancel (unset: both keys fall through).
+    virtual void set_text_input_event_handler(ITextInputEventHandler* handler) = 0;
 
     // Field style (background, outline, focus ring, placeholder colour, …).
     virtual const TextInputStyle& get_text_input_style() const = 0;

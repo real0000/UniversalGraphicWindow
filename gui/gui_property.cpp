@@ -3,6 +3,8 @@
  */
 
 #include "gui_widget_base.hpp"
+
+namespace window { namespace gui { IGuiTextInput* create_text_input_widget(); } }
 #include <unordered_map>
 
 namespace window {
@@ -70,18 +72,98 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
     int edit_cursor_=0;
     int enum_popup_id_=-1;
     bool sb_drag_=false;
+    // Embedded field editor: a REAL single-line GuiTextInput child (mouse caret,
+    // drag-select, CJK, IME preedit, blink) positioned over the edited field.
+    // Enter commits (on_text_commit), Escape cancels; the grid owns the value.
+    IGuiTextInput* editor_ = nullptr;
+    ITextMeasurer* measurer_ = nullptr;
+    struct EditorH : ITextInputEventHandler {
+        GuiPropertyGrid* g = nullptr;
+        void on_text_commit(const char* t) override;
+        void on_text_cancel() override;
+    } editor_h_;
     mutable WidgetRenderInfo ri_;
     int find_idx(int id) const { for(int i=0;i<(int)props_.size();++i) if(props_[i].id==id) return i; return -1; }
 
+    // The edited field's box (stacked: the value box under the label; table: the
+    // value cell). Empty when the row isn't visible / editable.
+    math::Box field_rect_for(int prop_id) const {
+        std::vector<VisRow> vis; collect_visible(vis);
+        auto b = base_.get_bounds();
+        const float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        const float bw = math::box_width(b);
+        for (int i = 0; i < (int)vis.size(); ++i) {
+            if (vis[i].is_cat || props_[vis[i].prop_idx].id != prop_id) continue;
+            const float ry = by + row_offset(vis, i) - scroll_y_;
+            if (style_.stacked)
+                return math::make_box(bx + style_.side_padding, ry + style_.label_height,
+                                      bw - style_.side_padding * 2, style_.field_height);
+            return math::make_box(bx + name_col_w_ + 2, ry + 1, bw - name_col_w_ - 4, row_h_ - 2);
+        }
+        return math::make_box(0, 0, 0, 0);
+    }
+    void ensure_editor() {
+        if (editor_) return;
+        editor_ = create_text_input_widget();
+        if (!editor_) return;
+        editor_h_.g = this;
+        editor_->set_text_input_event_handler(&editor_h_);
+        editor_->set_visible(false);
+        if (measurer_) editor_->set_text_measurer(measurer_);
+        base_.add_child(editor_);
+    }
     void start_editing(int prop_id) {
         int i = find_idx(prop_id);
         if (i < 0 || props_[i].read_only) return;
         auto& p = props_[i];
         if (p.type == PropertyType::Bool || p.type == PropertyType::Category ||
             p.type == PropertyType::Enum) return;
+        ensure_editor();
+        const math::Box fb = field_rect_for(prop_id);
+        if (!editor_ || math::box_is_empty(fb)) return;
         editing_id_ = prop_id;
         edit_buf_ = format_value(i);
         edit_cursor_ = (int)edit_buf_.size();
+        TextInputStyle ts = TextInputStyle::default_style();
+        ts.background_color   = style_.stacked ? style_.field_background : math::Vec4(0.1f, 0.1f, 0.12f, 1.0f);
+        ts.border_color       = math::Vec4(0, 0, 0, 0);
+        ts.focus_border_color = math::Vec4(0, 0, 0, 0);
+        ts.text_color         = style_.value_text_color;
+        ts.selection_color    = math::Vec4(0.21f, 0.31f, 0.51f, 1.0f);
+        ts.cursor_color       = style_.value_text_color;
+        ts.font_size          = style_.stacked ? style_.font_size : 11.0f;
+        ts.corner_radius      = style_.stacked ? style_.field_corner_radius : 0.0f;
+        ts.padding            = 6.0f;
+        editor_->set_text_input_style(ts);
+        editor_->set_text(edit_buf_.c_str());
+        editor_->set_cursor_position((int)edit_buf_.size());
+        editor_->set_bounds(fb);
+        editor_->set_visible(true);
+        editor_->set_focus(true);
+        base_.mark_dirty();
+    }
+    void editor_commit(const char* text) {
+        int i = find_idx(editing_id_);
+        if (i >= 0) {
+            Prop& p = props_[i];
+            const std::string t = text ? text : "";
+            if (p.type == PropertyType::Int)        p.int_val   = std::atoi(t.c_str());
+            else if (p.type == PropertyType::Float) p.float_val = (float)std::atof(t.c_str());
+            else if (p.type == PropertyType::Range) {
+                float v = (float)std::atof(t.c_str());
+                if (v < p.range_min) v = p.range_min;
+                if (v > p.range_max) v = p.range_max;
+                p.float_val = v;
+            }
+            p.str_val = t;
+            if (handler_) handler_->on_property_changed(p.id);
+        }
+        editor_dismiss();
+    }
+    void editor_dismiss() {
+        editing_id_ = -1; edit_cursor_ = 0;
+        if (editor_) { editor_->set_visible(false); editor_->set_focus(false); }
+        base_.mark_dirty();
     }
 
     void commit_edit() {
@@ -106,7 +188,7 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         edit_cursor_ = 0;
     }
 
-    void cancel_edit() { editing_id_ = -1; edit_cursor_ = 0; enum_popup_id_ = -1; }
+    void cancel_edit() { enum_popup_id_ = -1; editor_dismiss(); }
 
     // Build visible rows: category headers + properties under expanded categories
     struct VisRow { bool is_cat; std::string cat_name; int prop_idx; };
@@ -269,11 +351,14 @@ public:
     bool is_focusable() const override { return true; }
     bool handle_mouse_scroll(float, float dy) override {
         if (dy == 0) return false;
+        if (editor_ && editor_->is_visible()) editor_commit(editor_->get_text());
         scroll_y_ -= dy * row_h_ * 3;
         clamp_scroll();
+        base_.mark_dirty();
         return true;
     }
     bool handle_mouse_move(const math::Vec2& p) override {
+        if (editor_ && editor_->is_visible() && editor_->handle_mouse_move(p)) return true;
         if (sb_drag_) {
             float content_h = get_total_content_height();
             set_scroll_offset(scrollbar_offset_from_mouse(base_.get_bounds(), content_h, math::y(p)));
@@ -283,6 +368,12 @@ public:
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         if (!base_.is_enabled() || !hit_test(p)) return false;
+        // The open field editor owns clicks inside itself (caret / drag-select);
+        // a left press anywhere else commits the pending edit first (blur-commit).
+        if (editor_ && editor_->is_visible()) {
+            if (editor_->handle_mouse_button(btn, pressed, p)) return true;
+            if (btn == MouseButton::Left && pressed) editor_commit(editor_->get_text());
+        }
         if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; }
         if (btn == MouseButton::Left && pressed) {
             float content_h = get_total_content_height();
@@ -379,6 +470,7 @@ public:
             } else {
                 cancel_edit();
             }
+            base_.mark_dirty();   // selection/popup/editing all changed something visual
         }
         base_.handle_mouse_button(btn, pressed, p);
         return true;   // in-bounds click belongs to the grid (entry is hit-guarded)
@@ -393,25 +485,10 @@ public:
             return true; // swallow all keys while popup is open
         }
         if (editing_id_ >= 0) {
-            if (code == K_Enter)    { commit_edit(); return true; }
-            if (code == K_Escape)   { cancel_edit(); return true; }
-            if (code == K_Backspace) {
-                if (edit_cursor_ > 0) {
-                    edit_buf_.erase(edit_buf_.begin() + edit_cursor_ - 1);
-                    --edit_cursor_;
-                }
-                return true;
-            }
-            if (code == K_Delete) {
-                if (edit_cursor_ < (int)edit_buf_.size()) {
-                    edit_buf_.erase(edit_buf_.begin() + edit_cursor_);
-                }
-                return true;
-            }
-            if (code == K_Left)  { if (edit_cursor_ > 0) --edit_cursor_; return true; }
-            if (code == K_Right) { if (edit_cursor_ < (int)edit_buf_.size()) ++edit_cursor_; return true; }
-            if (code == K_Up)    { commit_edit(); navigate_selection(-1); return true; }
-            if (code == K_Down)  { commit_edit(); navigate_selection(+1); return true; }
+            // The embedded editor is focused and handles the typing itself; only
+            // route a stray Enter/Escape that reached the grid instead.
+            if (code == K_Enter)  { editor_commit(editor_ ? editor_->get_text() : edit_buf_.c_str()); return true; }
+            if (code == K_Escape) { cancel_edit(); return true; }
             return base_.handle_key(code, pressed, mods);
         }
         // Not editing
@@ -618,6 +695,14 @@ public:
     void set_row_height(float h) override { row_h_=h; }
     const PropertyGridStyle& get_property_grid_style() const override { return style_; }
     void set_property_grid_style(const PropertyGridStyle& s) override { style_=s; }
+    void set_text_measurer(ITextMeasurer* m) override {
+        measurer_ = m;
+        if (editor_) editor_->set_text_measurer(m);
+    }
+    // The embedded field editor lives in base_'s child list; expose it so the
+    // context's collect/focus traversal reaches it (wrapper default hides children).
+    int get_child_count() const override { return base_.get_child_count(); }
+    IGuiWidget* get_child(int i) const override { return base_.get_child(i); }
     void set_property_event_handler(IPropertyGridEventHandler* h) override { handler_=h; }
     void get_property_grid_render_info(PropertyGridRenderInfo* out) const override {
         if(!out) return; auto b=base_.get_bounds();
@@ -803,20 +888,9 @@ public:
                         ri_.push_outline(sx, fy, sw, fh, s.field_border_color, d, clip);
                     const float tx = sx + 8.0f;
                     float tw = sw - 16.0f - act_w;
-                    bool editing = (editing_id_ == pr.id);
+                    bool editing = (editing_id_ == pr.id && editor_ && editor_->is_visible());
                     if (editing) {
-                        WidgetRenderInfo::TextCmd tc;
-                        tc.text = edit_buf_;
-                        tc.dest = math::make_box(tx, fy, tw, fh);
-                        tc.color = s.value_text_color;
-                        tc.font_size = s.font_size;
-                        tc.alignment = Alignment::CenterLeft;
-                        tc.depth = d++;
-                        tc.clip = clip;
-                        tc.show_cursor = true;
-                        tc.cursor_pos = edit_cursor_;
-                        tc.cursor_color = s.value_text_color;
-                        ri_.texts.push_back(tc);
+                        // the embedded editor child renders the text/caret/selection
                     } else {
                         if (pr.type == PropertyType::Enum) tw -= 14.0f;   // room for the chevron
                         math::Vec4 vc = pr.read_only
@@ -945,21 +1019,9 @@ public:
                         ri_.push_text("v", cx, ry, chev_w, row_h_, vc, 9.0f, Alignment::Center, d++, clip);
                     }
                 } else {
-                    bool editing = (editing_id_ == props_[idx].id);
+                    bool editing = (editing_id_ == props_[idx].id && editor_ && editor_->is_visible());
                     if (editing) {
-                        ri_.push_rect(vx-2, ry+1, vw+2, row_h_-2, math::Vec4(0.1f,0.1f,0.12f,1.0f), d++, clip);
-                        WidgetRenderInfo::TextCmd tc;
-                        tc.text = edit_buf_;
-                        tc.dest = math::make_box(vx, ry, vw, row_h_);
-                        tc.color = s.value_text_color;
-                        tc.font_size = 11.0f;
-                        tc.alignment = Alignment::CenterLeft;
-                        tc.depth = d++;
-                        tc.clip = clip;
-                        tc.show_cursor = true;
-                        tc.cursor_pos = edit_cursor_;
-                        tc.cursor_color = s.value_text_color;
-                        ri_.texts.push_back(tc);
+                        // the embedded editor child renders the text/caret/selection
                     } else {
                         const char* vs = format_value(idx);
                         math::Vec4 vc = props_[idx].read_only ? math::Vec4(s.value_text_color.x*0.6f,s.value_text_color.y*0.6f,s.value_text_color.z*0.6f,1.0f) : s.value_text_color;
@@ -1024,6 +1086,8 @@ public:
     }
 };
 const std::vector<std::string> GuiPropertyGrid::empty_opts_;
+void GuiPropertyGrid::EditorH::on_text_commit(const char* t) { if (g) g->editor_commit(t); }
+void GuiPropertyGrid::EditorH::on_text_cancel() { if (g) g->editor_dismiss(); }
 
 // Factory function
 IGuiPropertyGrid* create_property_grid_widget() { return new GuiPropertyGrid(); }
