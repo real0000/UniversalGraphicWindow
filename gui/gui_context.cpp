@@ -135,19 +135,24 @@ class GuiContext : public IGuiContext {
         }
     }
 
-    // Intersect two clip rects. An empty (zero-area) box means "no clip", so it is the
-    // identity — intersecting with it returns the other.
-    static math::Box clip_isect(const math::Box& a, const math::Box& b) {
-        if (math::box_is_empty(a)) return b;
-        if (math::box_is_empty(b)) return a;
+    // Intersect two clip rects. An empty (zero-area) box means "no clip", so it is
+    // the identity — intersecting with it returns the other. Returns FALSE when the
+    // intersection has no area: the command is entirely clipped away and must be
+    // CULLED by the caller — a zero box result would read as the "no clip" sentinel
+    // and draw the command completely unclipped (scrolled-out rows painting over
+    // the neighbouring dock regions).
+    static bool clip_isect(const math::Box& a, const math::Box& b, math::Box* out) {
+        if (math::box_is_empty(a)) { *out = b; return true; }
+        if (math::box_is_empty(b)) { *out = a; return true; }
         float ax0 = math::x(math::box_min(a)), ay0 = math::y(math::box_min(a));
         float ax1 = ax0 + math::box_width(a),  ay1 = ay0 + math::box_height(a);
         float bx0 = math::x(math::box_min(b)), by0 = math::y(math::box_min(b));
         float bx1 = bx0 + math::box_width(b),  by1 = by0 + math::box_height(b);
         float ix0 = std::max(ax0, bx0), iy0 = std::max(ay0, by0);
         float ix1 = std::min(ax1, bx1), iy1 = std::min(ay1, by1);
-        if (ix1 <= ix0 || iy1 <= iy0) return math::make_box(ix0, iy0, 0, 0);  // empty → fully clipped
-        return math::make_box(ix0, iy0, ix1 - ix0, iy1 - iy0);
+        if (ix1 <= ix0 || iy1 <= iy0) return false;   // fully clipped
+        *out = math::make_box(ix0, iy0, ix1 - ix0, iy1 - iy0);
+        return true;
     }
     // Accumulated content transform along the ancestor chain: a command point p in
     // the current widget's space lands on screen at p*scale + (ox, oy). Identity
@@ -194,17 +199,17 @@ class GuiContext : public IGuiContext {
             if (ref.depth > local_max) local_max = ref.depth;
         int32_t base = depth;
         if (xf.identity()) {
-            for (auto cmd : ri.colors)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); resolve_role(cmd, xf.theme); out.colors.push_back(cmd); }
-            for (auto cmd : ri.textures) { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.textures.push_back(cmd); }
-            for (auto cmd : ri.slices)   { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); out.slices.push_back(cmd); }
-            for (auto cmd : ri.texts)    { cmd.depth += base; cmd.clip = clip_isect(cmd.clip, parent_clip); resolve_role(cmd, xf.theme); out.texts.push_back(cmd); }
+            for (auto cmd : ri.colors)   { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; resolve_role(cmd, xf.theme); out.colors.push_back(cmd); }
+            for (auto cmd : ri.textures) { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; out.textures.push_back(cmd); }
+            for (auto cmd : ri.slices)   { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; out.slices.push_back(cmd); }
+            for (auto cmd : ri.texts)    { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; resolve_role(cmd, xf.theme); out.texts.push_back(cmd); }
         } else {
             // Transformed subtree: scale + translate every geometric field so the
             // widget renders exactly as if it had been laid out in screen space.
             for (auto cmd : ri.colors) {
                 cmd.depth += base;
                 cmd.dest = xf.box(cmd.dest);
-                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                if (!clip_isect(xf.box(cmd.clip), parent_clip, &cmd.clip)) continue;
                 cmd.corner_radius *= xf.scale;
                 if (cmd.shape == DrawShape::Line) {
                     cmd.line_x1 = cmd.line_x1 * xf.scale + xf.ox;
@@ -217,13 +222,13 @@ class GuiContext : public IGuiContext {
             for (auto cmd : ri.textures) {
                 cmd.depth += base;
                 cmd.dest = xf.box(cmd.dest);
-                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                if (!clip_isect(xf.box(cmd.clip), parent_clip, &cmd.clip)) continue;
                 out.textures.push_back(cmd);
             }
             for (auto cmd : ri.slices) {
                 cmd.depth += base;
                 cmd.dest = xf.box(cmd.dest);
-                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                if (!clip_isect(xf.box(cmd.clip), parent_clip, &cmd.clip)) continue;
                 cmd.border.left *= xf.scale; cmd.border.top *= xf.scale;
                 cmd.border.right *= xf.scale; cmd.border.bottom *= xf.scale;
                 out.slices.push_back(cmd);
@@ -233,14 +238,16 @@ class GuiContext : public IGuiContext {
                 if (xf.text_min_px > 0.0f && cmd.font_size < xf.text_min_px) continue;
                 cmd.depth += base;
                 cmd.dest = xf.box(cmd.dest);
-                cmd.clip = clip_isect(xf.box(cmd.clip), parent_clip);
+                if (!clip_isect(xf.box(cmd.clip), parent_clip, &cmd.clip)) continue;
                 resolve_role(cmd, xf.theme);
                 out.texts.push_back(cmd);
             }
         }
         if (!ri.get_draw_order().empty()) depth = base + local_max + 1;
-        const math::Box child_clip = w->is_clip_enabled()
-            ? clip_isect(parent_clip, xf.box(w->get_clip_rect())) : parent_clip;
+        math::Box child_clip = parent_clip;
+        if (w->is_clip_enabled() &&
+            !clip_isect(parent_clip, xf.box(w->get_clip_rect()), &child_clip))
+            return;   // the whole child subtree is clipped away — prune it
         CollectXf cxf = xf;
         if (w->content_scale() != 1.0f || math::x(w->content_offset()) != 0.0f ||
             math::y(w->content_offset()) != 0.0f || w->content_text_min_px() > 0.0f) {
