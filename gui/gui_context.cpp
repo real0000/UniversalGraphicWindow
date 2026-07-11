@@ -275,23 +275,18 @@ class GuiContext : public IGuiContext {
         return w->is_focusable() ? w : nullptr;
     }
 
-    // Mouse handler: feeds all mouse events into the widget tree.
-    // Window events arrive in physical px; widget bounds are in logical
-    // (UI) px. Divide by the attached window's DPI scale before dispatching
-    // so hit-tests align.
+    // Mouse handler: feeds all mouse events into the widget tree, raw.
+    // Window events arrive in physical px; dispatch_* convert to the tree's
+    // logical (UI) px so hit-tests align.
     class MouseInputHandler : public input::IMouseHandler {
         GuiContext* ctx_;
-        math::Vec2 to_ui(int x, int y) const {
-            float s = ctx_->window_dpi_scale_;
-            if (s <= 0.0f) s = 1.0f;
-            return math::Vec2((float)x / s, (float)y / s);
-        }
     public:
         explicit MouseInputHandler(GuiContext* ctx) : ctx_(ctx) {}
         const char* get_handler_id() const override { return "gui_context_mouse"; }
         int get_priority() const override { return 100; }
         bool on_mouse_move(const MouseMoveEvent& event) override {
-            ctx_->input_state_.mouse_position = to_ui(event.x, event.y);
+            // Raw physical px: dispatch_* convert to logical themselves.
+            ctx_->input_state_.mouse_position = math::Vec2((float)event.x, (float)event.y);
             ctx_->dispatch_mouse_move(ctx_->input_state_.mouse_position);
             return false;
         }
@@ -299,7 +294,7 @@ class GuiContext : public IGuiContext {
             if (event.button == window::MouseButton::Unknown) return false;
             bool pressed = (event.type == EventType::MouseDown);
             gui::MouseButton btn = static_cast<gui::MouseButton>(static_cast<uint8_t>(event.button));
-            math::Vec2 pos = to_ui(event.x, event.y);
+            math::Vec2 pos((float)event.x, (float)event.y);
             ctx_->cur_mods_ = static_cast<int>(event.modifiers);   // for widgets that need shift/ctrl (canvas)
             ctx_->dispatch_mouse_button(btn, pressed, pos);
             return false; // don't consume: let other handlers see it
@@ -377,16 +372,21 @@ public:
     }
     void end_frame() override {}
 
+    // dispatch_* take WINDOW event coordinates (physical px) and convert to the
+    // widget tree's logical px here — callers feed raw mouse events straight in
+    // and never handle the DPI scale themselves.
     bool dispatch_scroll(float dx, float dy, const math::Vec2& pos) override {
-        return scroll_recursive(&root_, dx, dy, pos);
+        return scroll_recursive(&root_, dx, dy, to_logical(pos));
     }
 
-    void dispatch_mouse_move(const math::Vec2& pos) override {
+    void dispatch_mouse_move(const math::Vec2& phys) override {
+        const math::Vec2 pos = to_logical(phys);
         root_.handle_mouse_move(pos);
         for (auto* ov : overlays_) if (ov) ov->handle_mouse_move(pos);
     }
 
-    bool dispatch_mouse_button(MouseButton btn, bool pressed, const math::Vec2& pos) override {
+    bool dispatch_mouse_button(MouseButton btn, bool pressed, const math::Vec2& phys) override {
+        const math::Vec2 pos = to_logical(phys);
         bool consumed = false;
         if (!modal_stack_.empty()) {
             // Modal: only route to the top modal widget
@@ -457,7 +457,22 @@ public:
         host_ = win;
         last_win_w_ = last_win_h_ = -1;   // force a root cascade on the next render
         needs_layout_ = true;
+        refresh_ui_scale();               // adopt the window's DPI right away
         update_blink_timer();
+    }
+
+    // With a host window the context OWNS the UI scale: it reads the window's DPI
+    // scale itself (here + once per render, so monitor moves are picked up) and
+    // the app authors everything in logical px — it never touches dpi. Explicit
+    // set_ui_scale() remains for headless contexts (no host window).
+    void refresh_ui_scale() {
+        if (!host_) return;
+        float s = host_->get_dpi_scale();
+        if (s <= 0.0f) s = 1.0f;
+        if (s == ui_scale_) return;
+        ui_scale_ = s;
+        last_win_w_ = last_win_h_ = -1;   // re-derive the logical root size
+        needs_layout_ = true;
     }
 
     float get_ui_scale() const override { return ui_scale_; }
@@ -527,6 +542,7 @@ public:
         // widget marked dirty since the last render. Done here (once per render,
         // only when something changed) instead of every frame.
         if (host_) {
+            refresh_ui_scale();                          // window DPI → UI scale (auto)
             int w = 0, h = 0; host_->get_size(&w, &h);   // physical px
             float s = ui_scale_; if (s <= 0.0f) s = 1.0f;
             if (w != last_win_w_ || h != last_win_h_) {
