@@ -131,6 +131,29 @@ public:
 // Text Measurement Interface (user provides implementation)
 // ============================================================================
 
+// A text-editing surface the SHARED text-edit chrome operates on: the context's
+// built-in right-click menu (Cut / Copy / Paste / Select All) and the widgets'
+// Ctrl+X/C/V/A all go through this, so every text widget behaves identically.
+// Implemented by GuiTextInput and GuiEditBox; exposed via IGuiWidget::text_edit_target.
+class ITextEditTarget {
+public:
+    virtual ~ITextEditTarget() = default;
+    virtual bool        text_is_read_only() const = 0;
+    virtual bool        text_has_selection() const = 0;
+    virtual std::string text_selected() const = 0;
+    // Replace the selection with utf8 (insert at the caret when nothing is
+    // selected); no-op when read-only. nullptr/"" just deletes the selection.
+    virtual void        text_replace_selection(const char* utf8) = 0;
+    virtual void        text_select_all() = 0;
+};
+
+// Process-wide text clipboard. A GuiContext with a host window bridges these to
+// the SYSTEM clipboard; without a backend they fall back to an in-process string.
+void clipboard_set_text(const char* utf8);
+std::string clipboard_get_text();
+void set_clipboard_backend(std::function<void(const char*)> set_fn,
+                           std::function<std::string()> get_fn);
+
 class ITextMeasurer {
 public:
     virtual ~ITextMeasurer() = default;
@@ -880,6 +903,10 @@ public:
     // holds focus so the caret toggles without any per-frame loop; everything else
     // repaints purely on change. Default false — only text-entry widgets override.
     virtual bool wants_caret_blink() const { return false; }
+
+    // The widget's text-editing surface for the shared text-edit chrome (the
+    // built-in right-click menu / clipboard shortcuts). Default: not editable.
+    virtual ITextEditTarget* text_edit_target() { return nullptr; }
 
     // Input handling
     virtual bool handle_mouse_move(const math::Vec2& position) = 0;

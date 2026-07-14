@@ -97,6 +97,18 @@ class GuiContext : public IGuiContext {
     IGuiLabel* tooltip_=nullptr;
     bool tooltip_visible_=false;
     std::vector<IGuiWidget*> overlays_;
+    // ── built-in text-edit context menu (SHARED SPEC): a right-press on any
+    // widget exposing text_edit_target() opens Cut/Copy/Paste/Select All wired
+    // to the system clipboard — no app wiring, every text widget behaves alike.
+    IGuiMenu*        text_menu_ = nullptr;
+    ITextEditTarget* text_menu_target_ = nullptr;
+    IGuiWidget*      text_menu_widget_ = nullptr;
+    struct TextMenuH : IMenuEventHandler {
+        GuiContext* ctx = nullptr;
+        void on_menu_item_clicked(int id) override;
+        void on_menu_opened() override {}
+        void on_menu_closed() override {}
+    } text_menu_h_;
     mutable WidgetRenderInfo frame_ri_;
     Window* attached_window_=nullptr;
     float window_dpi_scale_=1.0f;  // Mirror of attached window's DPI scale (input to_ui path)
@@ -282,6 +294,76 @@ class GuiContext : public IGuiContext {
         return w->is_focusable() ? w : nullptr;
     }
 
+    // Deepest visible widget under pos that exposes a text-edit surface (mirrors
+    // find_focusable_at, content transforms included).
+    static IGuiWidget* find_text_target_at(IGuiWidget* w, const math::Vec2& pos) {
+        if (!w || !w->is_visible()) return nullptr;
+        if (!w->hit_test(pos)) return nullptr;
+        math::Vec2 cpos = pos;
+        const float cs = w->content_scale();
+        const math::Vec2 co = w->content_offset();
+        if (cs != 1.0f || math::x(co) != 0.0f || math::y(co) != 0.0f) {
+            const float inv = 1.0f / cs;
+            cpos = math::Vec2((math::x(pos) - math::x(co)) * inv,
+                              (math::y(pos) - math::y(co)) * inv);
+        }
+        for (int i = w->get_child_count() - 1; i >= 0; --i)
+            if (auto* f = find_text_target_at(w->get_child(i), cpos)) return f;
+        return w->text_edit_target() ? w : nullptr;
+    }
+    void open_text_menu(IGuiWidget* w, const math::Vec2& pos) {
+        ITextEditTarget* t = w->text_edit_target();
+        if (!t) return;
+        if (!text_menu_) {
+            text_menu_ = create_menu_widget();
+            if (!text_menu_) return;
+            text_menu_h_.ctx = this;
+            text_menu_->set_menu_event_handler(&text_menu_h_);
+            if (text_measurer_) text_menu_->set_text_measurer(text_measurer_);
+            add_overlay(text_menu_);
+        }
+        text_menu_target_ = t; text_menu_widget_ = w;
+        text_menu_->clear_items();
+        const bool ro  = t->text_is_read_only();
+        const bool sel = t->text_has_selection();
+        const bool clip = !clipboard_get_text().empty();
+        int id;
+        id = text_menu_->add_item("Cut",   nullptr, "Ctrl+X");
+        text_menu_->set_item_enabled(id, sel && !ro);
+        text_menu_->set_item_user_data(id, reinterpret_cast<void*>((intptr_t)1));
+        id = text_menu_->add_item("Copy",  nullptr, "Ctrl+C");
+        text_menu_->set_item_enabled(id, sel);
+        text_menu_->set_item_user_data(id, reinterpret_cast<void*>((intptr_t)2));
+        id = text_menu_->add_item("Paste", nullptr, "Ctrl+V");
+        text_menu_->set_item_enabled(id, clip && !ro);
+        text_menu_->set_item_user_data(id, reinterpret_cast<void*>((intptr_t)3));
+        text_menu_->add_separator();
+        id = text_menu_->add_item("Select All", nullptr, "Ctrl+A");
+        text_menu_->set_item_enabled(id, true);
+        text_menu_->set_item_user_data(id, reinterpret_cast<void*>((intptr_t)4));
+        // clamp inside the (logical) root
+        float x = math::x(pos), y = math::y(pos);
+        const float w_menu = 170.0f;
+        const float rw = math::box_width(root_.get_bounds());
+        if (rw > 0.0f && x + w_menu > rw) x = std::max(0.0f, rw - w_menu);
+        text_menu_->set_bounds(math::make_box(x, y, w_menu, 1.0f));   // height = menu-owned
+        text_menu_->show_at(math::Vec2(x, y));
+        root_.mark_dirty();
+    }
+    void text_menu_action(int id) {
+        const auto op = reinterpret_cast<intptr_t>(text_menu_ ? text_menu_->get_item_user_data(id) : nullptr);
+        ITextEditTarget* t = text_menu_target_;
+        if (t) switch (op) {
+            case 1: clipboard_set_text(t->text_selected().c_str()); t->text_replace_selection(""); break;
+            case 2: clipboard_set_text(t->text_selected().c_str()); break;
+            case 3: { const std::string c = clipboard_get_text();
+                      if (!c.empty()) t->text_replace_selection(c.c_str()); } break;
+            case 4: t->text_select_all(); break;
+        }
+        if (text_menu_) text_menu_->hide();
+        if (text_menu_widget_) text_menu_widget_->mark_dirty();
+    }
+
     // Mouse handler: feeds all mouse events into the widget tree, raw.
     // Window events arrive in physical px; dispatch_* convert to the tree's
     // logical (UI) px so hit-tests align.
@@ -352,6 +434,7 @@ public:
         return GuiResult::Success;
     }
     void shutdown() override {
+        set_clipboard_backend({}, {});    // drop the host-window clipboard bridge
         if (attached_window_) detach_window(attached_window_);
         if (host_ && blink_timer_id_) host_->remove_timer(blink_timer_id_);
         blink_timer_id_ = 0; host_ = nullptr;
@@ -405,6 +488,14 @@ public:
                     overlays_[i]->handle_mouse_button(btn, pressed, pos)) {
                     consumed = true;
                     break;
+                }
+            }
+            // SHARED text-edit context menu: a right press on an editable text
+            // widget opens the built-in Cut/Copy/Paste/Select All targeting it.
+            if (!consumed && btn == MouseButton::Right && pressed) {
+                if (IGuiWidget* tw = find_text_target_at(&root_, pos)) {
+                    open_text_menu(tw, pos);
+                    consumed = true;
                 }
             }
             if (!consumed) consumed = root_.handle_mouse_button(btn, pressed, pos);
@@ -465,6 +556,9 @@ public:
         last_win_w_ = last_win_h_ = -1;   // force a root cascade on the next render
         needs_layout_ = true;
         refresh_ui_scale();               // adopt the window's DPI right away
+        if (win) set_clipboard_backend(   // text widgets talk to the SYSTEM clipboard
+            [win](const char* t) { win->set_clipboard_text(t); },
+            [win] { return win->get_clipboard_text(); });
         update_blink_timer();
     }
 
@@ -530,6 +624,7 @@ public:
     }
 
     void pump() override { if (host_) host_->run_pending(); }
+    bool text_menu_open() const override { return text_menu_ && text_menu_->is_open(); }
 
     void set_pre_render(std::function<bool()> hook) override { pre_render_ = std::move(hook); }
 
@@ -779,6 +874,8 @@ private:
         for(int i=0;i<w->get_child_count();++i) collect_in_box(w->get_child(i),cbox,out);
     }
 };
+
+void GuiContext::TextMenuH::on_menu_item_clicked(int id) { if (ctx) ctx->text_menu_action(id); }
 
 // ============================================================================
 // Factory Functions

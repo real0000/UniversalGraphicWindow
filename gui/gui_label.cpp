@@ -78,7 +78,8 @@ public:
 // GuiTextInput
 // ============================================================================
 
-class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput> {
+class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput>,
+                     public ITextEditTarget {
 public:
     bool wants_caret_blink() const override { return !read_only_; }  // blinking caret when editable+focused
 private:
@@ -93,6 +94,7 @@ private:
     // Key codes from window::Key enum
     enum : int { K_Escape=300, K_Enter=308, K_Backspace=309, K_Delete=310,
                  K_Home=312, K_End=313, K_Left=316, K_Right=317 };
+    enum { MOD_CTRL = 2 };   // KeyMod::Control
     ITextInputEventHandler* input_handler_ = nullptr;
     enum { MOD_SHIFT = 1 };   // handle_key modifier bits (see the chat's on_key)
     int  sel_lo() const { return std::min(anchor_, cursor_); }
@@ -164,9 +166,30 @@ public:
             case K_Enter:  if (input_handler_) { input_handler_->on_text_commit(text_.c_str()); return true; } return false;
             case K_Escape: if (input_handler_) { input_handler_->on_text_cancel(); return true; } return false;
         }
+        if (mods & MOD_CTRL) {   // shared clipboard shortcuts (system clipboard)
+            if (code == 'A') { select_all(); base_.mark_dirty(); return true; }
+            if (code == 'C') { if (has_sel()) clipboard_set_text(text_selected().c_str()); return true; }
+            if (code == 'X') { if (has_sel() && !read_only_) {
+                                   clipboard_set_text(text_selected().c_str());
+                                   delete_selection(); base_.mark_dirty(); } return true; }
+            if (code == 'V') { if (!read_only_) { const std::string c = clipboard_get_text();
+                                   if (!c.empty()) { insert_text(c.c_str()); base_.mark_dirty(); } } return true; }
+        }
         return false;
     }
     void set_text_input_event_handler(ITextInputEventHandler* h) override { input_handler_ = h; }
+    // ── shared text-edit surface (built-in right-click menu / Ctrl combos) ──
+    ITextEditTarget* text_edit_target() override { return this; }
+    bool text_is_read_only() const override { return read_only_; }
+    bool text_has_selection() const override { return has_sel(); }
+    std::string text_selected() const override { return text_.substr((size_t)sel_lo(), (size_t)(sel_hi() - sel_lo())); }
+    void text_replace_selection(const char* u) override {
+        if (read_only_) return;
+        if (has_sel()) delete_selection();
+        if (u && *u) insert_text(u);
+        base_.mark_dirty();
+    }
+    void text_select_all() override { select_all(); base_.mark_dirty(); }
     const char* get_text() const override { return text_.c_str(); }
     void set_text(const char* t) override {
         const char* nt = t ? t : "";
@@ -283,7 +306,8 @@ public:
 // GuiEditBox
 // ============================================================================
 
-class GuiEditBox : public WidgetBase<IGuiEditBox, WidgetType::Custom> {
+class GuiEditBox : public WidgetBase<IGuiEditBox, WidgetType::Custom>,
+                   public ITextEditTarget {
 public:
     bool wants_caret_blink() const override { return !read_only_; }  // read-only bubbles never blink
 private:
@@ -646,6 +670,18 @@ public:
     void set_current_line_highlighted(bool h) override { hl_line_=h; }
     bool is_read_only() const override { return read_only_; }
     void set_read_only(bool r) override { read_only_=r; }
+    // ── shared text-edit surface (built-in right-click menu / Ctrl combos) ──
+    ITextEditTarget* text_edit_target() override { return this; }
+    bool text_is_read_only() const override { return read_only_; }
+    bool text_has_selection() const override { return has_selection(); }
+    std::string text_selected() const override { const char* t = get_selected_text(); return t ? t : ""; }
+    void text_replace_selection(const char* u) override {
+        if (read_only_) return;
+        if (has_selection()) delete_selection();
+        if (u && *u) insert_text(u);
+        base_.mark_dirty();
+    }
+    void text_select_all() override { select_all(); base_.mark_dirty(); }
     bool is_tab_insert_spaces() const override { return tab_spaces_; }
     void set_tab_insert_spaces(bool s) override { tab_spaces_=s; }
     int get_tab_size() const override { return tab_size_; }

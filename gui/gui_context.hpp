@@ -158,6 +158,10 @@ public:
     // before the next get_render_info(). The live loop calls this itself.
     virtual void pump() = 0;
 
+    // The built-in text-edit context menu (right-click on a text widget) is open.
+    // Semantic query for tests/automation.
+    virtual bool text_menu_open() const = 0;
+
     // Measure hook: run inside get_render_info() AFTER the root has been laid out
     // (so widget bounds/widths are current) but BEFORE render commands are
     // collected. This is where content whose size depends on the laid-out width

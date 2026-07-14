@@ -12,6 +12,26 @@
 namespace window {
 namespace gui {
 
+// ── process-wide text clipboard (see gui.hpp) ────────────────────────────────
+namespace {
+std::function<void(const char*)> g_clip_set;
+std::function<std::string()>     g_clip_get;
+std::string                      g_clip_fallback;   // no backend: in-process only
+}
+void set_clipboard_backend(std::function<void(const char*)> set_fn,
+                           std::function<std::string()> get_fn) {
+    g_clip_set = std::move(set_fn);
+    g_clip_get = std::move(get_fn);
+}
+void clipboard_set_text(const char* utf8) {
+    if (g_clip_set) g_clip_set(utf8 ? utf8 : "");
+    else            g_clip_fallback = utf8 ? utf8 : "";
+}
+std::string clipboard_get_text() {
+    return g_clip_get ? g_clip_get() : g_clip_fallback;
+}
+
+
 // ============================================================================
 // String Conversion Functions
 // ============================================================================
