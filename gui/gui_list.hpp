@@ -94,7 +94,7 @@ public:
     // rebuild + push on every event, mirroring IGuiCanvasView::set_nodes). The
     // widget owns row rendering; the app never positions a row. `selected` is taken
     // from the model, so the app owns selection as data.
-    virtual void set_items(const std::vector<ListItemModel>& items) = 0;
+    virtual void set_items(std::vector<ListItemModel> items) = 0;   // by value: sink (move-friendly rebinds)
 
     // Bind a data provider (set ONCE): the list re-reads it before each render
     // (via refresh_bindings) and set_items() the result — so the app mutates its

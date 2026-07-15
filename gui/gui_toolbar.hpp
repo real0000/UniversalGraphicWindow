@@ -87,7 +87,7 @@ public:
     // one idempotent call (unchanged → no repaint). Switches the toolbar into the
     // labelled variable-width layout; the app never positions a button. Needs a
     // text measurer (set_text_measurer) to size labels.
-    virtual void set_items(const std::vector<ToolbarItemModel>& items) = 0;
+    virtual void set_items(std::vector<ToolbarItemModel> items) = 0;   // by value: sink (move-friendly rebinds)
 
     // Reactive state (provider set ONCE): the toolbar queries these per render for
     // each item's LIVE enabled/visible, so the app sets the fixed button STRUCTURE +

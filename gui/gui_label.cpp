@@ -277,7 +277,7 @@ public:
                 caret = cursor_ + preedit_cursor_;
             }
             WidgetRenderInfo::TextCmd tc;
-            tc.text      = disp;
+            tc.text      = std::move(disp);   // last use of disp — steal the buffer
             tc.dest      = math::make_box(tx, by, tw, bh);
             tc.color     = s.text_color;
             tc.font_size = s.font_size;
@@ -294,7 +294,7 @@ public:
                     tc.sel_bg_color = s.selection_color;
                 }
             }
-            ri_.texts.push_back(tc);
+            ri_.texts.push_back(std::move(tc));
         }
         ri_.finalize();
         base_.clear_dirty();
@@ -775,7 +775,7 @@ public:
                     tc.cursor_pos   = cursor_.column;
                     tc.cursor_color = s.text_color;
                 }
-                ri_.texts.push_back(tc);
+                ri_.texts.push_back(std::move(tc));
             } else if (base_.has_focus() && i == cursor_.line) {
                 // Empty line with cursor
                 WidgetRenderInfo::TextCmd tc;
@@ -789,7 +789,7 @@ public:
                 tc.show_cursor = true;
                 tc.cursor_pos  = 0;
                 tc.cursor_color = s.text_color;
-                ri_.texts.push_back(tc);
+                ri_.texts.push_back(std::move(tc));
             }
         }
 

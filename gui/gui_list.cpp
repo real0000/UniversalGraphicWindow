@@ -140,7 +140,7 @@ public:
     // Idempotent whole-list rebind: if the incoming model matches the current rows
     // (id/text/swatch/action/enabled + selection) nothing changes and no repaint is
     // scheduled; otherwise the rows + selection are replaced and the widget redraws.
-    void set_items(const std::vector<ListItemModel>& model) override {
+    void set_items(std::vector<ListItemModel> model) override {
         auto veq = [](const math::Vec4& a, const math::Vec4& b){
             return a.x==b.x && a.y==b.y && a.z==b.z && a.w==b.w; };
         int want_sel = -1;
@@ -155,8 +155,8 @@ public:
         }
         if (same) return;                       // unchanged → no repaint (like set_nodes)
         items_.clear(); items_.reserve(model.size());
-        for (const auto& m : model) {
-            WidgetItem it; it.id=m.id; it.text=m.text; it.enabled=m.enabled;
+        for (auto& m : model) {
+            WidgetItem it; it.id=m.id; it.text=std::move(m.text); it.enabled=m.enabled;
             it.swatch=m.swatch; it.editable=m.editable; it.has_action=m.has_action;
             it.text_color=m.text_color; it.row_color=m.row_color; it.centered=m.center;
             items_.push_back(std::move(it));

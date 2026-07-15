@@ -555,7 +555,7 @@ public:
     // Idempotent whole-form rebind. Structure unchanged (same ids/names/categories/
     // types/read-only/enum options) → only values update in place (scroll + an active
     // inline edit are kept); structural change → rebuild. Unchanged → no repaint.
-    void set_properties(const std::vector<PropertyModel>& model) override {
+    void set_properties(std::vector<PropertyModel> model) override {
         auto actions_same = [](const std::vector<PropertyAction>& a, const std::vector<PropertyAction>& b) {
             if (a.size()!=b.size()) return false;
             for (size_t k=0;k<a.size();++k) if (a[k].id!=b[k].id || a[k].label!=b[k].label) return false;
@@ -580,12 +580,12 @@ public:
         }
         cancel_edit();
         props_.clear(); props_.reserve(model.size());
-        for (const auto& m : model) {
+        for (auto& m : model) {
             // App props default id to -1 (they route by key); give each a UNIQUE stable id
             // = its position, so find_idx / on_property_changed don't collide. Generated
             // array-header ids (<= -1000000, in array_routes_) and explicit ids are kept.
-            Prop p; p.id=(m.id==-1)?(int)props_.size():m.id; p.key=m.key; p.name=m.name; p.category=m.category; p.type=m.type; p.read_only=m.read_only;
-            p.actions=m.actions;
+            Prop p; p.id=(m.id==-1)?(int)props_.size():m.id; p.key=std::move(m.key); p.name=std::move(m.name); p.category=std::move(m.category); p.type=m.type; p.read_only=m.read_only;
+            p.actions=std::move(m.actions);
             apply_value(p, m);
             props_.push_back(std::move(p));
             if (m.id>=next_id_) next_id_=m.id+1;
@@ -601,14 +601,14 @@ public:
     // header ("+") and per-element "#N" card header (↑ ↓ ×) via the action-row
     // mechanism, and record the header→(array,index) routing. Reuses set_properties so
     // an unchanged form still diffs to no repaint (generated ids are deterministic).
-    void set_form(const PropertyForm& form) override {
+    void set_form(PropertyForm form) override {
         array_routes_.clear();
         std::vector<PropertyModel> flat;
         flat.reserve(form.props.size() + form.arrays.size()*4);
-        for (const auto& p : form.props) flat.push_back(p);
+        for (auto& p : form.props) flat.push_back(std::move(p));
         int gen = -1000000;
         const math::Vec4 addc(0.24f,0.47f,0.78f,1.0f), mvc(0.21f,0.22f,0.25f,1.0f), delc(0.43f,0.19f,0.19f,1.0f);
-        for (const auto& arr : form.arrays) {
+        for (auto& arr : form.arrays) {
             PropertyModel h; h.id = gen--; h.type = PropertyType::Category; h.read_only = true; h.name = arr.title;
             if (arr.can_add) h.actions.push_back({PA_ADD, "+", addc});
             array_routes_[h.id] = {arr.key, -1};
@@ -621,10 +621,10 @@ public:
                 if (arr.can_remove && el.removable) ch.actions.push_back({PA_DEL, "x", delc});
                 array_routes_[ch.id] = {arr.key, i};
                 flat.push_back(std::move(ch));
-                for (const auto& f : el.fields) flat.push_back(f);
+                for (auto& f : arr.elements[i].fields) flat.push_back(std::move(f));
             }
         }
-        set_properties(flat);
+        set_properties(std::move(flat));
     }
     void bind_form(std::function<PropertyForm()> provider) override {
         form_provider_ = std::move(provider); base_.mark_dirty();

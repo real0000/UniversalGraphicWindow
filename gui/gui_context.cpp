@@ -214,7 +214,9 @@ class GuiContext : public IGuiContext {
             for (auto cmd : ri.colors)   { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; resolve_role(cmd, xf.theme); out.colors.push_back(cmd); }
             for (auto cmd : ri.textures) { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; out.textures.push_back(cmd); }
             for (auto cmd : ri.slices)   { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; out.slices.push_back(cmd); }
-            for (auto cmd : ri.texts)    { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; resolve_role(cmd, xf.theme); out.texts.push_back(cmd); }
+            // TextCmd owns a std::string — move the per-iteration copy instead of
+            // copying it a second time into the frame's pool (collect is per-repaint).
+            for (auto cmd : ri.texts)    { cmd.depth += base; if (!clip_isect(cmd.clip, parent_clip, &cmd.clip)) continue; resolve_role(cmd, xf.theme); out.texts.push_back(std::move(cmd)); }
         } else {
             // Transformed subtree: scale + translate every geometric field so the
             // widget renders exactly as if it had been laid out in screen space.
@@ -252,7 +254,7 @@ class GuiContext : public IGuiContext {
                 cmd.dest = xf.box(cmd.dest);
                 if (!clip_isect(xf.box(cmd.clip), parent_clip, &cmd.clip)) continue;
                 resolve_role(cmd, xf.theme);
-                out.texts.push_back(cmd);
+                out.texts.push_back(std::move(cmd));   // TextCmd owns a std::string
             }
         }
         if (!ri.get_draw_order().empty()) depth = base + local_max + 1;

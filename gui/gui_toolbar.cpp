@@ -190,7 +190,7 @@ public:
     void set_toolbar_event_handler(IToolbarEventHandler* h) override { handler_=h; }
     void set_text_measurer(ITextMeasurer* m) override { measurer_=m; }
     // Idempotent whole-bar rebind (mirrors ListBox::set_items). Unchanged → no repaint.
-    void set_items(const std::vector<ToolbarItemModel>& model) override {
+    void set_items(std::vector<ToolbarItemModel> model) override {
         auto veq = [](const math::Vec4& a, const math::Vec4& b){
             return a.x==b.x && a.y==b.y && a.z==b.z && a.w==b.w; };
         bool same = model_mode_ && model.size()==model_.size();
@@ -201,7 +201,7 @@ public:
                 !veq(a.text_color,c.text_color)) { same=false; break; }
         }
         if (same) return;
-        model_ = model; model_mode_ = true; hovered_idx_ = pressed_idx_ = -1;
+        model_ = std::move(model); model_mode_ = true; hovered_idx_ = pressed_idx_ = -1;
         base_.mark_dirty();
     }
     void bind_enabled(std::function<bool(int)> fn) override { enabled_fn_ = std::move(fn); base_.mark_dirty(); }

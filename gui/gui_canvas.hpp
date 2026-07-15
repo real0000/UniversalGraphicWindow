@@ -218,7 +218,7 @@ public:
     // all nodes (per-node colours live on CanvasNode).
     virtual const CanvasNodeStyle& get_node_style() const = 0;
     virtual void set_node_style(const CanvasNodeStyle& style) = 0;
-    virtual void set_nodes(const std::vector<CanvasNode>& nodes) = 0;
+    virtual void set_nodes(std::vector<CanvasNode> nodes) = 0;   // by value: sink (move-friendly rebinds)
 
     // Wires (retained; rebuild only when the underlying data changes)
     virtual int  add_wire(const std::vector<math::Vec2>& world_points,
@@ -233,7 +233,7 @@ public:
     // canvas changed (→ repaint) when the content actually differs. Lets a data
     // binding rebuild + rebind on every event without scheduling redundant
     // repaints; ids in `wires` are ignored (reassigned).
-    virtual void set_wires(const std::vector<CanvasWire>& wires) = 0;
+    virtual void set_wires(std::vector<CanvasWire> wires) = 0;   // by value: sink (move-friendly rebinds)
 
     // Bind node/wire data providers (set ONCE): the canvas re-reads them before each
     // render (via refresh_bindings) and set_nodes()/set_wires() the result — so the

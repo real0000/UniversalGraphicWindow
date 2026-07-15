@@ -154,7 +154,7 @@ public:
     // unchanged only values update in place — scroll position and an in-progress
     // inline edit are preserved; a structural change rebuilds. The app owns the model
     // and may rebuild + push on every change (mirrors ListBox::set_items).
-    virtual void set_properties(const std::vector<PropertyModel>& props) = 0;
+    virtual void set_properties(std::vector<PropertyModel> props) = 0;   // by value: sink (move-friendly rebinds)
 
     // Bind a data provider (set ONCE): the grid re-reads it before each render (via
     // refresh_bindings) and set_properties() the result, so the app mutates its own
@@ -167,7 +167,7 @@ public:
     // its rows, owning all that CRUD chrome, and fires on_property_array_* on a click.
     // Idempotent like set_properties (unchanged form → no repaint). set_form and
     // set_properties are mutually exclusive views of the same grid.
-    virtual void set_form(const PropertyForm& form) = 0;
+    virtual void set_form(PropertyForm form) = 0;   // by value: sink (move-friendly rebinds)
     // Bind a form provider (set ONCE); re-read before each render (refresh_bindings).
     virtual void bind_form(std::function<PropertyForm()> provider) = 0;
 

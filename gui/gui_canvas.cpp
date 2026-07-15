@@ -54,9 +54,9 @@ public:
     const CanvasNodeStyle& node_style() const { return style_; }
     const std::vector<CanvasNode>& nodes() const { return nodes_; }   // for hit-testing
     void set_node_style(const CanvasNodeStyle& s) { style_ = s; reflow(); }
-    void set_nodes(const std::vector<CanvasNode>& nodes) {
+    void set_nodes(std::vector<CanvasNode> nodes) {
         if (nodes == nodes_) return;              // idempotent rebind
-        nodes_ = nodes;
+        nodes_ = std::move(nodes);
         reflow();
     }
     // world coords; a canvas move re-anchors via the parent transform, not here.
@@ -201,7 +201,7 @@ public:
 
     const CanvasNodeStyle& get_node_style() const override { return nodes_layer_.node_style(); }
     void set_node_style(const CanvasNodeStyle& s) override { nodes_layer_.set_node_style(s); }
-    void set_nodes(const std::vector<CanvasNode>& nodes) override { nodes_layer_.set_nodes(nodes); }
+    void set_nodes(std::vector<CanvasNode> nodes) override { nodes_layer_.set_nodes(std::move(nodes)); }
 
     int add_wire(const std::vector<math::Vec2>& pts, const CanvasWireStyle& ws) override {
         CanvasWire w;
@@ -232,9 +232,9 @@ public:
     const CanvasWire& get_wire(int index) const override {
         return index < (int)wires_.size() ? wires_[(std::size_t)index] : preview_wire_;
     }
-    void set_wires(const std::vector<CanvasWire>& wires) override {
+    void set_wires(std::vector<CanvasWire> wires) override {
         if (wires_equal(wires)) return;    // idempotent rebind: no repaint scheduled
-        wires_ = wires;
+        wires_ = std::move(wires);
         for (auto& w : wires_) w.id = next_wire_id_++;
         base_.mark_dirty();
     }
