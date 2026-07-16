@@ -325,6 +325,12 @@ if(WINDOW_ENABLE_FREETYPE AND WINDOW_ENABLE_FONT)
             GIT_TAG v1.3.1
         )
         FetchContent_MakeAvailable(zlib)   # → target zlibstatic (+ generated zconf.h)
+        # zlib 的 CMake 無條件多建一個 SHARED 目標，其版本化 .so 需要 symlink ——
+        # 在不支援 symlink 的檔案系統（本 repo 所在的 exFAT）會炸掉整個 build。
+        # 我們只連 zlibstatic，把用不到的 shared 目標排除出 all。
+        if(TARGET zlib)
+            set_target_properties(zlib PROPERTIES EXCLUDE_FROM_ALL TRUE)
+        endif()
 
         # libpng: build a minimal static target straight from its sources (skip its own
         # CMake to avoid find_package(ZLIB) friction — we link the fetched zlibstatic).
