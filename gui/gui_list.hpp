@@ -241,6 +241,17 @@ public:
     virtual int get_selected_item() const = 0;
     virtual void set_selected_item(int item_id) = 0;
 
+    // Per-item underlying value (an id/key distinct from the display text). Lets the
+    // widget own the selection's meaning so the app reads it back directly instead
+    // of mirroring the list: set the value when populating, then read
+    // get_selected_value() at use time. "" when nothing is selected / no value set.
+    virtual void set_item_value(int item_id, const char* value) = 0;
+    virtual const char* get_item_value(int item_id) const = 0;
+    virtual const char* get_selected_value() const = 0;
+    // Select the item whose value == `value` (no-op if none match). Complements
+    // get_selected_value() so a caller can restore a selection by id.
+    virtual void set_selected_value(const char* value) = 0;
+
     // Placeholder
     virtual const char* get_placeholder() const = 0;
     virtual void set_placeholder(const char* text) = 0;

@@ -236,6 +236,10 @@ public:
 struct WidgetItem {
     int id = -1;
     std::string text, icon;
+    // Optional underlying value/key distinct from the display `text` — lets a
+    // combo/list item carry its own id (e.g. a graph id) so the widget owns the
+    // selection end to end and the app never mirrors it.
+    std::string value;
     bool enabled = true, checked = false;
     void* user_data = nullptr;
     // Optional per-row decoration used by model-driven lists (ListBox::set_items):

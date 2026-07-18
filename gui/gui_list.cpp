@@ -436,8 +436,9 @@ public:
                 if (rel_y >= 0 && math::y(p) >= g.dy && math::y(p) <= g.dy + g.h &&
                     math::x(p) >= bx && math::x(p) <= bx + bw) {
                     int row = (style_.item_height > 0) ? (int)(rel_y / style_.item_height) : -1;
-                    if (row >= 0 && row < (int)items_.size()) {
+                    if (row >= 0 && row < (int)items_.size() && selected_ != items_[row].id) {
                         selected_ = items_[row].id;
+                        base_.mark_dirty();   // repaint the collapsed label ourselves
                         if (handler_) handler_->on_selection_changed(selected_);
                     }
                 }
@@ -465,12 +466,21 @@ public:
     bool is_item_enabled(int id) const override { int i=find_idx(id); return i>=0?items_[i].enabled:false; }
     void set_item_enabled(int id,bool e) override { int i=find_idx(id); if(i>=0)items_[i].enabled=e; }
     int get_selected_item() const override { return selected_; }
-    void set_selected_item(int id) override { selected_=id; if(handler_) handler_->on_selection_changed(id); }
+    void set_selected_item(int id) override { if(selected_==id) return; selected_=id; base_.mark_dirty(); if(handler_) handler_->on_selection_changed(id); }
+    void set_item_value(int id,const char* v) override { int i=find_idx(id); if(i>=0)items_[i].value=v?v:""; }
+    const char* get_item_value(int id) const override { int i=find_idx(id); return i>=0?items_[i].value.c_str():""; }
+    const char* get_selected_value() const override { int i=find_idx(selected_); return i>=0?items_[i].value.c_str():""; }
+    void set_selected_value(const char* v) override {
+        const std::string want = v?v:"";
+        for(const auto& it:items_) if(it.value==want){ set_selected_item(it.id); return; }
+    }
     const char* get_placeholder() const override { return placeholder_.c_str(); }
     void set_placeholder(const char* t) override { placeholder_=t?t:""; }
     bool is_open() const override { return open_; }
-    void open() override { open_=true; drop_scroll_=0.0f; if(handler_) handler_->on_dropdown_opened(); }
-    void close() override { open_=false; if(handler_) handler_->on_dropdown_closed(); }
+    // open/close/select self-invalidate so the widget repaints its collapsed label
+    // and dropdown on its own — no app callback needed just to trigger a redraw.
+    void open() override { if(open_) return; open_=true; drop_scroll_=0.0f; base_.mark_dirty(); if(handler_) handler_->on_dropdown_opened(); }
+    void close() override { if(!open_) return; open_=false; base_.mark_dirty(); if(handler_) handler_->on_dropdown_closed(); }
     void toggle() override { if(open_) close(); else open(); }
     void set_item_user_data(int id,void* d) override { int i=find_idx(id); if(i>=0)items_[i].user_data=d; }
     void* get_item_user_data(int id) const override { int i=find_idx(id); return i>=0?items_[i].user_data:nullptr; }
