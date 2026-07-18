@@ -136,8 +136,14 @@ uint32_t FreeTypeFontFace::get_glyph_index(uint32_t codepoint) const {
 bool FreeTypeFontFace::get_glyph_metrics(uint32_t glyph_index, GlyphMetrics* out_metrics) const {
     if (!face_ || !out_metrics) return false;
 
-    // Load glyph without rendering
-    FT_Error error = FT_Load_Glyph(face_, glyph_index, FT_LOAD_NO_BITMAP);
+    // Scalable faces: skip the (bitmap) strike when only measuring — cheap. But a
+    // colour-emoji face is bitmap-only; FT_LOAD_NO_BITMAP there loads a degenerate
+    // glyph whose horiAdvance is ~0, so the shaper lays the next glyph on top of the
+    // emoji (text crams onto it). Load the bitmap glyph so the strike's real advance
+    // comes through.
+    const FT_Int32 flags = FT_HAS_COLOR(face_) ? (FT_LOAD_DEFAULT | FT_LOAD_COLOR)
+                                               : FT_LOAD_NO_BITMAP;
+    FT_Error error = FT_Load_Glyph(face_, glyph_index, flags);
     if (error) return false;
 
     // bitmap_scale_ maps a fixed-size colour strike's metrics back to the requested

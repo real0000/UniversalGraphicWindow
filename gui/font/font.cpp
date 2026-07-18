@@ -387,6 +387,14 @@ public:
                 glyph_index = font->get_glyph_index(codepoint);
             }
 
+            // A fallback face carries its own last-set size; the caller only sized
+            // the primary. Sync it so the glyph's advance is measured at the display
+            // size — otherwise a fixed-strike colour-emoji face reports its advance
+            // against a stale strike scale (≈0-wide) and the following text crams
+            // onto the emoji. Guarded, so it is a no-op for the primary.
+            if (glyph_font->get_size() != font->get_size())
+                glyph_font->set_size(font->get_size());
+
             // Apply kerning (only within same font)
             if (prev_glyph != 0 && font_index == 0) {
                 x += glyph_font->get_kerning(prev_glyph, glyph_index);
@@ -483,6 +491,11 @@ public:
             } else {
                 glyph_index = font->get_glyph_index(codepoint);
             }
+
+            // Sync a stale fallback face to the display size before measuring (see
+            // the note in shape_text) so colour-emoji advances aren't ≈0-wide.
+            if (glyph_font->get_size() != font->get_size())
+                glyph_font->set_size(font->get_size());
 
             GlyphMetrics glyph_metrics;
             glyph_font->get_glyph_metrics(glyph_index, &glyph_metrics);
