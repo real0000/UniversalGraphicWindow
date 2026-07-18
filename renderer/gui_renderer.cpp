@@ -368,11 +368,47 @@ namespace {
 // widget only holds data (gui/ has no renderer dependency); this is the one
 // place that turns it into geometry, once per actually-rendered frame.
 
+// Emit only the parts of a screen-space cubic that intersect the canvas rect
+// [rx0,ry0..rx1,ry1]. A context can hold several canvases (e.g. a node editor
+// next to a GPU-topology view); wires are drawn in the unclipped vector
+// underlay, so without this a panned wire would bleed across into the
+// neighbouring canvas. Conservative control-polygon bounds: fully outside →
+// drop, fully inside (or max depth) → draw, else De Casteljau split + recurse.
+static void emit_clipped_bezier(gfx::VectorRenderer& vr,
+                                float p0x, float p0y, float c0x, float c0y,
+                                float c1x, float c1y, float p1x, float p1y,
+                                float rx0, float ry0, float rx1, float ry1,
+                                const math::Vec4& color, int depth) {
+    const float mnx = std::min(std::min(p0x, p1x), std::min(c0x, c1x));
+    const float mxx = std::max(std::max(p0x, p1x), std::max(c0x, c1x));
+    const float mny = std::min(std::min(p0y, p1y), std::min(c0y, c1y));
+    const float mxy = std::max(std::max(p0y, p1y), std::max(c0y, c1y));
+    if (mxx < rx0 || mnx > rx1 || mxy < ry0 || mny > ry1) return;          // fully outside
+    const bool inside = mnx >= rx0 && mxx <= rx1 && mny >= ry0 && mxy <= ry1;
+    if (inside || depth <= 0) {
+        vr.bezier({p0x, p0y, 0.0f}, {c0x, c0y, 0.0f}, {c1x, c1y, 0.0f}, {p1x, p1y, 0.0f}, color);
+        return;
+    }
+    // De Casteljau split at t = 0.5
+    const float ax = (p0x + c0x) * 0.5f, ay = (p0y + c0y) * 0.5f;
+    const float bx = (c0x + c1x) * 0.5f, by = (c0y + c1y) * 0.5f;
+    const float cx = (c1x + p1x) * 0.5f, cy = (c1y + p1y) * 0.5f;
+    const float dx = (ax + bx) * 0.5f,   dy = (ay + by) * 0.5f;
+    const float ex = (bx + cx) * 0.5f,   ey = (by + cy) * 0.5f;
+    const float mx = (dx + ex) * 0.5f,   my = (dy + ey) * 0.5f;
+    emit_clipped_bezier(vr, p0x, p0y, ax, ay, dx, dy, mx, my, rx0, ry0, rx1, ry1, color, depth - 1);
+    emit_clipped_bezier(vr, mx, my, ex, ey, cx, cy, p1x, p1y, rx0, ry0, rx1, ry1, color, depth - 1);
+}
+
 void emit_canvas_wire(gfx::VectorRenderer& vr, const IGuiCanvasView& cv,
                       const CanvasWire& wire, const CanvasStyle& cs, float ui) {
     const int last = (int)wire.points.size() - 1;
     if (last < 1) return;
     const CanvasWireStyle& ws = wire.style;
+    // Clip rect = this canvas's own screen rect (physical px, same space as sp).
+    const math::Box cb = cv.get_bounds();
+    const float rx0 = math::x(math::box_min(cb)) * ui, ry0 = math::y(math::box_min(cb)) * ui;
+    const float rx1 = rx0 + math::box_width(cb) * ui, ry1 = ry0 + math::box_height(cb) * ui;
     // Everything the canvas produces is LOGICAL; the vector layer draws in
     // physical px, so world-derived sizes carry the ui (DPI) factor and screen
     // points are lifted to physical. The *_px floors are already physical.
@@ -402,15 +438,18 @@ void emit_canvas_wire(gfx::VectorRenderer& vr, const IGuiCanvasView& cv,
             const float k = std::max(std::fabs(math::x(P2) - math::x(P1)) * 0.5f, tangent_min);
             c2x = math::x(P2) - k; c2y = math::y(P2);
         }
-        vr.bezier({math::x(P1), math::y(P1), 0.0f}, {c1x, c1y, 0.0f},
-                  {c2x, c2y, 0.0f}, {math::x(P2), math::y(P2), 0.0f}, ws.color);
+        emit_clipped_bezier(vr, math::x(P1), math::y(P1), c1x, c1y,
+                            c2x, c2y, math::x(P2), math::y(P2),
+                            rx0, ry0, rx1, ry1, ws.color, /*depth=*/10);
     }
     if (ws.handles && last >= 2) {
         // Interior waypoints get a grab ring: wire-coloured disc + backdrop hole.
+        // 同樣裁切到本畫布（跨畫布不畫）。
         const math::Vec4 hole = ws.handle_hole_color.w > 0.0f ? ws.handle_hole_color
                                                               : cs.backdrop_color;
         for (int i = 1; i < last; ++i) {
             const float hx = math::x(sp[(std::size_t)i]), hy = math::y(sp[(std::size_t)i]);
+            if (hx < rx0 || hx > rx1 || hy < ry0 || hy > ry1) continue;
             vr.fill_circle(hx, hy, std::max(ws.handle_min_px, ws.handle_radius * s), ws.color);
             vr.fill_circle(hx, hy, std::max(ws.handle_hole_min_px, ws.handle_hole_radius * s), hole);
         }
