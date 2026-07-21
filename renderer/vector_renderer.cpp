@@ -4,6 +4,7 @@
 // baked per-backend artifacts. All entry points share one UBO { mat4 view_proj; vec4 viewport }.
 #include "shader_compiler/shader_compiler.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -483,7 +484,7 @@ void VectorRenderer::fill_circle(float cx, float cy, float r, const math::Vec4& 
 
 //--- Flush -------------------------------------------------------------------
 
-void VectorRenderer::end(GraphicCommander* cmd) {
+void VectorRenderer::end(GraphicCommander* cmd, const ClipRect* clip) {
     if (!device_ || !cmd) return;
     if (tris_.empty() && thick_.empty()) return;
 
@@ -523,7 +524,21 @@ void VectorRenderer::end(GraphicCommander* cmd) {
     ubo_slot_ = (ubo_slot_ + 1) % kUboSlots;
     device_->update_buffer(ubo_[slot], &u, sizeof(u), 0);
 
-    const ScissorRect full{ 0, 0, viewport_w_, viewport_h_ };
+    // Default = whole viewport; a caller-supplied clip (the widget's effective clip
+    // rect) bounds the batch instead, intersected with the viewport so a stale or
+    // oversized rect can't widen it.
+    ScissorRect full{ 0, 0, viewport_w_, viewport_h_ };
+    if (clip) {
+        const int x0 = std::max(0, clip->x), y0 = std::max(0, clip->y);
+        const int x1 = std::min(viewport_w_, clip->x + clip->w);
+        const int y1 = std::min(viewport_h_, clip->y + clip->h);
+        if (x1 <= x0 || y1 <= y0) return;                 // fully clipped away
+        // The clip arrives top-left origin (like widget bounds); GL's scissor
+        // origin is bottom-left, so flip there — without this the batch is
+        // scissored to the mirrored band and vanishes.
+        const int sy = (backend_ == Backend::OpenGL) ? viewport_h_ - y1 : y0;
+        full = ScissorRect{ x0, sy, x1 - x0, y1 - y0 };
+    }
     const uint32_t tri_verts      = tri_floats   / FLOATS_PER_VERT;
     const uint32_t thick_verts    = thick_floats / THICK_FLOATS_PER_VERT;
     const uint32_t thick_byte_off = tri_floats * sizeof(float);

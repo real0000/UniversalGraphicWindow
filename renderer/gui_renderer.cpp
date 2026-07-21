@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -368,47 +369,11 @@ namespace {
 // widget only holds data (gui/ has no renderer dependency); this is the one
 // place that turns it into geometry, once per actually-rendered frame.
 
-// Emit only the parts of a screen-space cubic that intersect the canvas rect
-// [rx0,ry0..rx1,ry1]. A context can hold several canvases (e.g. a node editor
-// next to a GPU-topology view); wires are drawn in the unclipped vector
-// underlay, so without this a panned wire would bleed across into the
-// neighbouring canvas. Conservative control-polygon bounds: fully outside →
-// drop, fully inside (or max depth) → draw, else De Casteljau split + recurse.
-static void emit_clipped_bezier(gfx::VectorRenderer& vr,
-                                float p0x, float p0y, float c0x, float c0y,
-                                float c1x, float c1y, float p1x, float p1y,
-                                float rx0, float ry0, float rx1, float ry1,
-                                const math::Vec4& color, int depth) {
-    const float mnx = std::min(std::min(p0x, p1x), std::min(c0x, c1x));
-    const float mxx = std::max(std::max(p0x, p1x), std::max(c0x, c1x));
-    const float mny = std::min(std::min(p0y, p1y), std::min(c0y, c1y));
-    const float mxy = std::max(std::max(p0y, p1y), std::max(c0y, c1y));
-    if (mxx < rx0 || mnx > rx1 || mxy < ry0 || mny > ry1) return;          // fully outside
-    const bool inside = mnx >= rx0 && mxx <= rx1 && mny >= ry0 && mxy <= ry1;
-    if (inside || depth <= 0) {
-        vr.bezier({p0x, p0y, 0.0f}, {c0x, c0y, 0.0f}, {c1x, c1y, 0.0f}, {p1x, p1y, 0.0f}, color);
-        return;
-    }
-    // De Casteljau split at t = 0.5
-    const float ax = (p0x + c0x) * 0.5f, ay = (p0y + c0y) * 0.5f;
-    const float bx = (c0x + c1x) * 0.5f, by = (c0y + c1y) * 0.5f;
-    const float cx = (c1x + p1x) * 0.5f, cy = (c1y + p1y) * 0.5f;
-    const float dx = (ax + bx) * 0.5f,   dy = (ay + by) * 0.5f;
-    const float ex = (bx + cx) * 0.5f,   ey = (by + cy) * 0.5f;
-    const float mx = (dx + ex) * 0.5f,   my = (dy + ey) * 0.5f;
-    emit_clipped_bezier(vr, p0x, p0y, ax, ay, dx, dy, mx, my, rx0, ry0, rx1, ry1, color, depth - 1);
-    emit_clipped_bezier(vr, mx, my, ex, ey, cx, cy, p1x, p1y, rx0, ry0, rx1, ry1, color, depth - 1);
-}
-
 void emit_canvas_wire(gfx::VectorRenderer& vr, const IGuiCanvasView& cv,
                       const CanvasWire& wire, const CanvasStyle& cs, float ui) {
     const int last = (int)wire.points.size() - 1;
     if (last < 1) return;
     const CanvasWireStyle& ws = wire.style;
-    // Clip rect = this canvas's own screen rect (physical px, same space as sp).
-    const math::Box cb = cv.get_bounds();
-    const float rx0 = math::x(math::box_min(cb)) * ui, ry0 = math::y(math::box_min(cb)) * ui;
-    const float rx1 = rx0 + math::box_width(cb) * ui, ry1 = ry0 + math::box_height(cb) * ui;
     // Everything the canvas produces is LOGICAL; the vector layer draws in
     // physical px, so world-derived sizes carry the ui (DPI) factor and screen
     // points are lifted to physical. The *_px floors are already physical.
@@ -438,18 +403,15 @@ void emit_canvas_wire(gfx::VectorRenderer& vr, const IGuiCanvasView& cv,
             const float k = std::max(std::fabs(math::x(P2) - math::x(P1)) * 0.5f, tangent_min);
             c2x = math::x(P2) - k; c2y = math::y(P2);
         }
-        emit_clipped_bezier(vr, math::x(P1), math::y(P1), c1x, c1y,
-                            c2x, c2y, math::x(P2), math::y(P2),
-                            rx0, ry0, rx1, ry1, ws.color, /*depth=*/10);
+        vr.bezier({math::x(P1), math::y(P1), 0.0f}, {c1x, c1y, 0.0f},
+                  {c2x, c2y, 0.0f}, {math::x(P2), math::y(P2), 0.0f}, ws.color);
     }
     if (ws.handles && last >= 2) {
         // Interior waypoints get a grab ring: wire-coloured disc + backdrop hole.
-        // 同樣裁切到本畫布（跨畫布不畫）。
         const math::Vec4 hole = ws.handle_hole_color.w > 0.0f ? ws.handle_hole_color
                                                               : cs.backdrop_color;
         for (int i = 1; i < last; ++i) {
             const float hx = math::x(sp[(std::size_t)i]), hy = math::y(sp[(std::size_t)i]);
-            if (hx < rx0 || hx > rx1 || hy < ry0 || hy > ry1) continue;
             vr.fill_circle(hx, hy, std::max(ws.handle_min_px, ws.handle_radius * s), ws.color);
             vr.fill_circle(hx, hy, std::max(ws.handle_hole_min_px, ws.handle_hole_radius * s), hole);
         }
@@ -481,12 +443,52 @@ void emit_canvas(gfx::VectorRenderer& vr, IGuiCanvasView* cv, float ui) {
         emit_canvas_wire(vr, *cv, cv->get_wire(i), cs, ui);
 }
 
-void emit_canvases(gfx::VectorRenderer& vr, IGuiWidget* w, float ui) {
+// Box intersection with the same rule the retained collect uses: an EMPTY box is
+// the "no clip" identity (widgets enable clipping without ever setting a rect),
+// not a box that clips everything away. false = fully clipped, paint nothing.
+bool clip_isect(const math::Box& a, const math::Box& b, math::Box* out) {
+    if (math::box_is_empty(a)) { *out = b; return true; }
+    if (math::box_is_empty(b)) { *out = a; return true; }
+    const float x0 = std::max(math::x(math::box_min(a)), math::x(math::box_min(b)));
+    const float y0 = std::max(math::y(math::box_min(a)), math::y(math::box_min(b)));
+    const float x1 = std::min(math::x(math::box_min(a)) + math::box_width(a),
+                              math::x(math::box_min(b)) + math::box_width(b));
+    const float y1 = std::min(math::y(math::box_min(a)) + math::box_height(a),
+                              math::y(math::box_min(b)) + math::box_height(b));
+    if (x1 <= x0 || y1 <= y0) return false;
+    *out = math::make_box(x0, y0, x1 - x0, y1 - y0);
+    return true;
+}
+
+// One canvas to draw, with the clip it inherits from the widget hierarchy.
+struct CanvasDraw {
+    IGuiCanvasView*              cv;
+    gfx::VectorRenderer::ClipRect clip;   // physical px
+};
+
+// Walk the tree exactly like the retained pass does, narrowing the clip at every
+// widget that clips, so a canvas's vector content (backdrop, grid, wires and
+// their endpoint handles) can never paint outside the box the hierarchy gives
+// it — not past its own bounds, and not past an ancestor that clips it.
+// `clip` is LOGICAL px, like widget bounds; it is lifted to physical at the end.
+void collect_canvases(std::vector<CanvasDraw>& out, IGuiWidget* w, float ui, const math::Box& clip) {
     if (!w || !w->is_visible()) return;
-    if (w->get_type() == WidgetType::CanvasView)
-        emit_canvas(vr, static_cast<IGuiCanvasView*>(w), ui);
+    math::Box sub = clip;
+    if (w->is_clip_enabled() && !clip_isect(clip, w->get_clip_rect(), &sub)) return;
+    if (w->get_type() == WidgetType::CanvasView) {
+        math::Box own;
+        // Unlike a clip rect, empty BOUNDS mean "nothing to draw" (a canvas that was
+        // never laid out), so check before intersecting or it would inherit `sub`.
+        if (!math::box_is_empty(w->get_bounds()) && clip_isect(sub, w->get_bounds(), &own)) {
+            const float x0 = math::x(math::box_min(own)) * ui, y0 = math::y(math::box_min(own)) * ui;
+            out.push_back({ static_cast<IGuiCanvasView*>(w),
+                            { int(std::floor(x0)), int(std::floor(y0)),
+                              int(std::ceil(math::box_width(own) * ui)),
+                              int(std::ceil(math::box_height(own) * ui)) } });
+        }
+    }
     for (int i = 0; i < w->get_child_count(); ++i)
-        emit_canvases(vr, w->get_child(i), ui);
+        collect_canvases(out, w->get_child(i), ui, sub);
 }
 
 // Scale every draw command of an app-authored immediate layer (positions, sizes,
@@ -538,19 +540,28 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
     };
     // CanvasView widgets (world canvases) draw their backdrop/grid/wires through
     // the vector underlay. With a context present the facade OWNS the batch —
-    // begin resets last frame's geometry, canvases emit, end() below draws it;
+    // each canvas is batched and drawn under the clip it inherits from the widget
+    // hierarchy, so its content stays inside its box like any other widget's;
     // callers must not pre-fill in this mode. (Without a context the underlay is
     // passed through untouched: the caller built its own batch.)
-    if (underlay && ctx) {
-        underlay->begin(proj, fb_w, fb_h);
-        emit_canvases(*underlay, ctx->get_root(), ui);
-    }
+    std::vector<CanvasDraw> canvases;
+    if (underlay && ctx)
+        collect_canvases(canvases, ctx->get_root(), ui,
+                         math::make_box(0.0f, 0.0f, fb_w / ui, fb_h / ui));
     cmd->begin();
     cmd->set_render_target_backbuffer();
     window::Viewport vp; vp.x = 0; vp.y = 0; vp.width = float(fb_w); vp.height = float(fb_h);
     cmd->set_viewport(vp);
     cmd->clear_color(clear);
-    if (underlay) underlay->end(cmd);
+    if (underlay && ctx) {
+        for (const CanvasDraw& cd : canvases) {
+            underlay->begin(proj, fb_w, fb_h);
+            emit_canvas(*underlay, cd.cv, ui);
+            underlay->end(cmd, &cd.clip);
+        }
+    } else if (underlay) {
+        underlay->end(cmd);
+    }
     if (immediate && immediate->is_valid())
         render(cmd, *immediate, atlas, proj, fb_w, fb_h, 1.0f, raster->color_atlas());
     if (gri && gri->is_valid())

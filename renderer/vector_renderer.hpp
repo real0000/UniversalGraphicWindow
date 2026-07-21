@@ -67,7 +67,14 @@ public:
     // Upload the batched geometry and draw it (lines then triangles) into the
     // currently-bound render target. A full-viewport scissor is set so Vulkan/D3D12
     // dynamic-scissor draws aren't clipped away.
-    void end(GraphicCommander* cmd);
+    //
+    // `clip` (optional, pixels, top-left origin, same space as the viewport) bounds
+    // the draw to a sub-rect instead. Callers that emit a widget's vector content
+    // pass that widget's effective clip so the batch obeys the widget hierarchy —
+    // without it the underlay would spill over whatever is laid out beside it. An
+    // empty/zero-area clip draws nothing.
+    struct ClipRect { int x = 0, y = 0, w = 0, h = 0; };
+    void end(GraphicCommander* cmd, const ClipRect* clip = nullptr);
 
     // Override the curve LOD parameters set at init (see VectorRendererDesc).
     void set_curve_lod(float tolerance_px, int min_segments, int max_segments);
