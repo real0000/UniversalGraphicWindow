@@ -31,22 +31,27 @@ namespace gui {
 //
 // App code says what happened instead: mutate through the widget's API, or call
 // IGuiWidget::refresh_bindings() when the change is in data the widget reads.
-class IWidgetInvalidate {
+class IWidgetInternal {
 public:
-    virtual ~IWidgetInvalidate() = default;
+    virtual ~IWidgetInternal() = default;
     virtual void mark_dirty() = 0;
+    // Re-read a bound data provider. The renderer calls this on every widget as it
+    // collects, and the widget's own semantic APIs call it before acting on their
+    // model — so an application never has to ask for it either. Default no-op;
+    // only provider-bound widgets override.
+    virtual void refresh_bindings() {}
 };
 
-// A widget's invalidation channel (null if it is not a UGW widget).
-inline IWidgetInvalidate* invalidator_of(IGuiWidget* w) {
-    return dynamic_cast<IWidgetInvalidate*>(w);
+// A widget's internal channel (null if it is not a UGW widget).
+inline IWidgetInternal* internal_of(IGuiWidget* w) {
+    return dynamic_cast<IWidgetInternal*>(w);
 }
 
 // ============================================================================
 // GuiWidget - Concrete base implementing all IGuiWidget methods
 // ============================================================================
 
-class GuiWidget : public IGuiWidget, public IWidgetInvalidate {
+class GuiWidget : public IGuiWidget, public IWidgetInternal {
 public:
     explicit GuiWidget(WidgetType type) : type_(type) {}
     ~GuiWidget() override = default;
@@ -57,7 +62,7 @@ public:
     IGuiWidget* find_by_name(const char* n) override;
     void find_all_by_name(const char* n, std::vector<IGuiWidget*>& out) override;
     IGuiWidget* get_parent() const override { return parent_; }
-    void set_parent(IGuiWidget* p) override { parent_ = p; parent_inv_ = invalidator_of(p); }
+    void set_parent(IGuiWidget* p) override { parent_ = p; parent_inv_ = internal_of(p); }
     math::Box get_bounds() const override { return bounds_; }
     void set_bounds(const math::Box& b) override;
     // Content transform (see IGuiWidget docs): children's space → this space.
@@ -144,7 +149,7 @@ protected:
     WidgetType type_;
     std::string name_;
     IGuiWidget* parent_ = nullptr;
-    IWidgetInvalidate* parent_inv_ = nullptr;   // resolved once in set_parent
+    IWidgetInternal* parent_inv_ = nullptr;   // resolved once in set_parent
     // Boost.Geometry points are NOT default-initialized, so an unset box is
     // garbage (~1e23). Zero it: a never-laid-out widget then reads as empty
     // (skipped by render/sizer measure) instead of a wild rectangle.
@@ -178,7 +183,7 @@ protected:
 // ============================================================================
 
 template<typename Interface, WidgetType TYPE>
-class WidgetBase : public Interface, public IWidgetInvalidate {
+class WidgetBase : public Interface, public IWidgetInternal {
 protected:
     GuiWidget base_{TYPE};
 public:

@@ -207,7 +207,11 @@ public:
     void set_selection_mode(ListBoxSelectionMode m) override { sel_mode_=m; }
     int get_selected_item() const override { return selected_; }
     void set_selected_item(int id) override { selected_=id; }
+    // Addressing the list by id/geometry only makes sense against a CURRENT model,
+    // so a bound list pulls its provider first. Callers therefore never have to
+    // sync it by hand before driving or measuring it.
     bool activate_item(int item_id) override {
+        refresh_bindings();
         for (const auto& it : items_) if (it.id == item_id) {
             selected_ = item_id;
             if (handler_) handler_->on_item_selected(item_id);
@@ -217,6 +221,7 @@ public:
         return false;
     }
     bool activate_item_action(int item_id) override {
+        refresh_bindings();
         for (const auto& it : items_) if (it.id == item_id) {
             if (handler_) handler_->on_item_action(item_id);
             return true;
@@ -225,6 +230,7 @@ public:
     }
     void set_item_drag_out(bool enabled) override { drag_out_ = enabled; }
     bool activate_item_drop(int item_id, const math::Vec2& pos) override {
+        refresh_bindings();
         for (const auto& it : items_) if (it.id == item_id) {
             if (handler_) handler_->on_item_drop(item_id, pos);
             return true;
@@ -241,6 +247,8 @@ public:
         scroll_y_ = std::max(0.0f, std::min(offset, max_scroll));
     }
     float get_total_content_height() const override {
+        const_cast<GuiListBox*>(this)->refresh_bindings();   // measuring needs the current model
+
         const int n = (int)items_.size();
         return n <= 0 ? 0.0f : (float)n * row_pitch() - style_.row_gap;
     }

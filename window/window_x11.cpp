@@ -1393,8 +1393,16 @@ void Window::run(const std::function<void()>& update_cb, int frame_delay_ms) {
             }
         }
 
+        // Anything waiting is input the handlers are about to act on. Render once
+        // afterwards: a handler may change state the toolkit cannot see (the app's
+        // own model behind a bound provider — a keyboard shortcut editing a
+        // document, say), and requiring the app to announce that is exactly the
+        // repaint bookkeeping this design keeps out of applications. Idle costs
+        // nothing: with no events we are blocked in select() above, not polling.
+        const bool had_input = XPending(impl->display) > 0;
         poll_events();     // X input → handlers → widgets (may request_redraw)
         run_pending();     // due timers (caret blink) + posted UI tasks
+        if (had_input) impl->needs_paint = true;
         if (update_cb) { update_cb(); impl->needs_paint = true; }
 
         if (impl->needs_paint) {

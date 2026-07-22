@@ -760,7 +760,10 @@ public:
         if (key) for (const auto& p : props_) if (p.key == key) return p.id;
         return -1;
     }
+    // Driving a row by key only makes sense against a CURRENT form, so a bound
+    // grid pulls its provider first — callers never sync it by hand.
     bool commit_text(const char* key, const char* text) override {
+        refresh_bindings();
         int i = find_idx(find_by_key(key)); if (i < 0) return false;
         Prop& p = props_[i];
         const std::string t = text ? text : "";
@@ -771,6 +774,7 @@ public:
         return true;
     }
     bool select_enum(const char* key, int opt) override {
+        refresh_bindings();
         int i = find_idx(find_by_key(key)); if (i < 0) return false;
         Prop& p = props_[i];
         if (p.type != PropertyType::Enum || opt < 0 || opt >= (int)p.enum_opts.size()) return false;
@@ -779,6 +783,7 @@ public:
         return true;
     }
     bool toggle_bool(const char* key) override {
+        refresh_bindings();
         int i = find_idx(find_by_key(key)); if (i < 0) return false;
         Prop& p = props_[i];
         if (p.type != PropertyType::Bool) return false;
@@ -787,15 +792,18 @@ public:
         return true;
     }
     bool invoke_array_add(const char* array_key) override {
+        refresh_bindings();
         if (!handler_ || !array_key) return false; handler_->on_property_array_add(array_key); return true;
     }
     bool invoke_array_remove(const char* array_key, int index) override {
+        refresh_bindings();
         if (!handler_ || !array_key) return false; handler_->on_property_array_remove(array_key, index); return true;
     }
     bool invoke_array_move(const char* array_key, int index, int delta) override {
         if (!handler_ || !array_key) return false; handler_->on_property_array_move(array_key, index, delta); return true;
     }
     int get_enum_options(const char* key, const char** out_values, const char** out_labels, int max) const override {
+        const_cast<GuiPropertyGrid*>(this)->refresh_bindings();
         int i = find_idx(find_by_key(key)); if (i < 0) return 0;
         const Prop& p = props_[i];
         if (p.type != PropertyType::Enum) return 0;

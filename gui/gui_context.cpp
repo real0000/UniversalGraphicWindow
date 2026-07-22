@@ -204,7 +204,7 @@ class GuiContext : public IGuiContext {
                                   const math::Box& parent_clip, const CollectXf& xf) {
         if (!w || !w->is_visible()) return;
         if (math::box_is_empty(w->get_bounds())) return;
-        w->refresh_bindings();   // pull any bound data provider before rendering
+        if (auto* wi = internal_of(w)) wi->refresh_bindings();   // pull any bound provider before rendering
         const WidgetRenderInfo& ri = w->get_render_info(nullptr);
         if (!ri.is_valid()) return;
         int32_t local_max = 0;
@@ -364,7 +364,7 @@ class GuiContext : public IGuiContext {
             case 4: t->text_select_all(); break;
         }
         if (text_menu_) text_menu_->hide();
-        if (auto* pi = invalidator_of(text_menu_widget_)) pi->mark_dirty();
+        if (auto* pi = internal_of(text_menu_widget_)) pi->mark_dirty();
     }
 
     // Mouse handler: feeds all mouse events into the widget tree, raw.
@@ -602,7 +602,7 @@ public:
         // Colours are resolved at collect from cached (unchanged) draw commands, so
         // force a rebuild of the whole tree's render info to pick up the new palette.
         root_.mark_dirty();
-        for (auto* ov : overlays_) if (auto* pi = invalidator_of(ov)) pi->mark_dirty();
+        for (auto* ov : overlays_) if (auto* pi = internal_of(ov)) pi->mark_dirty();
         if (host_) host_->request_redraw();
     }
 

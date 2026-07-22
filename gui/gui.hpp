@@ -883,16 +883,12 @@ public:
     virtual const WidgetRenderInfo& get_render_info(Window* window) const = 0;
 
     // Called by the context once per collect, just before get_render_info(), so a
-    // widget can refresh its model from a bound data provider (set once by the app)
-    // instead of the app pushing on every change. The context calls this before a
-    // render; the APP calls it when it has changed the data behind a provider —
-    // that is the supported way to say "my model moved on", and it is idempotent:
-    // the re-read is a set_items/set_properties that no-ops (and schedules no
-    // repaint) when nothing actually differs. Non-const on purpose (it updates the
-    // widget's model). Default no-op — only provider-bound widgets override.
-    virtual void refresh_bindings() {}
+    // (Provider refresh is deliberately absent here — see IWidgetInternal in the
+    // internal gui_widget_base.hpp. The renderer re-reads every bound provider as
+    // it collects, and a widget's semantic APIs re-read before acting, so an app
+    // only ever mutates its own model.)
 
-    // (Invalidation is deliberately absent here — see IWidgetInvalidate in the
+    // (Invalidation is deliberately absent here — see IWidgetInternal in the
     // internal gui_widget_base.hpp. A widget decides for itself that its picture
     // changed; app code mutates through the widget API, or calls
     // refresh_bindings() when the change is in data the widget only reads.)
