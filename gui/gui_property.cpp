@@ -1092,5 +1092,55 @@ void GuiPropertyGrid::EditorH::on_text_cancel() { if (g) g->editor_dismiss(); }
 // Factory function
 IGuiPropertyGrid* create_property_grid_widget() { return new GuiPropertyGrid(); }
 
+// ── Declarative field types (see gui_property.hpp) ──────────────────────────
+
+void TextPropertyField::emit(const IPropertyFieldSource& src, const std::string& prefix,
+                             std::vector<PropertyModel>& into) const {
+    PropertyModel p;
+    p.key = prefix + key_; p.name = name_; p.type = PropertyType::String; p.read_only = ro_;
+    p.svalue = src.text_value(prefix, key_);
+    into.push_back(std::move(p));
+}
+
+void SelectPropertyField::emit(const IPropertyFieldSource& src, const std::string& prefix,
+                               std::vector<PropertyModel>& into) const {
+    const std::string full = prefix + key_;
+    const std::string cur  = src.text_value(prefix, key_);
+    PropertyModel p;
+    p.key = full; p.name = name_; p.type = PropertyType::Enum;
+    int idx = -1;
+    for (const auto& [value, label] : src.options(full, aux_)) {
+        p.options.push_back(label);          // shown
+        p.option_values.push_back(value);    // stored
+        if (value == cur) idx = (int)p.options.size() - 1;
+    }
+    if (idx < 0) {
+        // Stored value isn't among the options (stale reference, or the list has
+        // not loaded yet): keep showing it by appending it, instead of silently
+        // reporting the first entry as the current value.
+        if (!cur.empty()) {
+            p.options.push_back(cur); p.option_values.push_back(cur);
+            idx = (int)p.options.size() - 1;
+        } else idx = 0;
+    }
+    p.enum_index = idx;
+    into.push_back(std::move(p));
+}
+
+void CheckPropertyField::emit(const IPropertyFieldSource& src, const std::string& prefix,
+                              std::vector<PropertyModel>& into) const {
+    PropertyModel p;
+    p.key = prefix + key_; p.name = name_; p.type = PropertyType::Bool;
+    p.bvalue = src.bool_value(prefix, key_, def_);
+    into.push_back(std::move(p));
+}
+
+void LabelPropertyField::emit(const IPropertyFieldSource&, const std::string&,
+                              std::vector<PropertyModel>& into) const {
+    PropertyModel p;
+    p.name = name_; p.type = PropertyType::String; p.read_only = true; p.svalue = value_;
+    into.push_back(std::move(p));   // no key → an edit can never route here
+}
+
 } // namespace gui
 } // namespace window

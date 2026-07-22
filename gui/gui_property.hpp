@@ -139,6 +139,89 @@ struct PropertyForm {
     std::vector<PropertyArray> arrays;
 };
 
+// ── Declarative field types ─────────────────────────────────────────────────
+// A PropertyForm is plain data, so building one by hand means filling a
+// PropertyModel field-by-field at every call site — and re-deriving the fiddly
+// parts (an enum's parallel label/value arrays, its selected index, what to do
+// when the stored value isn't in the option list) each time.
+//
+// A field type owns that: it knows HOW one kind of row is shaped. WHERE the
+// value comes from stays with the app, behind IPropertyFieldSource, so this
+// layer needs no opinion about the app's model (JSON, a struct, a DB row).
+// Building a form then reads as "which fields, in what order":
+//
+//     TextPropertyField("Name", "name").emit(src, prefix, el.fields);
+//     SelectPropertyField("Type", "value_type").emit(src, prefix, el.fields);
+//
+// `prefix` is the app's routing scope for a row inside an array card (e.g.
+// "@if:0:"); the row's key is prefix + the field key, which is exactly what the
+// grid echoes back on edit. Empty prefix = a top-level row.
+class IPropertyFieldSource {
+public:
+    virtual ~IPropertyFieldSource() = default;
+    // Current value of `key` within `prefix`'s scope ("" / `def` when absent).
+    virtual std::string text_value(const std::string& prefix, const std::string& key) const = 0;
+    virtual bool        bool_value(const std::string& prefix, const std::string& key, bool def) const = 0;
+    // (value, label) choices for a select. `full_key` is prefix + key so options
+    // may differ per card; `aux` carries the field's own hint (e.g. which list).
+    virtual std::vector<std::pair<std::string, std::string>>
+        options(const std::string& full_key, const std::string& aux) const = 0;
+};
+
+class IPropertyField {
+public:
+    virtual ~IPropertyField() = default;
+    virtual void emit(const IPropertyFieldSource& src, const std::string& prefix,
+                      std::vector<PropertyModel>& into) const = 0;
+};
+
+// Free-text row (read_only → shown but not editable).
+class TextPropertyField : public IPropertyField {
+public:
+    TextPropertyField(std::string name, std::string key, bool read_only = false)
+        : name_(std::move(name)), key_(std::move(key)), ro_(read_only) {}
+    void emit(const IPropertyFieldSource& src, const std::string& prefix,
+              std::vector<PropertyModel>& into) const override;
+private:
+    std::string name_, key_; bool ro_;
+};
+
+// Enum row built from the source's options. When the stored value is missing
+// from that list (stale reference, or the list hasn't loaded yet) it is appended
+// as a selectable option rather than silently snapping the row to the first
+// entry — the user keeps seeing what is actually stored.
+class SelectPropertyField : public IPropertyField {
+public:
+    SelectPropertyField(std::string name, std::string key, std::string aux = "")
+        : name_(std::move(name)), key_(std::move(key)), aux_(std::move(aux)) {}
+    void emit(const IPropertyFieldSource& src, const std::string& prefix,
+              std::vector<PropertyModel>& into) const override;
+private:
+    std::string name_, key_, aux_;
+};
+
+class CheckPropertyField : public IPropertyField {
+public:
+    CheckPropertyField(std::string name, std::string key, bool default_val = false)
+        : name_(std::move(name)), key_(std::move(key)), def_(default_val) {}
+    void emit(const IPropertyFieldSource& src, const std::string& prefix,
+              std::vector<PropertyModel>& into) const override;
+private:
+    std::string name_, key_; bool def_;
+};
+
+// Read-only caption carrying a literal value. It has no key, so an edit can
+// never route to it.
+class LabelPropertyField : public IPropertyField {
+public:
+    LabelPropertyField(std::string name, std::string value)
+        : name_(std::move(name)), value_(std::move(value)) {}
+    void emit(const IPropertyFieldSource& src, const std::string& prefix,
+              std::vector<PropertyModel>& into) const override;
+private:
+    std::string name_, value_;
+};
+
 class IGuiPropertyGrid : public IGuiWidget {
 public:
     virtual ~IGuiPropertyGrid() = default;
