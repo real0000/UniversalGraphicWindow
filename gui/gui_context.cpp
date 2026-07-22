@@ -120,6 +120,8 @@ class GuiContext : public IGuiContext {
     Window* host_=nullptr;             // window whose loop drives us (may differ from attached_window_)
     bool needs_layout_=true;           // root sizer tree must re-flow before next render
     bool suppress_dirty_notify_=false; // guard: relayout marks widgets dirty; don't re-arm during paint
+    bool binding_pass_=false;          // guard: inside the pre-layout provider pull (see notify_dirty)
+    IGuiWidget* default_focus_=nullptr;// focused when nothing else is (see set_default_focus)
     int  last_win_w_=-1, last_win_h_=-1;  // last window size we cascaded to the root
     int  blink_timer_id_=0;            // caret-blink timer id while a text widget is focused
     std::function<bool()> pre_render_; // measure hook (after layout, before collect)
@@ -130,7 +132,10 @@ class GuiContext : public IGuiContext {
     void notify_dirty() {
         if (suppress_dirty_notify_) return;
         needs_layout_ = true;
-        if (host_) host_->request_redraw();
+        // During the binding pass we are already inside a render that will lay out
+        // and paint what just changed; asking the host for another one would burn a
+        // frame per model change.
+        if (host_ && !binding_pass_) host_->request_redraw();
     }
     // Arm/disarm the caret-blink timer to match the focused widget. Only a focused
     // editable text widget needs a periodic repaint; everything else stays idle.
@@ -196,6 +201,20 @@ class GuiContext : public IGuiContext {
         if (th && c.role != GuiColor::None) c.color = th->get(c.role);
     }
 
+    // Pull every bound provider, top-down, BEFORE the layout pass — a binding can
+    // change visibility, text or a whole item list, and all three feed the sizer
+    // flow that follows. Runs on the full tree, not just what is on screen, because
+    // a widget that is currently hidden is exactly the one whose bind_visible has to
+    // be asked. A subtree hidden by its own binding is pruned: nothing under it can
+    // show this frame, so a collapsed panel costs one call, not its whole contents.
+    static void refresh_bindings_recursive(IGuiWidget* w) {
+        if (!w) return;
+        if (auto* wi = internal_of(w)) wi->refresh_bindings();
+        if (!w->is_visible()) return;
+        for (int i = 0, n = w->get_child_count(); i < n; ++i)
+            refresh_bindings_recursive(w->get_child(i));
+    }
+
     // `parent_clip` is the clip imposed by clip-enabled ancestors (empty = none), in
     // SCREEN space. A widget's own commands are clamped to it; clip-enabled widgets
     // (e.g. ScrollView) tighten the clip handed to their descendants — so scrolled
@@ -204,7 +223,6 @@ class GuiContext : public IGuiContext {
                                   const math::Box& parent_clip, const CollectXf& xf) {
         if (!w || !w->is_visible()) return;
         if (math::box_is_empty(w->get_bounds())) return;
-        if (auto* wi = internal_of(w)) wi->refresh_bindings();   // pull any bound provider before rendering
         const WidgetRenderInfo& ri = w->get_render_info(nullptr);
         if (!ri.is_valid()) return;
         int32_t local_max = 0;
@@ -642,6 +660,23 @@ public:
         overlays_.erase(std::remove(overlays_.begin(), overlays_.end(), w), overlays_.end());
     }
     const WidgetRenderInfo& get_render_info() override {
+        // ---- Bindings (app never runs a "sync the view from the model" pass) ----
+        // Everything the app bound with bind_visible/bind_enabled/bind_text/
+        // bind_items/… is re-read here, so a model change is on screen at the next
+        // paint. Anything that actually changed marks itself dirty and is picked up
+        // by the layout pass right below, in this same render — no wasted frame,
+        // which is why notify_dirty() must not re-arm the host during this pass.
+        binding_pass_ = true;
+        refresh_bindings_recursive(&root_);
+        for (auto* ov : overlays_) refresh_bindings_recursive(ov);
+        binding_pass_ = false;
+        // Autofocus: a form with nothing focused hands focus to its declared default,
+        // so the app never watches focus in order to restore it.
+        if (default_focus_ && !focused_ && default_focus_->is_visible() && default_focus_->is_enabled())
+            set_focused_widget(default_focus_);
+        // A binding may have just turned the focused field read-only (or back), which
+        // changes whether it wants a blinking caret.
+        update_blink_timer();
         // ---- Automatic layout (event-driven; app never calls cascade/relayout) --
         // Keep the root filling the host window, and re-flow the sizer tree if any
         // widget marked dirty since the last render. Done here (once per render,
@@ -724,8 +759,17 @@ public:
     IGuiWidget* get_root() override { return &root_; }
 
     IGuiWidget* get_focused_widget() const override { return focused_; }
-    void set_focused_widget(IGuiWidget* w) override { focused_=w; update_blink_timer(); }
-    void clear_focus() override { focused_=nullptr; update_blink_timer(); }
+    // Same transition a click performs (blur the old, focus the new) — a caller
+    // moving focus programmatically must not have to do half of it by hand.
+    void set_focused_widget(IGuiWidget* w) override {
+        if (focused_ == w) return;
+        if (focused_) focused_->set_focus(false);
+        focused_ = w;
+        if (focused_) focused_->set_focus(true);
+        update_blink_timer();
+    }
+    void clear_focus() override { set_focused_widget(nullptr); }
+    void set_default_focus(IGuiWidget* w) override { default_focus_ = w; }
 
     void get_widgets_in_box(const math::Box& box, std::vector<IGuiWidget*>& out) override {
         collect_in_box(&root_, box, out);

@@ -93,13 +93,13 @@ public:
     // each item's LIVE enabled/visible, so the app sets the fixed button STRUCTURE +
     // labels once via set_items and never re-pushes — it just mutates its own data
     // and the toolbar reacts. Pass {} to clear. Overrides the model's enabled/visible.
-    virtual void bind_enabled(std::function<bool(int id)> fn) = 0;
-    virtual void bind_visible(std::function<bool(int id)> fn) = 0;
+    virtual void bind_item_enabled(std::function<bool(int id)> fn) = 0;
+    virtual void bind_item_visible(std::function<bool(int id)> fn) = 0;
 
     // Bind a whole-bar provider (set ONCE): for a bar whose STRUCTURE varies (e.g. a
     // breadcrumb's segments), the toolbar re-reads it before each render and
     // set_items() the result. Pass {} to clear. Use this instead of set_items +
-    // bind_enabled/visible when the item set itself changes.
+    // bind_item_enabled/visible when the item set itself changes.
     virtual void bind_items(std::function<std::vector<ToolbarItemModel>()> provider) = 0;
 
     virtual ~IGuiToolbar() = default;

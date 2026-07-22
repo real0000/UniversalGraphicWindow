@@ -84,8 +84,12 @@ public:
     bool is_visible() const override { return visible_; }
     void set_visible(bool visible) override { visible_ = visible; }
     bool is_enabled() const override { return enabled_; }
-    void set_enabled(bool enabled) override { enabled_ = enabled; }
+    void set_enabled(bool enabled) override { if (enabled_ != enabled) { enabled_ = enabled; mark_dirty(); } }
     WidgetState get_state() const override { return state_; }
+    void bind_visible(std::function<bool()> p) override { binds_.visible = std::move(p); mark_dirty(); }
+    void bind_enabled(std::function<bool()> p) override { binds_.enabled = std::move(p); mark_dirty(); }
+    void bind_text(std::function<std::string()> p) override { binds_.text = std::move(p); mark_dirty(); }
+    void refresh_bindings() override { binds_.apply(this, this); }
 
     const GuiStyle& get_style() const override { return widget_style_; }
     void set_style(const GuiStyle& style) override { widget_style_ = style; }
@@ -548,6 +552,7 @@ private:
     bool clip_enabled_ = true;
     bool visible_ = true;
     bool enabled_ = true;
+    WidgetBindings binds_;   // visible / enabled derived from the model (IGuiWidget::bind_*)
     WidgetState state_ = WidgetState::Normal;
     SizeMode width_mode_ = SizeMode::Fill;
     SizeMode height_mode_ = SizeMode::Fill;
@@ -671,8 +676,12 @@ public:
     bool is_visible() const override { return visible_; }
     void set_visible(bool v) override { visible_ = v; }
     bool is_enabled() const override { return enabled_; }
-    void set_enabled(bool e) override { enabled_ = e; }
+    void set_enabled(bool e) override { if (enabled_ != e) { enabled_ = e; mark_dirty(); } }
     WidgetState get_state() const override { return state_; }
+    void bind_visible(std::function<bool()> p) override { binds_.visible = std::move(p); mark_dirty(); }
+    void bind_enabled(std::function<bool()> p) override { binds_.enabled = std::move(p); mark_dirty(); }
+    void bind_text(std::function<std::string()> p) override { binds_.text = std::move(p); mark_dirty(); }
+    void refresh_bindings() override { binds_.apply(this, this); }
 
     const GuiStyle& get_style() const override { return widget_style_; }
     void set_style(const GuiStyle& s) override { widget_style_ = s; }
@@ -1386,6 +1395,7 @@ private:
     bool clip_enabled_ = true;
     bool visible_ = true;
     bool enabled_ = true;
+    WidgetBindings binds_;   // visible / enabled derived from the model (IGuiWidget::bind_*)
     WidgetState state_ = WidgetState::Normal;
     SizeMode width_mode_ = SizeMode::Fill;
     SizeMode height_mode_ = SizeMode::Fill;

@@ -188,6 +188,10 @@ public:
     virtual IGuiWidget* get_focused_widget() const = 0;
     virtual void set_focused_widget(IGuiWidget* widget) = 0;
     virtual void clear_focus() = 0;
+    // Autofocus: the widget that takes focus whenever nothing else holds it (and it
+    // is visible + enabled), checked once per render. Lets a form declare "typing
+    // goes here by default" instead of the app watching focus to put it back.
+    virtual void set_default_focus(IGuiWidget* widget) = 0;
 
     // Get all widgets that intersect a rect
     virtual void get_widgets_in_box(const math::Box& box, std::vector<IGuiWidget*>& out_widgets) = 0;

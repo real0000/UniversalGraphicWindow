@@ -629,7 +629,7 @@ public:
     void bind_form(std::function<PropertyForm()> provider) override {
         form_provider_ = std::move(provider); base_.mark_dirty();
     }
-    void refresh_bindings() override {
+    void refresh_providers() override {
         if (form_provider_) set_form(form_provider_());
         else if (provider_) set_properties(provider_());
     }

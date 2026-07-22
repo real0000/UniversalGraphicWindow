@@ -76,6 +76,12 @@ public:
     // Placeholder
     virtual const char* get_placeholder() const = 0;
     virtual void set_placeholder(const char* placeholder) = 0;
+    // Model-derived placeholder / read-only, re-read once per render like every
+    // other binding (see IGuiWidget::bind_visible) — a field that goes read-only
+    // with a different prompt while a request is in flight is a property of the
+    // model, not something the app should push on every state change.
+    virtual void bind_placeholder(std::function<std::string()> provider) = 0;
+    virtual void bind_read_only(std::function<bool()> provider) = 0;
 
     // Input mode
     virtual bool is_password_mode() const = 0;

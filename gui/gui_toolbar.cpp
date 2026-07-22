@@ -204,12 +204,12 @@ public:
         model_ = std::move(model); model_mode_ = true; hovered_idx_ = pressed_idx_ = -1;
         base_.mark_dirty();
     }
-    void bind_enabled(std::function<bool(int)> fn) override { enabled_fn_ = std::move(fn); base_.mark_dirty(); }
-    void bind_visible(std::function<bool(int)> fn) override { visible_fn_ = std::move(fn); base_.mark_dirty(); }
+    void bind_item_enabled(std::function<bool(int)> fn) override { enabled_fn_ = std::move(fn); base_.mark_dirty(); }
+    void bind_item_visible(std::function<bool(int)> fn) override { visible_fn_ = std::move(fn); base_.mark_dirty(); }
     void bind_items(std::function<std::vector<ToolbarItemModel>()> provider) override {
         items_provider_ = std::move(provider); base_.mark_dirty();
     }
-    void refresh_bindings() override { if (items_provider_) set_items(items_provider_()); }
+    void refresh_providers() override { if (items_provider_) set_items(items_provider_()); }
     void get_toolbar_render_info(ToolbarRenderInfo* out) const override {
         if(!out) return; auto b=base_.get_bounds();
         out->widget=this; out->bounds=b; out->clip_rect=base_.is_clip_enabled()?base_.get_clip_rect():b;

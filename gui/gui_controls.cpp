@@ -11,6 +11,13 @@ namespace window {
 namespace gui {
 
 class GuiButton : public WidgetBase<IGuiButton, WidgetType::Button> {
+public:
+    void apply_bound_text(const char* t) override { set_text(t); }   // IGuiWidget::bind_text
+    void bind_checked(std::function<bool()> p) override { checked_bind_ = std::move(p); base_.mark_dirty(); }
+protected:
+    void refresh_providers() override { if (checked_bind_) set_checked(checked_bind_()); }
+private:
+    std::function<bool()> checked_bind_;   // bind_checked
     ButtonType type_ = ButtonType::Normal;
     std::string text_, icon_;
     bool checked_ = false;
@@ -91,11 +98,13 @@ public:
     ButtonType get_button_type() const override { return type_; }
     void set_button_type(ButtonType t) override { type_ = t; }
     const char* get_text() const override { return text_.c_str(); }
-    void set_text(const char* t) override { text_ = t ? t : ""; }
+    // Dirty-on-change throughout: with an event-driven host, a property that
+    // changes the picture but marks nothing simply never reaches the screen.
+    void set_text(const char* t) override { const char* n = t ? t : ""; if (text_ == n) return; text_ = n; base_.mark_dirty(); }
     const char* get_icon() const override { return icon_.c_str(); }
-    void set_icon(const char* i) override { icon_ = i ? i : ""; }
+    void set_icon(const char* i) override { const char* n = i ? i : ""; if (icon_ == n) return; icon_ = n; base_.mark_dirty(); }
     bool is_checked() const override { return checked_; }
-    void set_checked(bool c) override { checked_ = c; }
+    void set_checked(bool c) override { if (checked_ == c) return; checked_ = c; base_.mark_dirty(); }
     int get_radio_group() const override { return radio_group_; }
     void set_radio_group(int g) override { radio_group_ = g; }
     void add_radio_peer(IGuiButton* peer) override { if (peer) radio_peers_.push_back(peer); }

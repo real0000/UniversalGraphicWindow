@@ -20,7 +20,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
-#include <functional>   // provider callbacks (e.g. IGuiToolbar::bind_enabled)
+#include <functional>   // provider callbacks (e.g. IGuiToolbar::bind_item_enabled)
 
 #include "../math_util.hpp"
 #include "gui_theme.hpp"   // GuiColor roles + GuiTheme (draw commands carry a role)
@@ -845,6 +845,28 @@ public:
     virtual bool is_enabled() const = 0;
     virtual void set_enabled(bool enabled) = 0;
     virtual WidgetState get_state() const = 0;
+
+    // -----------------------------------------------------------------------
+    // Property bindings — the widget DERIVES the property from the model
+    // -----------------------------------------------------------------------
+    // Bind once at build time and never touch the widget again: the context
+    // re-reads every provider before it lays the tree out, so a model change is
+    // on screen at the next paint with no app-side "sync" pass, no formatted
+    // string pushed per event, and no mirror of widget state. Providers are
+    // read on the UI thread; the setters behind them are no-change-guarded, so
+    // an unchanged model costs nothing and schedules no repaint.
+    //
+    // These are the properties EVERY widget has. Model-shaped bindings live on
+    // the widgets that own a model (IGuiListBox::bind_items,
+    // IGuiPropertyGrid::bind_form, IGuiCanvasView::bind_nodes, …).
+    virtual void bind_visible(std::function<bool()> provider) = 0;
+    virtual void bind_enabled(std::function<bool()> provider) = 0;
+    // Displayed string. Applied through the widget's own set_text() by every
+    // widget that shows text (label / button / text input / edit box) and
+    // ignored by the ones that don't. Never applied while the widget has focus,
+    // so a bound editor is seeded from the model but not yanked out from under
+    // someone typing in it.
+    virtual void bind_text(std::function<std::string()> provider) = 0;
 
     // Style
     virtual const GuiStyle& get_style() const = 0;

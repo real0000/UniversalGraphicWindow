@@ -35,17 +35,45 @@ class IWidgetInternal {
 public:
     virtual ~IWidgetInternal() = default;
     virtual void mark_dirty() = 0;
-    // Re-read a bound data provider. The renderer calls this on every widget as it
-    // collects, and the widget's own semantic APIs call it before acting on their
-    // model — so an application never has to ask for it either. Default no-op;
-    // only provider-bound widgets override.
+    // Re-read every bound provider. The context calls this on the whole tree before
+    // it lays out, and the widget's own semantic APIs call it before acting on their
+    // model — so an application never has to ask for it either. Implemented once by
+    // GuiWidget/WidgetBase<> (universal bind_* properties + refresh_providers()).
     virtual void refresh_bindings() {}
+    // Sink for IGuiWidget::bind_text: the widget's own set_text(). Default ignores
+    // it, so binding text to a widget that shows none is harmless.
+    virtual void apply_bound_text(const char* text) { (void)text; }
 };
 
 // A widget's internal channel (null if it is not a UGW widget).
 inline IWidgetInternal* internal_of(IGuiWidget* w) {
     return dynamic_cast<IWidgetInternal*>(w);
 }
+
+// ============================================================================
+// WidgetBindings - storage + evaluation for the universal IGuiWidget::bind_*
+// ============================================================================
+// One implementation for every widget: GuiWidget owns an instance, WidgetBase<>
+// forwards to the one inside its base_, and the panels that implement IGuiWidget
+// directly own their own.
+struct WidgetBindings {
+    std::function<bool()> visible, enabled;
+    std::function<std::string()> text;
+    std::string text_cache;
+
+    // Pull the bound values onto `w`, routing text through `sink`. Setters are
+    // no-change-guarded, so re-reading an unchanged model marks nothing dirty.
+    void apply(IGuiWidget* w, IWidgetInternal* sink) {
+        if (visible) w->set_visible(visible());
+        if (enabled) w->set_enabled(enabled());
+        // Focus wins over the model: a bound field is seeded when nobody is
+        // editing it, and left alone the moment someone is.
+        if (text && !w->has_focus()) {
+            std::string t = text();
+            if (t != text_cache) { text_cache = std::move(t); sink->apply_bound_text(text_cache.c_str()); }
+        }
+    }
+};
 
 // ============================================================================
 // GuiWidget - Concrete base implementing all IGuiWidget methods
@@ -99,8 +127,15 @@ public:
     // widget keeps its stale bounds until some other change forces a re-layout.
     void set_visible(bool v) override { if (visible_ != v) { visible_ = v; mark_dirty(); } }
     bool is_enabled() const override { return enabled_; }
-    void set_enabled(bool e) override { enabled_ = e; }
+    // Enabled feeds the drawn look (disabled_color) as much as the input path, so
+    // it invalidates on change like visibility does.
+    void set_enabled(bool e) override { if (enabled_ != e) { enabled_ = e; mark_dirty(); } }
     WidgetState get_state() const override { return state_; }
+    void bind_visible(std::function<bool()> p) override { binds_.visible = std::move(p); mark_dirty(); }
+    void bind_enabled(std::function<bool()> p) override { binds_.enabled = std::move(p); mark_dirty(); }
+    void bind_text(std::function<std::string()> p) override { binds_.text = std::move(p); mark_dirty(); }
+    // Universal bindings first, then whatever model this widget binds.
+    void refresh_bindings() override { binds_.apply(this, this); refresh_providers(); }
     const GuiStyle& get_style() const override { return style_; }
     // Dirty-on-change: a re-bound style (e.g. a list row's selection background)
     // must invalidate the cached render info — without this the new look only
@@ -145,7 +180,15 @@ public:
     void set_spacing(float s) override { spacing_ = s; }
     void layout_children() override {}
 
+    // Direct access for WidgetBase<>, which forwards its own bind_* here.
+    WidgetBindings& bindings() { return binds_; }
+
 protected:
+    // Re-read this widget's own data provider (items / form / nodes / …).
+    // Subclasses override THIS, not refresh_bindings, so the universal bindings
+    // above can never be skipped by forgetting to chain to the base.
+    virtual void refresh_providers() {}
+
     WidgetType type_;
     std::string name_;
     IGuiWidget* parent_ = nullptr;
@@ -173,6 +216,7 @@ protected:
     IGuiEventHandler* event_handler_ = nullptr;
     std::vector<IGuiWidget*> children_;
     ISizer* sizer_ = nullptr;       // optional: drives child layout + preferred size
+    WidgetBindings binds_;          // visible / enabled / text derived from the model
     mutable WidgetRenderInfo render_info_;
     mutable bool dirty_ = true;
     std::function<void()> dirty_listener_;   // fired on mark_dirty (context root only)
@@ -215,6 +259,12 @@ public:
     bool is_enabled() const override { return base_.is_enabled(); }
     void set_enabled(bool e) override { base_.set_enabled(e); }
     WidgetState get_state() const override { return base_.get_state(); }
+    void bind_visible(std::function<bool()> p) override { base_.bindings().visible = std::move(p); base_.mark_dirty(); }
+    void bind_enabled(std::function<bool()> p) override { base_.bindings().enabled = std::move(p); base_.mark_dirty(); }
+    void bind_text(std::function<std::string()> p) override { base_.bindings().text = std::move(p); base_.mark_dirty(); }
+    // Universal bindings first (applied to THIS wrapper, so set_visible/has_focus
+    // hit the widget's own overrides), then this widget's own model provider.
+    void refresh_bindings() override { base_.bindings().apply(this, this); refresh_providers(); }
     const GuiStyle& get_style() const override { return base_.get_style(); }
     void set_style(const GuiStyle& s) override { base_.set_style(s); }
     SizeMode get_width_mode() const override { return base_.get_width_mode(); }
@@ -256,6 +306,11 @@ public:
     float get_spacing() const override { return 0; }
     void set_spacing(float) override {}
     void layout_children() override {}
+
+protected:
+    // See GuiWidget::refresh_providers — subclasses override this, never
+    // refresh_bindings, so the universal bindings are always applied.
+    virtual void refresh_providers() {}
 };
 
 // ============================================================================

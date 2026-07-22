@@ -174,7 +174,7 @@ public:
         row_factory_=std::move(factory); row_binder_=std::move(binder);
         base_.mark_dirty();
     }
-    void refresh_bindings() override {
+    void refresh_providers() override {
         if (provider_) set_items(provider_());
         reconcile_row_widgets();
     }

@@ -244,7 +244,7 @@ public:
     void bind_wires(std::function<std::vector<CanvasWire>()> provider) override {
         wires_provider_ = std::move(provider); base_.mark_dirty();
     }
-    void refresh_bindings() override {
+    void refresh_providers() override {
         if (nodes_provider_) set_nodes(nodes_provider_());
         if (wires_provider_) set_wires(wires_provider_());
     }

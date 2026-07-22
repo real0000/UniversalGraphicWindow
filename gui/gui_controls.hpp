@@ -69,6 +69,8 @@ public:
     // Checked state (for Toggle, Radio, Checkbox types)
     virtual bool is_checked() const = 0;
     virtual void set_checked(bool checked) = 0;
+    // Checkbox/toggle state derived from the model (see IGuiWidget::bind_visible).
+    virtual void bind_checked(std::function<bool()> provider) = 0;
 
     // Radio group (for Radio type)
     virtual int get_radio_group() const = 0;

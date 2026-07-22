@@ -21,6 +21,7 @@ class GuiLabel : public WidgetBase<IGuiLabel, WidgetType::Label> {
     mutable WidgetRenderInfo ri_;
 public:
     const char* get_text() const override { return text_.c_str(); }
+    void apply_bound_text(const char* t) override { set_text(t); }   // IGuiWidget::bind_text
     // Dirty-on-change (see GuiWidget::set_style): re-bound text/looks must repaint.
     void set_text(const char* t) override {
         const char* nt = t ? t : "";
@@ -82,8 +83,19 @@ class GuiTextInput : public WidgetBase<IGuiTextInput, WidgetType::TextInput>,
                      public ITextEditTarget {
 public:
     bool wants_caret_blink() const override { return !read_only_; }  // blinking caret when editable+focused
+    void apply_bound_text(const char* t) override { set_text(t); }   // IGuiWidget::bind_text
+    void bind_placeholder(std::function<std::string()> p) override { ph_bind_ = std::move(p); base_.mark_dirty(); }
+    void bind_read_only(std::function<bool()> p) override { ro_bind_ = std::move(p); base_.mark_dirty(); }
+protected:
+    void refresh_providers() override {
+        if (ph_bind_) set_placeholder(ph_bind_().c_str());
+        if (ro_bind_) set_read_only(ro_bind_());
+    }
+public:
 private:
     std::string text_, placeholder_, preedit_;
+    std::function<std::string()> ph_bind_;   // bind_placeholder
+    std::function<bool()> ro_bind_;          // bind_read_only
     LabelStyle label_style_ = LabelStyle::default_style();
     TextInputStyle ti_style_ = TextInputStyle::default_style();
     // Selection = [min(anchor_,cursor_), max]. anchor_==cursor_ means no selection.
@@ -225,11 +237,13 @@ public:
         anchor_ = cursor_;
     }
     const char* get_placeholder() const override { return placeholder_.c_str(); }
-    void set_placeholder(const char* p) override { placeholder_ = p ? p : ""; }
+    void set_placeholder(const char* p) override { const char* n = p ? p : ""; if (placeholder_ == n) return; placeholder_ = n; base_.mark_dirty(); }
     bool is_password_mode() const override { return password_; }
-    void set_password_mode(bool e) override { password_ = e; }
+    void set_password_mode(bool e) override { if (password_ == e) return; password_ = e; base_.mark_dirty(); }
     bool is_read_only() const override { return read_only_; }
-    void set_read_only(bool r) override { read_only_ = r; }
+    // Also gates the caret blink (wants_caret_blink), so the context re-arms its
+    // timer on the repaint this schedules.
+    void set_read_only(bool r) override { if (read_only_ == r) return; read_only_ = r; base_.mark_dirty(); }
     int get_max_length() const override { return max_length_; }
     void set_max_length(int m) override { max_length_ = m; }
     void set_preedit(const char* t, int c) override {   // c = IME cursor in code points → byte offset
@@ -310,6 +324,7 @@ class GuiEditBox : public WidgetBase<IGuiEditBox, WidgetType::Custom>,
                    public ITextEditTarget {
 public:
     bool wants_caret_blink() const override { return !read_only_; }  // read-only bubbles never blink
+    void apply_bound_text(const char* t) override { set_text(t); }   // IGuiWidget::bind_text
 private:
     std::vector<std::string> lines_{""};
     // Word-wrap: visual display lines derived from lines_ + width (cached). When
@@ -669,7 +684,7 @@ public:
     bool is_current_line_highlighted() const override { return hl_line_; }
     void set_current_line_highlighted(bool h) override { hl_line_=h; }
     bool is_read_only() const override { return read_only_; }
-    void set_read_only(bool r) override { read_only_=r; }
+    void set_read_only(bool r) override { if (read_only_ == r) return; read_only_=r; base_.mark_dirty(); }
     // ── shared text-edit surface (built-in right-click menu / Ctrl combos) ──
     ITextEditTarget* text_edit_target() override { return this; }
     bool text_is_read_only() const override { return read_only_; }
