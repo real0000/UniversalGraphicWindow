@@ -18,7 +18,7 @@ namespace gui {
 // GuiSplitPanel Implementation
 // ============================================================================
 
-class GuiSplitPanel : public IGuiSplitPanel {
+class GuiSplitPanel : public IGuiSplitPanel, public IWidgetInvalidate {
 public:
     explicit GuiSplitPanel(SplitOrientation orientation)
         : orientation_(orientation)
@@ -137,7 +137,7 @@ public:
     }
     void mark_dirty() override {
         dirty_ = true;
-        if (parent_) parent_->mark_dirty();
+        if (auto* pi = invalidator_of(parent_)) pi->mark_dirty();
     }
     bool is_dirty() const override { return dirty_; }
 
@@ -602,7 +602,7 @@ struct DockPanelEntry {
 // GuiDockPanel Implementation
 // ============================================================================
 
-class GuiDockPanel : public IGuiDockPanel {
+class GuiDockPanel : public IGuiDockPanel, public IWidgetInvalidate {
 public:
     GuiDockPanel()
         : style_(DockPanelStyle::default_style())
@@ -751,7 +751,7 @@ public:
     }
     void mark_dirty() override {
         dirty_ = true;
-        if (parent_) parent_->mark_dirty();
+        if (auto* pi = invalidator_of(parent_)) pi->mark_dirty();
     }
     bool is_dirty() const override { return dirty_; }
 

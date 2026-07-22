@@ -642,7 +642,7 @@ struct WidgetRenderInfo {
                             math::make_box(x,y,w,h), uv, tint, depth, clip});
     }
 
-    // Discard all pools and cached data; called by IGuiWidget::mark_dirty().
+    // Discard all pools and cached data; called when a widget invalidates itself.
     void invalidate() {
         valid_ = false;
         colors.clear();
@@ -892,17 +892,10 @@ public:
     // widget's model). Default no-op — only provider-bound widgets override.
     virtual void refresh_bindings() {}
 
-    // INTERNAL invalidation. Widgets call this on themselves when their own state
-    // changes, and it propagates up the ancestor chain; the context turns it into a
-    // scheduled repaint. Deciding that the picture changed is the widget's job, so
-    // application code should never need to call it: mutate through the widget's
-    // API (set_text, set_items, set_view, …) and it invalidates itself, or call
-    // refresh_bindings() when the change is in data the widget only reads. If you
-    // find yourself reaching for mark_dirty() from an app, the mutator you used is
-    // missing its self-invalidation — fix it there instead.
-    // Implementations must also call mark_dirty() on their parent (if any)
-    // so the entire ancestor chain is invalidated bottom-up.
-    virtual void mark_dirty() = 0;
+    // (Invalidation is deliberately absent here — see IWidgetInvalidate in the
+    // internal gui_widget_base.hpp. A widget decides for itself that its picture
+    // changed; app code mutates through the widget API, or calls
+    // refresh_bindings() when the change is in data the widget only reads.)
 
     // True if render info needs to be rebuilt on the next get_render_info call.
     virtual bool is_dirty() const = 0;

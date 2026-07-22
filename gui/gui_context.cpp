@@ -39,6 +39,7 @@ IGuiScrollView* create_scroll_view_widget();
 
 // gui_list.cpp
 IGuiListBox* create_list_box_widget();
+IGuiChoiceCard* create_choice_card_widget();
 IGuiCanvasView* create_canvas_view_widget();
 IGuiCollapseSection* create_collapse_section_widget();
 IGuiComboBox* create_combo_box_widget();
@@ -363,7 +364,7 @@ class GuiContext : public IGuiContext {
             case 4: t->text_select_all(); break;
         }
         if (text_menu_) text_menu_->hide();
-        if (text_menu_widget_) text_menu_widget_->mark_dirty();
+        if (auto* pi = invalidator_of(text_menu_widget_)) pi->mark_dirty();
     }
 
     // Mouse handler: feeds all mouse events into the widget tree, raw.
@@ -601,7 +602,7 @@ public:
         // Colours are resolved at collect from cached (unchanged) draw commands, so
         // force a rebuild of the whole tree's render info to pick up the new palette.
         root_.mark_dirty();
-        for (auto* ov : overlays_) if (ov) ov->mark_dirty();
+        for (auto* ov : overlays_) if (auto* pi = invalidator_of(ov)) pi->mark_dirty();
         if (host_) host_->request_redraw();
     }
 
@@ -779,6 +780,11 @@ public:
     }
     IGuiListBox* create_list_box() override {
         auto* p=create_list_box_widget(); owned_widgets_.emplace_back(p); return p;
+    }
+    IGuiChoiceCard* create_choice_card() override {
+        auto* p=create_choice_card_widget(); owned_widgets_.emplace_back(p);
+        if (text_measurer_) p->set_text_measurer(text_measurer_);
+        return p;
     }
     IGuiCanvasView* create_canvas_view() override {
         auto* p=create_canvas_view_widget(); owned_widgets_.emplace_back(p);

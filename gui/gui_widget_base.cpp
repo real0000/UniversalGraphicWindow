@@ -129,7 +129,7 @@ const WidgetRenderInfo& GuiWidget::get_render_info(Window*) const {
 
 void GuiWidget::mark_dirty() {
     dirty_ = true;
-    if (parent_) parent_->mark_dirty();
+    if (parent_inv_) parent_inv_->mark_dirty();
     // Invalidation sink (set only on the context root): any descendant marking
     // dirty bubbles here, so the event-driven context learns "something changed"
     // and schedules a re-layout + repaint — no per-frame poll, no app call.
