@@ -884,13 +884,22 @@ public:
 
     // Called by the context once per collect, just before get_render_info(), so a
     // widget can refresh its model from a bound data provider (set once by the app)
-    // instead of the app pushing on every change: the app mutates its own data and
-    // asks for a repaint, and the widget re-reads the provider here (a set_items/
-    // set_properties that no-ops when unchanged). Non-const on purpose (it updates
-    // the widget's model). Default no-op — only provider-bound widgets override.
+    // instead of the app pushing on every change. The context calls this before a
+    // render; the APP calls it when it has changed the data behind a provider —
+    // that is the supported way to say "my model moved on", and it is idempotent:
+    // the re-read is a set_items/set_properties that no-ops (and schedules no
+    // repaint) when nothing actually differs. Non-const on purpose (it updates the
+    // widget's model). Default no-op — only provider-bound widgets override.
     virtual void refresh_bindings() {}
 
-    // Mark this widget's cached render info as stale.
+    // INTERNAL invalidation. Widgets call this on themselves when their own state
+    // changes, and it propagates up the ancestor chain; the context turns it into a
+    // scheduled repaint. Deciding that the picture changed is the widget's job, so
+    // application code should never need to call it: mutate through the widget's
+    // API (set_text, set_items, set_view, …) and it invalidates itself, or call
+    // refresh_bindings() when the change is in data the widget only reads. If you
+    // find yourself reaching for mark_dirty() from an app, the mutator you used is
+    // missing its self-invalidation — fix it there instead.
     // Implementations must also call mark_dirty() on their parent (if any)
     // so the entire ancestor chain is invalidated bottom-up.
     virtual void mark_dirty() = 0;
@@ -1003,6 +1012,7 @@ public:
 #include "gui_tree.hpp"         // IGuiTreeView
 #include "gui_tab.hpp"          // IGuiTabControl
 #include "gui_list.hpp"         // IGuiListBox, IGuiComboBox
+#include "gui_choice.hpp"       // IGuiChoiceCard
 #include "gui_dialog.hpp"       // IGuiDialog, IGuiPopup
 #include "gui_menu.hpp"         // IGuiMenu, IGuiMenuBar
 #include "gui_toolbar.hpp"      // IGuiToolbar, IGuiStatusBar

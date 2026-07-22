@@ -135,7 +135,7 @@ public:
         return true;   // in-bounds click belongs to the list (entry is hit-guarded)
     }
     int add_item(const char* text,const char* icon) override {
-        int id=next_id_++; items_.push_back({id,text?text:"",icon?icon:""}); return id;
+        int id=next_id_++; items_.push_back({id,text?text:"",icon?icon:""}); base_.mark_dirty(); return id;
     }
     // Idempotent whole-list rebind: if the incoming model matches the current rows
     // (id/text/swatch/action/enabled + selection) nothing changes and no repaint is
@@ -451,23 +451,25 @@ public:
         }
         return false;
     }
-    int add_item(const char* text,const char* icon) override { int id=next_id_++; items_.push_back({id,text?text:"",icon?icon:""}); return id; }
+    // Every item mutator marks itself dirty: populating a combo is a data push, and
+    // the widget — not its caller — owns deciding that the picture changed.
+    int add_item(const char* text,const char* icon) override { int id=next_id_++; items_.push_back({id,text?text:"",icon?icon:""}); base_.mark_dirty(); return id; }
     int insert_item(int idx,const char* text,const char* icon) override {
         int id=next_id_++; if(idx<0)idx=0; if(idx>(int)items_.size())idx=(int)items_.size();
-        items_.insert(items_.begin()+idx,{id,text?text:"",icon?icon:""}); return id;
+        items_.insert(items_.begin()+idx,{id,text?text:"",icon?icon:""}); base_.mark_dirty(); return id;
     }
-    bool remove_item(int id) override { int i=find_idx(id); if(i<0)return false; items_.erase(items_.begin()+i); return true; }
-    void clear_items() override { items_.clear(); selected_=-1; }
+    bool remove_item(int id) override { int i=find_idx(id); if(i<0)return false; items_.erase(items_.begin()+i); base_.mark_dirty(); return true; }
+    void clear_items() override { if(items_.empty()&&selected_<0) return; items_.clear(); selected_=-1; base_.mark_dirty(); }
     int get_item_count() const override { return (int)items_.size(); }
     const char* get_item_text(int id) const override { int i=find_idx(id); return i>=0?items_[i].text.c_str():""; }
-    void set_item_text(int id,const char* t) override { int i=find_idx(id); if(i>=0)items_[i].text=t?t:""; }
+    void set_item_text(int id,const char* t) override { int i=find_idx(id); if(i>=0&&items_[i].text!=(t?t:"")){items_[i].text=t?t:""; base_.mark_dirty();} }
     const char* get_item_icon(int id) const override { int i=find_idx(id); return i>=0?items_[i].icon.c_str():""; }
-    void set_item_icon(int id,const char* ic) override { int i=find_idx(id); if(i>=0)items_[i].icon=ic?ic:""; }
+    void set_item_icon(int id,const char* ic) override { int i=find_idx(id); if(i>=0&&items_[i].icon!=(ic?ic:"")){items_[i].icon=ic?ic:""; base_.mark_dirty();} }
     bool is_item_enabled(int id) const override { int i=find_idx(id); return i>=0?items_[i].enabled:false; }
-    void set_item_enabled(int id,bool e) override { int i=find_idx(id); if(i>=0)items_[i].enabled=e; }
+    void set_item_enabled(int id,bool e) override { int i=find_idx(id); if(i>=0&&items_[i].enabled!=e){items_[i].enabled=e; base_.mark_dirty();} }
     int get_selected_item() const override { return selected_; }
     void set_selected_item(int id) override { if(selected_==id) return; selected_=id; base_.mark_dirty(); if(handler_) handler_->on_selection_changed(id); }
-    void set_item_value(int id,const char* v) override { int i=find_idx(id); if(i>=0)items_[i].value=v?v:""; }
+    void set_item_value(int id,const char* v) override { int i=find_idx(id); if(i>=0&&items_[i].value!=(v?v:"")){items_[i].value=v?v:""; base_.mark_dirty();} }
     const char* get_item_value(int id) const override { int i=find_idx(id); return i>=0?items_[i].value.c_str():""; }
     const char* get_selected_value() const override { int i=find_idx(selected_); return i>=0?items_[i].value.c_str():""; }
     void set_selected_value(const char* v) override {
@@ -475,7 +477,7 @@ public:
         for(const auto& it:items_) if(it.value==want){ set_selected_item(it.id); return; }
     }
     const char* get_placeholder() const override { return placeholder_.c_str(); }
-    void set_placeholder(const char* t) override { placeholder_=t?t:""; }
+    void set_placeholder(const char* t) override { if(placeholder_!=(t?t:"")){placeholder_=t?t:""; base_.mark_dirty();} }
     bool is_open() const override { return open_; }
     // open/close/select self-invalidate so the widget repaints its collapsed label
     // and dropdown on its own — no app callback needed just to trigger a redraw.
