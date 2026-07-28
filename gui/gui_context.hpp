@@ -224,6 +224,7 @@ public:
     virtual IGuiTreeView* create_tree_view() = 0;
     virtual IGuiTabControl* create_tab_control(TabPosition position) = 0;
     virtual IGuiListBox* create_list_box() = 0;
+    virtual IGuiChoiceCard* create_choice_card() = 0;
     virtual IGuiComboBox* create_combo_box() = 0;
     virtual IGuiCanvasView* create_canvas_view() = 0;
     virtual IGuiCollapseSection* create_collapse_section() = 0;

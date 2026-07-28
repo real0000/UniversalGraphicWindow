@@ -186,6 +186,15 @@ PropertyGridStyle PropertyGridStyle::default_style() {
 
 // ── List box + combo box ─────────────────────────────────────────────────────
 
+ChoiceCardStyle ChoiceCardStyle::default_style() {
+    ChoiceCardStyle s;
+    s.background_color = color_rgba8(38, 38, 42);
+    s.border_color     = color_rgba8(64, 64, 70);
+    s.prompt_color     = color_rgba8(226, 226, 232);
+    s.answer_color     = color_rgba8(150, 200, 150);
+    return s;
+}
+
 ListBoxStyle ListBoxStyle::default_style() {
     ListBoxStyle s;
     s.row_background = color_rgba8(45, 45, 48);

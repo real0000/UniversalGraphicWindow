@@ -266,6 +266,24 @@ struct ListBoxStyle {
     static ListBoxStyle default_style();
 };
 
+// ChoiceCard: a prompt plus a set of answer options (gui_choice.hpp).
+struct ChoiceCardStyle {
+    math::Vec4 background_color;      // card fill (alpha 0 = none)
+    math::Vec4 border_color;          // card outline (alpha 0 = none)
+    math::Vec4 prompt_color;          // the question text
+    math::Vec4 answer_color;          // the resolved answer line
+    float corner_radius = 4.0f;
+    float padding = 8.0f;             // card inset around prompt + options
+    float prompt_gap = 6.0f;          // prompt -> options
+    float prompt_font_size = 13.0f;
+    float prompt_line_height = 1.35f; // multiple of prompt_font_size
+    float option_height = 24.0f;
+    float option_gap = 4.0f;
+    float editor_height = 24.0f;      // inline free-text editor row
+
+    static ChoiceCardStyle default_style();
+};
+
 struct ComboBoxStyle {
     math::Vec4 background_color;
     math::Vec4 hover_background;
