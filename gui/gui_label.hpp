@@ -132,6 +132,11 @@ public:
     virtual void on_cursor_moved(const TextPosition& position) = 0;
     virtual void on_selection_changed(const TextRange& selection) = 0;
     virtual void on_right_click(const math::Vec2& pos) {}
+    // The user dragged the resize grip (see set_user_resizable): `height` is the new
+    // requested height in px. An owner that positions the box itself (not via a sizer)
+    // applies it; a sizer-placed box needs nothing — get_preferred_size() reports it.
+    // Default no-op.
+    virtual void on_resized(float height) { (void)height; }
 };
 
 class IGuiEditBox : public IGuiWidget {
@@ -199,6 +204,16 @@ public:
     virtual TextPosition find(const char* text, const TextPosition& start, bool case_sensitive = true, bool whole_word = false) const = 0;
     virtual int replace(const char* search, const char* replacement, bool case_sensitive = true, bool whole_word = false) = 0;
     virtual int replace_all(const char* search, const char* replacement, bool case_sensitive = true, bool whole_word = false) = 0;
+
+    // User-resizable height. When on, the box draws a small drag grip in its
+    // bottom-right corner; dragging it changes the box height, clamped to
+    // [min_h, max_h] (max_h <= 0 = unbounded). The chosen height is reported via
+    // get_user_height() and IEditBoxEventHandler::on_resized, and the box marks
+    // itself dirty + reports the height through get_preferred_size(), so a
+    // sizer-placed box grows on its own and a manually-placed one (e.g. the
+    // PropertyGrid's inline editor) reads it back. Off by default.
+    virtual void set_user_resizable(bool on, float min_h = 0.0f, float max_h = 0.0f) = 0;
+    virtual float get_user_height() const = 0;   // last dragged height (0 = never dragged)
 
     // Word wrap
     virtual EditBoxWordWrap get_word_wrap() const = 0;

@@ -88,6 +88,11 @@ struct PropertyModel {
     std::vector<std::string> option_values;            // enum VALUES (parallel; empty → value == label)
     int         enum_index = 0;
     bool        read_only = false;
+    // Multi-line, user-resizable text (String rows only): the value box is a tall,
+    // word-wrapping editor with a drag grip to change its height, instead of the
+    // one-line field. Height persists per row (keyed by `key`) across rebuilds, so
+    // the app just declares `multiline = true` once and never tracks the size.
+    bool        multiline = false;
     std::vector<PropertyAction> actions;               // right-aligned row buttons
 };
 
@@ -179,6 +184,19 @@ public:
 class TextPropertyField : public IPropertyField {
 public:
     TextPropertyField(std::string name, std::string key, bool read_only = false)
+        : name_(std::move(name)), key_(std::move(key)), ro_(read_only) {}
+    void emit(const IPropertyFieldSource& src, const std::string& prefix,
+              std::vector<PropertyModel>& into) const override;
+private:
+    std::string name_, key_; bool ro_;
+};
+
+// Multi-line, user-resizable free-text row (a prompt / template / note). Same
+// value source as TextPropertyField, but the grid renders a tall word-wrapping
+// editor with a drag grip; the height is remembered per row.
+class MultilineTextField : public IPropertyField {
+public:
+    MultilineTextField(std::string name, std::string key, bool read_only = false)
         : name_(std::move(name)), key_(std::move(key)), ro_(read_only) {}
     void emit(const IPropertyFieldSource& src, const std::string& prefix,
               std::vector<PropertyModel>& into) const override;

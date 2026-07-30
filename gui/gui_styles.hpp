@@ -231,6 +231,11 @@ struct PropertyGridStyle {
     float label_font   = 11.0f;         // label font px (value text uses font_size)
     float row_gap      = 8.0f;          // gap below each field
     float side_padding = 10.0f;         // left/right content inset
+    // Multi-line value fields (PropertyModel::multiline): default and minimum box
+    // height in px. The user can drag between min and the content, and the height
+    // persists per row.
+    float multiline_default_height = 96.0f;
+    float multiline_min_height     = 40.0f;
 
     static PropertyGridStyle default_style();
 };

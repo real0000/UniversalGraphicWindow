@@ -379,9 +379,23 @@ private:
     bool line_nums_=true, hl_line_=true, read_only_=false, tab_spaces_=true;
     int tab_size_=4, first_vis_=0;
     bool sb_drag_=false, click_drag_=false;
+    // User-resize grip (set_user_resizable): rz_h_ is the current dragged height
+    // (0 = never dragged, follow the assigned bounds); rz_drag_ tracks the drag with
+    // its start mouse-y and start height.
+    bool resizable_=false, rz_drag_=false;
+    float rz_min_=0.0f, rz_max_=0.0f, rz_h_=0.0f, rz_dy0_=0.0f, rz_h0_=0.0f;
+    static constexpr float kGrip = 14.0f;   // grip square edge, px
     ITextMeasurer* measurer_ = nullptr;
     mutable WidgetRenderInfo ri_;
     float content_height() const { return (float)lines_.size() * style_.font_size * style_.line_height; }
+    // Bottom-right drag-grip box, in screen coords (empty when not resizable).
+    math::Box grip_rect() const {
+        if (!resizable_) return math::make_box(0,0,0,0);
+        auto b = base_.get_bounds();
+        const float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        const float bw = math::box_width(b), bh = math::box_height(b);
+        return math::make_box(bx + bw - kGrip, by + bh - kGrip, kGrip, kGrip);
+    }
     TextPosition cursor_from_pixel(const math::Vec2& p) const {
         auto b = base_.get_bounds();
         float bx = math::x(math::box_min(b));
@@ -512,6 +526,13 @@ public:
         return true;
     }
     bool handle_mouse_move(const math::Vec2& p) override {
+        if (rz_drag_) {
+            float h = rz_h0_ + (math::y(p) - rz_dy0_);
+            if (h < rz_min_) h = rz_min_;
+            if (rz_max_ > 0.0f && h > rz_max_) h = rz_max_;
+            if (h != rz_h_) { rz_h_ = h; base_.mark_dirty(); if (handler_) handler_->on_resized(rz_h_); }
+            return true;
+        }
         if (sb_drag_) {
             set_scroll_from_pixel(scrollbar_offset_from_mouse(base_.get_bounds(), content_height(), math::y(p)));
             return true;
@@ -527,8 +548,14 @@ public:
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
         // Clear drag state on release even when mouse has moved outside bounds
-        if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; click_drag_ = false; }
+        if (btn == MouseButton::Left && !pressed) { sb_drag_ = false; click_drag_ = false; rz_drag_ = false; }
         if (!base_.is_enabled() || !hit_test(p)) return false;
+        // The resize grip claims the press before caret/scrollbar/selection.
+        if (btn == MouseButton::Left && pressed && resizable_ && math::box_contains(grip_rect(), p)) {
+            rz_drag_ = true; rz_dy0_ = math::y(p);
+            rz_h0_ = rz_h_ > 0.0f ? rz_h_ : math::box_height(base_.get_bounds());
+            return true;
+        }
         if (btn == MouseButton::Left && pressed) {
             float ch = content_height();
             if (scrollbar_hit_test(base_.get_bounds(), ch, p)) {
@@ -715,9 +742,19 @@ public:
     void set_editbox_style(const EditBoxStyle& s) override { style_=s; }
     void set_editbox_event_handler(IEditBoxEventHandler* h) override { handler_=h; }
     void set_text_measurer(ITextMeasurer* m) override { measurer_=m; }
+    void set_user_resizable(bool on, float min_h, float max_h) override {
+        resizable_ = on; rz_min_ = min_h; rz_max_ = max_h;
+        if (rz_h_ > 0.0f) { if (rz_h_ < rz_min_) rz_h_ = rz_min_; if (rz_max_ > 0.0f && rz_h_ > rz_max_) rz_h_ = rz_max_; }
+        base_.mark_dirty();
+    }
+    float get_user_height() const override { return rz_h_; }
 
     math::Vec2 get_preferred_size() const override {
-        return pref_size_for_width(math::box_width(base_.get_bounds()));
+        math::Vec2 p = pref_size_for_width(math::box_width(base_.get_bounds()));
+        // A user-dragged height overrides the content-fit height, so a sizer-placed
+        // box keeps exactly the size the user dragged it to.
+        if (rz_h_ > 0.0f) p = math::Vec2(math::x(p), rz_h_);
+        return p;
     }
 
     const WidgetRenderInfo& get_render_info(Window*) const override {
@@ -833,6 +870,17 @@ public:
             ri_.push_outline(bx-1, by-1, bw+2, bh+2, math::Vec4(0,0.48f,0.8f,1), d, noclip);
         if (s.border_color.w > 0.0f)
             ri_.push_outline(bx, by, bw, bh, s.border_color, d, noclip);
+
+        // Resize grip: three stacked ticks tucked into the bottom-right corner (the
+        // familiar "drag to resize" affordance). Drawn last so it sits over content.
+        if (resizable_) {
+            const math::Vec4 gc(0.55f, 0.57f, 0.62f, 0.95f);
+            const float cx = bx + bw, cy = by + bh;
+            for (int k = 1; k <= 3; ++k) {
+                float off = k * 3.0f;
+                ri_.push_rect(cx - off - 3.0f, cy - off - 3.0f, off + 1.0f, 2.0f, gc, d++, noclip);
+            }
+        }
 
         ri_.finalize();
         base_.clear_dirty();
