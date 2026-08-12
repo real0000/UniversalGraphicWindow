@@ -87,9 +87,10 @@ static void make_ortho(float out[16], float w, float h) {
 // ============================================================================
 
 static void draw_render_info(WidgetRenderInfo& ri) {
-    // GpuGuiRenderer applies the per-widget clip rects (panels) itself, using g_dpi_scale
-    // to turn the logical-px clip boxes into physical scissor rectangles.
-    g_gui->render(g_cmd, ri, g_atlas, g_proj, g_fb_w, g_fb_h, g_dpi_scale);
+    // GpuGuiRenderer applies the per-widget clip rects (panels) itself, drawing each as a
+    // stencil mask through g_proj — the same matrix as the content, so the logical-px clip
+    // boxes need no conversion.
+    g_gui->render(g_cmd, ri, g_atlas, g_proj, g_fb_w, g_fb_h);
 }
 
 // ============================================================================
@@ -122,7 +123,7 @@ static void draw_design_widgets(GuiEditor& editor, WidgetRenderInfo& design_ri, 
     dp[12] = g_proj[0] * ox + g_proj[12];
     dp[13] = g_proj[5] * oy + g_proj[13];
     dp[15] = 1.0f;
-    g_gui->render(g_cmd, design_ri, g_atlas, dp, g_fb_w, g_fb_h, g_dpi_scale);
+    g_gui->render(g_cmd, design_ri, g_atlas, dp, g_fb_w, g_fb_h);
 }
 
 // ============================================================================
@@ -552,11 +553,14 @@ int main(int argc, char* argv[]) {
 
         // Record + present one frame.
         cmd->begin();
-        cmd->set_render_target_backbuffer();
+        // The GUI clips with stencil masks, so the pass needs a stencil buffer cleared to 0.
+        cmd->set_render_target_backbuffer(gui_rend.depth_stencil_target(sw_p, sh_p));
         window::Viewport rvp; rvp.x = 0; rvp.y = 0; rvp.width = (float)sw_p; rvp.height = (float)sh_p;
         rvp.min_depth = 0; rvp.max_depth = 1;
         cmd->set_viewport(rvp);
         cmd->clear_color(ClearColor(0.12f, 0.12f, 0.13f, 1.0f));
+        cmd->clear_depth_stencil(ClearDepthStencil{ 1.0f, 0 });
+        gui_rend.begin_frame();
 
         // 1. Design canvas (background + zoom/pan'd widgets) — under the chrome.
         if (design_ri) draw_design_widgets(gui_editor, *design_ri, sh);

@@ -728,6 +728,22 @@ static void test_blit(Ctx& c) {
     const uint8_t* p = at(px, RT_W, 32, 32);
     check("cmd.blit", near_rgba(p, 0,255,0,255, 2), "blit src->dst -> " + rgba_str(p));
 
+    // Scaled blit: a quarter of the source stretched over the whole destination. This is a
+    // different code path from the 1:1 case — GL and Vulkan scale natively (glBlitFramebuffer
+    // / vkCmdBlitImage) while D3D has no scaling copy at all and needs a quad pass — so a
+    // same-size blit alone would leave that path untested.
+    RenderTargetHandle dst2 = new_rt(c);
+    begin_rt(c, dst2); c.cmd->clear_color(ClearColor(0,0,1,1));   // blue: unwritten pixels show up
+    c.cmd->blit_render_target(dst2, src, 0,0,RT_W/2,RT_H/2, 0,0,RT_W,RT_H, false);
+    c.cmd->end(); submit_commander(c.gfx, c.cmd);
+
+    auto px2 = read_rt(c, dst2);
+    const uint8_t* q0 = at(px2, RT_W, 8, 8);            // near the destination's top-left
+    const uint8_t* q1 = at(px2, RT_W, RT_W - 8, RT_H - 8);  // and its bottom-right
+    check("cmd.blit_scaled", near_rgba(q0, 0,255,0,255, 2) && near_rgba(q1, 0,255,0,255, 2),
+          "quarter src stretched to full dst -> " + rgba_str(q0) + " / " + rgba_str(q1));
+    c.dev->destroy_render_target(dst2);
+
     c.dev->destroy_render_target(src); c.dev->destroy_render_target(dst);
     c.dev->destroy_buffer(vb); c.dev->destroy_pipeline(pipe);
     c.dev->destroy_shader(vs); c.dev->destroy_shader(fs);
@@ -942,6 +958,10 @@ static bool run_backend(Backend backend, const char* name) {
 }
 
 int main(int argc, char** argv) {
+    // Unbuffered: this harness drives GPU drivers, so a hard crash is a possible outcome.
+    // With the default block buffering on a redirected stdout, everything printed before
+    // the crash is lost and the failing test is invisible — exactly when it matters most.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("Graphics pipeline conformance test\n");
 
     struct { Backend b; const char* n; } backends[] = {

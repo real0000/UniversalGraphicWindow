@@ -26,6 +26,7 @@
 
 #include "../graphics_api.hpp"
 #include "../math_util.hpp"
+#include "stencil_clip.hpp"
 
 #include <vector>
 
@@ -60,21 +61,26 @@ public:
 
     // Start a batch. `view_proj` is a 16-float column-major matrix mapping world
     // (or UI) space → clip space; `viewport_w/h` are the pixel dimensions the camera
-    // renders into (used both for curve LOD and the flush-time scissor). Clears any
+    // renders into (used both for curve LOD and for sizing the clip mask). Clears any
     // geometry from the previous frame.
     void begin(const float view_proj[16], int viewport_w, int viewport_h);
 
+    // Clipping needs a stencil buffer and a mask pipeline, both owned by a shared
+    // StencilClipper (see stencil_clip.hpp) — shared so references allocated by this
+    // renderer and by the GUI renderer in the same frame cannot collide. Without one,
+    // end()'s `clip` argument is ignored and the batch draws unclipped.
+    void set_clipper(StencilClipper* clipper) { clipper_ = clipper; }
+
     // Upload the batched geometry and draw it (lines then triangles) into the
-    // currently-bound render target. A full-viewport scissor is set so Vulkan/D3D12
-    // dynamic-scissor draws aren't clipped away.
+    // currently-bound render target.
     //
-    // `clip` (optional, pixels, top-left origin, same space as the viewport) bounds
-    // the draw to a sub-rect instead. Callers that emit a widget's vector content
-    // pass that widget's effective clip so the batch obeys the widget hierarchy —
-    // without it the underlay would spill over whatever is laid out beside it. An
-    // empty/zero-area clip draws nothing.
-    struct ClipRect { int x = 0, y = 0, w = 0, h = 0; };
-    void end(GraphicCommander* cmd, const ClipRect* clip = nullptr);
+    // `clip` (optional, in the same pixel space as the viewport) bounds the draw to a
+    // sub-region instead. Callers that emit a widget's vector content pass that
+    // widget's effective clip so the batch obeys the widget hierarchy — without it the
+    // underlay would spill over whatever is laid out beside it. A degenerate clip draws
+    // nothing. The clip is a ClipShape, not a rect: it may be rounded and rotated, which
+    // the scissor rect this replaced could not express.
+    void end(GraphicCommander* cmd, const ClipShape* clip = nullptr);
 
     // Override the curve LOD parameters set at init (see VectorRendererDesc).
     void set_curve_lod(float tolerance_px, int min_segments, int max_segments);
@@ -148,6 +154,15 @@ private:
     Backend              backend_ = Backend::OpenGL;
     ShaderHandle         vs_basic_, fs_color_, vs_thick_;
     PipelineHandle       tri_pipeline_, thick_pipeline_;   // solid fills, line quads
+    // Stencil-tested variants, used when end() is given a clip. A draw opts into its clip
+    // by picking the variant and setting the reference; the scissor rect end() still sets
+    // is a full-viewport one, present only to satisfy Vulkan/D3D12 dynamic state.
+    //
+    // Unlike the GUI renderer (one pipeline shape, see its init()), keeping both variants
+    // is safe here because a given instance does not alternate: one wired to a clipper is
+    // always handed a clip, one without a clipper never is.
+    PipelineHandle       tri_pipeline_clip_, thick_pipeline_clip_;
+    StencilClipper*      clipper_ = nullptr;   // shared, not owned
 
     // Per-frame constants (view-projection + viewport). Bound by slot (works on every backend
     // now) from a RING of small buffers so multiple begin()/end() batches per frame don't clobber

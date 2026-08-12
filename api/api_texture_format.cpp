@@ -189,6 +189,16 @@ int texture_format_block_size(TextureFormat format) {
     }
 }
 
+// True for the combined depth-stencil formats — the ones that can back a stencil test.
+// (A depth-only format like D32_FLOAT is a depth-stencil format but carries no stencil.)
+bool texture_format_has_stencil(TextureFormat format) {
+    switch (format) {
+    case TextureFormat::D24_UNORM_S8_UINT:
+    case TextureFormat::D32_FLOAT_S8_UINT: return true;
+    default:                               return false;
+    }
+}
+
 bool texture_format_is_compressed(TextureFormat format) {
     switch (format) {
     case TextureFormat::BC1_UNORM:

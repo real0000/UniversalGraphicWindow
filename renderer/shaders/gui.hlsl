@@ -1,6 +1,6 @@
 // gui.hlsl — GUI renderer shaders (read at runtime from renderer/shaders/).
 //
-// One vertex shader feeds two fragment shaders (atlas/solid/SDF and image).
+// One vertex shader feeds three fragment shaders (atlas/solid/SDF, image, clip mask).
 // Vertex format: pos.xy | uvw (z selects the fragment path) | rgba | sdf.
 //   uvw.z <  -1.5  → procedural SDF shape (rounded box / circle / ring);
 //                     uvw.xy = local position, sdf = (half_w, half_h, radius, border)
@@ -57,4 +57,27 @@ float4 ps_atlas(VSOut i) : SV_Target {
     float aa = fwidth(d);
     float a  = aa > 0.0 ? smoothstep(0.5 - aa, 0.5 + aa, d) : step(0.5, d);
     return float4(i.color.rgb, i.color.a * a);
+}
+
+// Clip mask — the stencil-buffer replacement for scissor clipping. Drawn with colour
+// writes masked off and a stencil-write pipeline, so the ONLY effect is which pixels
+// reach the stencil op: a surviving fragment stamps the clip's reference value.
+//
+// The shape is the same rounded box as ps_atlas's SDF path, evaluated in LOCAL space
+// (uvw.xy) while the vertex shader places the quad in screen space. That separation is
+// what makes the mask independent of the quad's orientation: the CPU can rotate, skew
+// or scale the four corners and the mask stays exact, which a scissor rect — always
+// axis-aligned — cannot express. sdf = (half_w, half_h, corner_radius, unused).
+//
+// The test is hard-edged (no coverage AA): a stencil bit is set or it isn't, and a
+// partially-covered edge pixel must pick a side. `d <= 0` keeps the boundary pixel,
+// matching the inclusive edge a scissor rect had.
+float4 ps_clip_mask(VSOut i) : SV_Target {
+    float2 p = i.uvw.xy;
+    float2 b = i.sdf.xy;
+    float  r = i.sdf.z;
+    float2 q = abs(p) - b + r;
+    float  d = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+    if (d > 0.0) discard;
+    return float4(1.0, 1.0, 1.0, 1.0);   // colour writes are masked off; value is irrelevant
 }

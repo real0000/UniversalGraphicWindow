@@ -46,6 +46,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 
 namespace window {
 
@@ -65,6 +66,8 @@ public:
     std::string device_name;
     bool owns_instance = false;
     bool owns_device = true;
+    // Optional feature sets actually enabled below (see the device-extension opt-in).
+    bool enabled_mesh_shader = false, enabled_ray_tracing = false;
     uint32_t queue_family_index = 0;
     int backbuffer_count = 0;             // actual swapchain image count
     SwapMode swap_mode = SwapMode::Auto;  // present mode actually in effect (reflects fallback)
@@ -118,6 +121,11 @@ public:
         out->surface               = surface;
         out->swapchain             = swapchain;
         out->swapchain_format      = static_cast<uint32_t>(swapchain_format);
+        out->mesh_shader           = enabled_mesh_shader;
+        out->ray_tracing           = enabled_ray_tracing;
+        VkPhysicalDeviceProperties props{};
+        if (physical_device) vkGetPhysicalDeviceProperties(physical_device, &props);
+        out->api_version           = props.apiVersion;
         return device != VK_NULL_HANDLE;
     }
 
@@ -244,7 +252,15 @@ static VkInstance create_vulkan_instance(const std::vector<const char*>& extensi
     app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     app_info.pEngineName = "Window";
     app_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    // Request the highest API version the loader supports, not a hardcoded 1.0: the
+    // ray-tracing and mesh-shader extensions need 1.1+, and a 1.0 instance caps the device
+    // regardless of what the driver can do. vkEnumerateInstanceVersion only exists from 1.1,
+    // so its absence *is* the answer — stay at 1.0 there.
     app_info.apiVersion = VK_API_VERSION_1_0;
+    if (auto enumerate = (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion")) {
+        uint32_t supported = VK_API_VERSION_1_0;
+        if (enumerate(&supported) == VK_SUCCESS) app_info.apiVersion = supported;
+    }
 
     VkInstanceCreateInfo create_info = {};
     create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -434,6 +450,8 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
     VkPhysicalDevice physical_device = VK_NULL_HANDLE;
     VkQueue graphics_queue = VK_NULL_HANDLE;
     bool owns_device = true;
+    // Optional feature sets actually enabled below (see the device-extension opt-in).
+    bool enabled_mesh_shader = false, enabled_ray_tracing = false;
     uint32_t queue_family = 0;
 
     // Check for shared Vulkan device
@@ -467,16 +485,90 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
         queue_create_info.queueCount = 1;
         queue_create_info.pQueuePriorities = &queue_priority;
 
-        const char* device_extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        // Opt into the optional feature sets the driver actually offers. A Vulkan extension
+        // can only be enabled here — there is no way to turn one on later — so a renderer
+        // that wants mesh shaders or ray tracing needs the context to have asked for them.
+        // Everything is gated on being present, so a driver without them still gets exactly
+        // the device it got before.
+        uint32_t ext_count = 0;
+        vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &ext_count, nullptr);
+        std::vector<VkExtensionProperties> avail(ext_count);
+        if (ext_count) vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &ext_count, avail.data());
+        auto has_ext = [&](const char* n) {
+            for (const auto& e : avail) if (std::strcmp(e.extensionName, n) == 0) return true;
+            return false;
+        };
+
+        std::vector<const char*> device_extensions{ VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+
+        // Ray tracing needs the acceleration-structure and pipeline extensions, plus the
+        // buffer-device-address and deferred-host-operations they depend on.
+        const bool want_rt = has_ext("VK_KHR_acceleration_structure") &&
+                             has_ext("VK_KHR_ray_tracing_pipeline") &&
+                             has_ext("VK_KHR_deferred_host_operations") &&
+                             has_ext("VK_KHR_buffer_device_address");
+        const bool want_mesh = has_ext("VK_EXT_mesh_shader");
+        if (want_rt) {
+            device_extensions.push_back("VK_KHR_acceleration_structure");
+            device_extensions.push_back("VK_KHR_ray_tracing_pipeline");
+            device_extensions.push_back("VK_KHR_deferred_host_operations");
+            device_extensions.push_back("VK_KHR_buffer_device_address");
+            // dxc emits the RayQuery capability into any ray-tracing SPIR-V library it
+            // compiles, whether or not the shader uses it, so the module is rejected unless
+            // ray query is enabled too. Cheap to include and it makes inline ray tracing work.
+            if (has_ext("VK_KHR_ray_query")) device_extensions.push_back("VK_KHR_ray_query");
+            if (has_ext("VK_EXT_descriptor_indexing")) device_extensions.push_back("VK_EXT_descriptor_indexing");
+            if (has_ext("VK_KHR_spirv_1_4"))           device_extensions.push_back("VK_KHR_spirv_1_4");
+            if (has_ext("VK_KHR_shader_float_controls")) device_extensions.push_back("VK_KHR_shader_float_controls");
+        }
+        if (want_mesh) device_extensions.push_back("VK_EXT_mesh_shader");
+
+        // Extensions are not enough: their features must also be switched on explicitly.
+        VkPhysicalDeviceBufferDeviceAddressFeatures bda{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR asf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+        VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR };
+        VkPhysicalDeviceRayQueryFeaturesKHR rqf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+        VkPhysicalDeviceMeshShaderFeaturesEXT msf{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT };
+        void* feature_chain = nullptr;
+        auto chain = [&](void* s) {
+            reinterpret_cast<VkBaseOutStructure*>(s)->pNext = reinterpret_cast<VkBaseOutStructure*>(feature_chain);
+            feature_chain = s;
+        };
+        if (want_rt) {
+            bda.bufferDeviceAddress = VK_TRUE;
+            asf.accelerationStructure = VK_TRUE;
+            rtf.rayTracingPipeline = VK_TRUE;
+            chain(&bda); chain(&asf); chain(&rtf);
+            if (has_ext("VK_KHR_ray_query")) { rqf.rayQuery = VK_TRUE; chain(&rqf); }
+        }
+        if (want_mesh) {
+            msf.meshShader = VK_TRUE; msf.taskShader = VK_TRUE;
+            chain(&msf);
+        }
 
         VkDeviceCreateInfo device_create_info = {};
         device_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        device_create_info.pNext = feature_chain;
         device_create_info.queueCreateInfoCount = 1;
         device_create_info.pQueueCreateInfos = &queue_create_info;
-        device_create_info.enabledExtensionCount = 1;
-        device_create_info.ppEnabledExtensionNames = device_extensions;
+        device_create_info.enabledExtensionCount = static_cast<uint32_t>(device_extensions.size());
+        device_create_info.ppEnabledExtensionNames = device_extensions.data();
 
         if (vkCreateDevice(physical_device, &device_create_info, nullptr, &device) != VK_SUCCESS) {
+            // Fall back to the bare swapchain-only device rather than failing outright: a
+            // driver that advertises the extensions but rejects the feature combination
+            // should still give a working renderer, minus ray tracing / mesh shaders.
+            device_create_info.pNext = nullptr;
+            device_create_info.enabledExtensionCount = 1;
+            const char* base_ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+            device_create_info.ppEnabledExtensionNames = base_ext;
+            if (vkCreateDevice(physical_device, &device_create_info, nullptr, &device) == VK_SUCCESS) {
+                enabled_mesh_shader = false; enabled_ray_tracing = false;
+            }
+        } else {
+            enabled_mesh_shader = want_mesh; enabled_ray_tracing = want_rt;
+        }
+        if (device == VK_NULL_HANDLE) {
             vkDestroySurfaceKHR(instance, surface, nullptr);
             if (owns_instance) vkDestroyInstance(instance, nullptr);
             return nullptr;
@@ -542,6 +634,8 @@ static GraphicsVulkan* create_vulkan_graphics_common(VkInstance instance, VkSurf
     gfx->owns_instance = owns_instance;
     gfx->owns_device = owns_device;
     gfx->queue_family_index = queue_family;
+    gfx->enabled_mesh_shader = enabled_mesh_shader;
+    gfx->enabled_ray_tracing = enabled_ray_tracing;
     gfx->swap_mode = swap_mode_from_vk(present_mode);
     // The actual number of images the driver allocated (may exceed the requested minimum).
     uint32_t actual_images = 0;

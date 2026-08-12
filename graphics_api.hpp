@@ -238,6 +238,7 @@ size_t      texture_format_row_pitch(TextureFormat format, int width);   // byte
 int         texture_format_row_count(TextureFormat format, int height);  // texel rows, or block-rows if compressed
 size_t      texture_format_image_size(TextureFormat format, int width, int height);  // = row_pitch * row_count
 bool        texture_format_is_depth_stencil(TextureFormat format);
+bool        texture_format_has_stencil(TextureFormat format);   // combined D+S only (can back a stencil test)
 bool        texture_format_is_srgb(TextureFormat format);
 bool        texture_format_has_alpha(TextureFormat format);
 
@@ -397,6 +398,7 @@ struct GraphicsCapabilities {
     bool  geometry_shaders      = false;
     bool  tessellation          = false;  // Hull + Domain shaders / Tessellation stages
     bool  mesh_shaders          = false;  // Mesh + Amplification shaders (DX12 / Vulkan 1.2+)
+    bool  ray_tracing           = false;  // Acceleration structures + ray tracing (DXR / VK_KHR_ray_tracing)
 
     //-------------------------------------------------------------------------
     // Draw feature support
@@ -558,6 +560,12 @@ struct VulkanGraphicsInfo {
     void*    surface = nullptr;           // VkSurfaceKHR (may be null)
     void*    swapchain = nullptr;         // VkSwapchainKHR (may be null)
     uint32_t swapchain_format = 0;        // VkFormat of the swapchain images (0 = VK_FORMAT_UNDEFINED)
+    // Optional device features that were actually enabled at device-creation time. Vulkan
+    // extensions cannot be turned on afterwards, so the renderer can only use what the
+    // context opted into — it reports these rather than probing, which would be wrong.
+    uint32_t api_version = 0;             // VK_MAKE_API_VERSION of the instance
+    bool     mesh_shader = false;         // VK_EXT_mesh_shader
+    bool     ray_tracing = false;         // VK_KHR_acceleration_structure + ray_tracing_pipeline
 };
 
 class Graphics {
@@ -1037,6 +1045,7 @@ WINDOW_GFX_HANDLE(DescriptorSetHandle);       // a written set of bound resource
 WINDOW_GFX_HANDLE(PipelineCacheHandle);       // compiled-pipeline cache (PSO cache / VkPipelineCache)
 WINDOW_GFX_HANDLE(TimelineSemaphoreHandle);   // monotonic 64-bit timeline (VkTimelineSemaphore / D3D12 fence-value)
 WINDOW_GFX_HANDLE(AccelStructHandle);         // ray-tracing acceleration structure (BLAS/TLAS)
+WINDOW_GFX_HANDLE(RayTracingPipelineHandle); // ray-tracing state object + its shader binding table
 #undef WINDOW_GFX_HANDLE
 
 // ---- Resource enums ---------------------------------------------------------
@@ -1052,7 +1061,12 @@ enum class IndexFormat : uint8_t { UInt16, UInt32 };
 enum class ShaderStage : uint8_t {
     Vertex, Fragment, Geometry, TessControl, TessEval, Compute, Task, Mesh,
     // Ray-tracing stages (exposed for RT-capable backends; OpenGL logs + no-ops).
-    RayGen, Miss, ClosestHit, AnyHit, Intersection, Callable
+    RayGen, Miss, ClosestHit, AnyHit, Intersection, Callable,
+    // A whole ray-tracing shader LIBRARY: one blob exporting several named entry points
+    // (a DXIL library / SPIR-V module). Ray-tracing pipelines are assembled by naming
+    // exports out of it rather than by binding one shader per stage, because a hit group
+    // is a *set* of entry points that must be linked together.
+    RayTracingLibrary
 };
 enum class ShaderLanguage : uint8_t { Auto, GLSL, ESSL, SPIRV, HLSL, DXBC, DXIL, MSL, WGSL };
 // Per-vertex vs per-instance stepping for a vertex buffer slot (instancing).
@@ -1230,7 +1244,18 @@ enum ShaderStageBits : uint32_t {
     STAGE_COMPUTE      = 1u << 5,
     STAGE_TASK         = 1u << 6,
     STAGE_MESH         = 1u << 7,
-    STAGE_ALL          = 0xFFu,
+    // Ray-tracing stages. A descriptor a ray-tracing shader reads must declare one of
+    // these: Vulkan rejects a pipeline whose layout makes a binding visible only to, say,
+    // compute while a ray-generation shader uses it.
+    STAGE_RAYGEN       = 1u << 8,
+    STAGE_MISS         = 1u << 9,
+    STAGE_CLOSEST_HIT  = 1u << 10,
+    STAGE_ANY_HIT      = 1u << 11,
+    STAGE_INTERSECTION = 1u << 12,
+    STAGE_CALLABLE     = 1u << 13,
+    STAGE_RAY_TRACING  = STAGE_RAYGEN | STAGE_MISS | STAGE_CLOSEST_HIT |
+                         STAGE_ANY_HIT | STAGE_INTERSECTION | STAGE_CALLABLE,
+    STAGE_ALL          = 0x3FFFu,
 };
 
 enum class BindingType : uint8_t {
@@ -1240,6 +1265,7 @@ enum class BindingType : uint8_t {
     StorageTexture,       // read/write image (image2D / UAV texture)
     Sampler,              // standalone sampler
     CombinedImageSampler, // texture+sampler in one binding (GLSL sampler2D)
+    AccelerationStructure,// ray-tracing scene, read by TraceRay (RaytracingAccelerationStructure)
 };
 
 // One binding within a descriptor set layout.
@@ -1281,6 +1307,7 @@ struct DescriptorWrite {
     TextureHandle texture; int      texture_mip = 0;                              // (Storage|Sampled)Texture
     SamplerHandle sampler;                                                        // Sampler / CombinedImageSampler
     StorageAccess storage_access = StorageAccess::ReadWrite;                      // StorageTexture
+    AccelStructHandle accel;                                                      // AccelerationStructure
 };
 
 struct DescriptorSetDesc {
@@ -1315,6 +1342,65 @@ struct AccelStructDesc {
     // Top-level (instances):
     BufferHandle    instance_buffer; uint32_t instance_count = 0;
     bool            update = false;                              // refit an existing structure in place
+};
+
+// ---- Ray tracing (pipeline + shader binding table) --------------------------
+// A ray-tracing dispatch does not run one shader: it runs whichever of many shaders the
+// traversal reaches. Which shader that is comes from the SHADER BINDING TABLE, a GPU
+// buffer of records — one per ray-generation / miss / hit group — each holding an opaque
+// shader identifier and, optionally, its own arguments.
+//
+// Those identifiers are backend-specific blobs of backend-specific size, so the table is
+// built by the backend from the description below rather than by the caller. That keeps
+// the layout rules (record alignment, table alignment, stride) out of application code,
+// where they cannot be got right portably.
+//
+// Per-record ("local") arguments are what let one pipeline shade many different objects:
+// each hit record can carry its own constants, buffer or descriptor set, so a single
+// closest-hit shader reads a different material per instance. They are described here as
+// typed arguments, not raw bytes, because their on-GPU encoding differs per backend.
+enum class RayArgKind : uint8_t {
+    Constants,       // inline bytes (root constants)
+    BufferAddress,   // a buffer bound by address (root descriptor)
+    DescriptorTable, // a written descriptor set (descriptor table)
+};
+
+struct RayLocalArg {
+    RayArgKind          kind = RayArgKind::Constants;
+    const void*         constants = nullptr;  uint32_t constants_size = 0;   // Constants
+    BufferHandle        buffer;               uint32_t buffer_offset = 0;    // BufferAddress
+    DescriptorSetHandle descriptor_set;                                      // DescriptorTable
+};
+
+// A hit group: the entry points run when a ray hits this geometry. `intersection` non-null
+// makes it a procedural-primitive group; otherwise triangles are used.
+struct RayHitGroup {
+    const char* name         = nullptr;   // identifies the group in the table
+    const char* closest_hit  = nullptr;   // export names within the library
+    const char* any_hit      = nullptr;
+    const char* intersection = nullptr;
+    // Optional per-record arguments; `local_layout` describes their binding slots.
+    PipelineLayoutHandle local_layout;
+    const RayLocalArg*   args = nullptr;  int arg_count = 0;
+};
+
+// A ray-generation or miss shader, with the same optional per-record arguments.
+struct RayShader {
+    const char*          entry_point = nullptr;   // export name within the library
+    PipelineLayoutHandle local_layout;
+    const RayLocalArg*   args = nullptr;  int arg_count = 0;
+};
+
+struct RayTracingPipelineDesc {
+    ShaderHandle         library;              // ShaderStage::RayTracingLibrary blob
+    RayShader            ray_gen;
+    const RayShader*     miss = nullptr;       int miss_count = 0;
+    const RayHitGroup*   hit_groups = nullptr; int hit_group_count = 0;
+    PipelineLayoutHandle layout;               // global bindings, shared by every shader
+    uint32_t max_recursion      = 1;
+    uint32_t max_payload_size   = 0;           // bytes carried between shaders per ray
+    uint32_t max_attribute_size = 8;           // bytes of hit attributes (triangle barycentrics = 8)
+    const char* debug_name = nullptr;
 };
 
 //-----------------------------------------------------------------------------
@@ -1434,6 +1520,19 @@ public:
     // ---- Ray tracing --------------------------------------------------------
     virtual AccelStructHandle create_acceleration_structure(const AccelStructDesc& desc) = 0;
     virtual void              destroy_acceleration_structure(AccelStructHandle h) = 0;
+    // GPU address of a built structure. Needed to reference a bottom-level structure from a
+    // top-level instance record, whose layout is the backend's own; both DXR and Vulkan
+    // identify a BLAS by address there, so this is portable rather than a D3D12 leak.
+    virtual uint64_t          acceleration_structure_address(AccelStructHandle h) { (void)h; return 0; }
+
+    // Build the ray-tracing pipeline AND its shader binding table in one step: the table's
+    // contents are shader identifiers only the backend can produce, so the two cannot be
+    // built independently. Defaulted rather than pure virtual — ray tracing is optional and
+    // most backends have none, so they inherit "unsupported" instead of restating it.
+    virtual RayTracingPipelineHandle create_ray_tracing_pipeline(const RayTracingPipelineDesc& desc) {
+        (void)desc; return {};
+    }
+    virtual void destroy_ray_tracing_pipeline(RayTracingPipelineHandle h) { (void)h; }
 
 protected:
     GraphicDevice() = default;
@@ -1451,7 +1550,11 @@ public:
     virtual void end() = 0;
 
     // Render targets. The "backbuffer" variant targets the owning context's swapchain.
-    virtual void set_render_target_backbuffer() = 0;
+    // `depth_stencil` (optional, from create_depth_target) attaches a depth-stencil to the
+    // backbuffer pass — needed for stencil clipping, since a swapchain image carries colour
+    // only. OpenGL ignores it: the default framebuffer already owns the depth/stencil the
+    // context was created with (Config::stencil_bits), and FBO 0 takes no attachments.
+    virtual void set_render_target_backbuffer(RenderTargetHandle depth_stencil = {}) = 0;
     virtual void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) = 0;
     virtual void set_viewport(const Viewport& vp) = 0;
     virtual void set_scissor(const ScissorRect& rect) = 0;
@@ -1545,6 +1648,11 @@ public:
     // ---- Ray tracing --------------------------------------------------------
     // Build/refit an acceleration structure, then trace from the bound RT pipeline.
     virtual void build_acceleration_structure(AccelStructHandle dst, const AccelStructDesc& desc) = 0;
+    // Bind the ray-tracing pipeline (and, with it, the shader binding table trace_rays uses).
+    // set_pipeline() cannot serve here: a ray-tracing pipeline is a different kind of object
+    // and carries a table rather than a single entry point. Defaulted, like its device-side
+    // counterparts, so backends without ray tracing need no stub.
+    virtual void set_ray_tracing_pipeline(RayTracingPipelineHandle h) { (void)h; }
     virtual void trace_rays(uint32_t width, uint32_t height, uint32_t depth = 1) = 0;
 
 protected:

@@ -118,6 +118,19 @@ VkCompareOp vk_compare(CompareFunc f) {
     }
     return VK_COMPARE_OP_LESS;
 }
+VkStencilOp vk_stencil_op(StencilOp o) {
+    switch (o) {
+        case StencilOp::Keep:     return VK_STENCIL_OP_KEEP;
+        case StencilOp::Zero:     return VK_STENCIL_OP_ZERO;
+        case StencilOp::Replace:  return VK_STENCIL_OP_REPLACE;
+        case StencilOp::IncrSat:  return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+        case StencilOp::DecrSat:  return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+        case StencilOp::Invert:   return VK_STENCIL_OP_INVERT;
+        case StencilOp::IncrWrap: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+        case StencilOp::DecrWrap: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    }
+    return VK_STENCIL_OP_KEEP;
+}
 #define VK_OK(x) do { VkResult _r = (x); if (_r != VK_SUCCESS) std::fprintf(stderr, "[UGW/Vulkan] %s -> %d\n", #x, int(_r)); } while (0)
 
 // Handle store: stable integer ids with a free list (mirrors the GL backend).
@@ -238,6 +251,14 @@ VkShaderStageFlagBits shader_stage(ShaderStage s) {
         case ShaderStage::TessControl: return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
         case ShaderStage::TessEval:    return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
         case ShaderStage::Compute:     return VK_SHADER_STAGE_COMPUTE_BIT;
+        case ShaderStage::Task:        return VK_SHADER_STAGE_TASK_BIT_EXT;
+        case ShaderStage::Mesh:        return VK_SHADER_STAGE_MESH_BIT_EXT;
+        case ShaderStage::RayGen:      return VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        case ShaderStage::Miss:        return VK_SHADER_STAGE_MISS_BIT_KHR;
+        case ShaderStage::ClosestHit:  return VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+        case ShaderStage::AnyHit:      return VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+        case ShaderStage::Intersection:return VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+        case ShaderStage::Callable:    return VK_SHADER_STAGE_CALLABLE_BIT_KHR;
         default:                       return VK_SHADER_STAGE_VERTEX_BIT;
     }
 }
@@ -249,6 +270,7 @@ VkDescriptorType desc_type(BindingType t) {
         case BindingType::StorageTexture:       return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         case BindingType::Sampler:              return VK_DESCRIPTOR_TYPE_SAMPLER;
         case BindingType::CombinedImageSampler: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        case BindingType::AccelerationStructure: return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         default:                                return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     }
 }
@@ -260,6 +282,14 @@ VkShaderStageFlags stage_flags(uint32_t bits) {
     if (bits & STAGE_TESS_CONTROL) f |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
     if (bits & STAGE_TESS_EVAL)    f |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
     if (bits & STAGE_COMPUTE)      f |= VK_SHADER_STAGE_COMPUTE_BIT;
+    if (bits & STAGE_TASK)         f |= VK_SHADER_STAGE_TASK_BIT_EXT;
+    if (bits & STAGE_MESH)         f |= VK_SHADER_STAGE_MESH_BIT_EXT;
+    if (bits & STAGE_RAYGEN)       f |= VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    if (bits & STAGE_MISS)         f |= VK_SHADER_STAGE_MISS_BIT_KHR;
+    if (bits & STAGE_CLOSEST_HIT)  f |= VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    if (bits & STAGE_ANY_HIT)      f |= VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+    if (bits & STAGE_INTERSECTION) f |= VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+    if (bits & STAGE_CALLABLE)     f |= VK_SHADER_STAGE_CALLABLE_BIT_KHR;
     return f ? f : VK_SHADER_STAGE_ALL;
 }
 
@@ -275,7 +305,7 @@ struct VKShader  { VkShaderModule mod = VK_NULL_HANDLE; ShaderStage stage = Shad
                    std::vector<VkDescriptorSetLayoutBinding> bindings; };   // reflected set-0 bindings
 struct VKPipeline{ VkPipeline pipeline = VK_NULL_HANDLE; VkPipelineLayout layout = VK_NULL_HANDLE; bool owns_layout = false;
                    VkRenderPass render_pass = VK_NULL_HANDLE; VkPipelineBindPoint bind = VK_PIPELINE_BIND_POINT_GRAPHICS;
-                   bool has_depth = false;
+                   bool has_depth = false; bool mesh = false;
                    // Auto descriptor-set layout built from shader reflection (when no explicit
                    // PipelineDesc::layout). auto_bindings drives per-draw descriptor writes.
                    VkDescriptorSetLayout auto_dsl = VK_NULL_HANDLE;
@@ -287,9 +317,27 @@ struct VKTimeline{ VkSemaphore sem = VK_NULL_HANDLE; };
 struct VKQuery   { VkQueryPool pool = VK_NULL_HANDLE; VkQueryType type = VK_QUERY_TYPE_TIMESTAMP; };
 struct VKDescSetLayout  { VkDescriptorSetLayout layout = VK_NULL_HANDLE; DescriptorSetLayoutDesc desc; };
 struct VKPipelineLayout { VkPipelineLayout layout = VK_NULL_HANDLE; };
-struct VKDescriptorSet  { VkDescriptorPool pool = VK_NULL_HANDLE; VkDescriptorSet set = VK_NULL_HANDLE; DescriptorSetLayoutHandle layout; };
+struct VKDescriptorSet  { VkDescriptorPool pool = VK_NULL_HANDLE; VkDescriptorSet set = VK_NULL_HANDLE; DescriptorSetLayoutHandle layout;
+                          // Storage images must be in GENERAL when read/written, but a descriptor set is
+                          // written without a command buffer — so the images are recorded here and
+                          // transitioned when the set is bound.
+                          std::vector<int> storage_textures; };
 struct VKPipelineCache  { VkPipelineCache cache = VK_NULL_HANDLE; };
-struct VKAccelStruct    { int dummy = 0; };
+// A ray-tracing acceleration structure: the handle plus the buffers backing its result and
+// its build scratch. Vulkan keeps these as ordinary buffers the caller must allocate.
+// A ray-tracing pipeline plus the shader binding table built from its group handles.
+struct VKRayPipeline {
+    VkPipeline pipeline = VK_NULL_HANDLE; VkPipelineLayout layout = VK_NULL_HANDLE; bool owns_layout = false;
+    VkBuffer sbt = VK_NULL_HANDLE; VkDeviceMemory sbt_mem = VK_NULL_HANDLE;
+    VkStridedDeviceAddressRegionKHR raygen{}, miss{}, hit{};
+};
+struct VKAccelStruct {
+    VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+    VkBuffer result = VK_NULL_HANDLE;  VkDeviceMemory result_mem = VK_NULL_HANDLE;
+    VkBuffer scratch = VK_NULL_HANDLE; VkDeviceMemory scratch_mem = VK_NULL_HANDLE;
+    VkDeviceSize result_size = 0, scratch_size = 0;
+    VkDeviceAddress address = 0;
+};
 
 class VKCommander;
 
@@ -324,6 +372,20 @@ public:
     uint32_t          acquired_index_ = 0;
     bool              have_acquired_  = false;
 
+    // Optional features and their entry points (see the constructor).
+    bool mesh_shaders_enabled_ = false, ray_tracing_enabled_ = false;
+    PFN_vkCmdDrawMeshTasksEXT                        p_draw_mesh = nullptr;
+    PFN_vkGetAccelerationStructureBuildSizesKHR      p_get_as_build_sizes = nullptr;
+    PFN_vkCreateAccelerationStructureKHR             p_create_as = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR            p_destroy_as = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR          p_cmd_build_as = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR   p_get_as_addr = nullptr;
+    PFN_vkGetBufferDeviceAddress                     p_get_buf_addr = nullptr;
+    PFN_vkCreateRayTracingPipelinesKHR               p_create_rt_pipes = nullptr;
+    PFN_vkGetRayTracingShaderGroupHandlesKHR         p_get_group_handles = nullptr;
+    PFN_vkCmdTraceRaysKHR                            p_cmd_trace = nullptr;
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR  rt_props_{};
+
     explicit VKDevice(const VulkanGraphicsInfo& gi) {
         instance = (VkInstance)gi.instance; phys = (VkPhysicalDevice)gi.physical_device;
         dev = (VkDevice)gi.device; queue = (VkQueue)gi.graphics_queue; queue_family = gi.graphics_queue_family;
@@ -337,6 +399,29 @@ public:
         p_end_label    = (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT");
         p_insert_label = (PFN_vkCmdInsertDebugUtilsLabelEXT)vkGetInstanceProcAddr(instance, "vkCmdInsertDebugUtilsLabelEXT");
         has_debug_utils = (p_set_name != nullptr);
+
+        // Optional feature entry points. These live in extensions, so they must be looked up
+        // and are only valid when the CONTEXT enabled the extension at device-creation time —
+        // hence the flags come from the context rather than from a capability probe.
+        mesh_shaders_enabled_ = gi.mesh_shader;
+        ray_tracing_enabled_  = gi.ray_tracing;
+        if (mesh_shaders_enabled_)
+            p_draw_mesh = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(dev, "vkCmdDrawMeshTasksEXT");
+        if (ray_tracing_enabled_) {
+            p_get_as_build_sizes = (PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(dev, "vkGetAccelerationStructureBuildSizesKHR");
+            p_create_as          = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(dev, "vkCreateAccelerationStructureKHR");
+            p_destroy_as         = (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(dev, "vkDestroyAccelerationStructureKHR");
+            p_cmd_build_as       = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(dev, "vkCmdBuildAccelerationStructuresKHR");
+            p_get_as_addr        = (PFN_vkGetAccelerationStructureDeviceAddressKHR)vkGetDeviceProcAddr(dev, "vkGetAccelerationStructureDeviceAddressKHR");
+            p_get_buf_addr       = (PFN_vkGetBufferDeviceAddress)vkGetDeviceProcAddr(dev, "vkGetBufferDeviceAddress");
+            p_create_rt_pipes    = (PFN_vkCreateRayTracingPipelinesKHR)vkGetDeviceProcAddr(dev, "vkCreateRayTracingPipelinesKHR");
+            p_get_group_handles  = (PFN_vkGetRayTracingShaderGroupHandlesKHR)vkGetDeviceProcAddr(dev, "vkGetRayTracingShaderGroupHandlesKHR");
+            p_cmd_trace          = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(dev, "vkCmdTraceRaysKHR");
+            rt_props_.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+            VkPhysicalDeviceProperties2 p2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+            p2.pNext = &rt_props_;
+            vkGetPhysicalDeviceProperties2(phys, &p2);
+        }
     }
     ~VKDevice() override {
         for (int id : bb_ids_) if (auto* t = textures_.get(id)) if (t->view) vkDestroyImageView(dev, t->view, nullptr);
@@ -371,6 +456,12 @@ public:
         out->min_texel_buffer_offset_alignment = int(l.minTexelBufferOffsetAlignment);
         out->compute_shaders = true; out->indirect_draw = true; out->multi_draw_indirect = true;
         out->instancing = true; out->base_vertex_draw = true; out->timestamp_query = l.timestampComputeAndGraphics;
+        out->read_write_textures = true;   // storage images (see bind_storage_texture)
+        // Report what the CONTEXT actually enabled, not what the physical device could do:
+        // a Vulkan extension cannot be switched on after device creation, so a driver that
+        // supports ray tracing on a device created without it still cannot use it here.
+        out->mesh_shaders = mesh_shaders_enabled_;
+        out->ray_tracing  = ray_tracing_enabled_;
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -464,6 +555,15 @@ public:
             case BufferType::Storage:  usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT; break;
             case BufferType::Indirect: usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT; break;
         }
+        // With ray tracing enabled, any buffer may end up feeding an acceleration-structure
+        // build or being addressed by a shader, and Vulkan requires those usages to be
+        // declared at creation. Added unconditionally there so callers need no RT-specific
+        // buffer type; it costs nothing on a device without the extension because the flags
+        // are only added when it is enabled.
+        if (ray_tracing_enabled_) {
+            usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                   | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        }
         VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bi.size = b.size; bi.usage = usage; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         VK_OK(vkCreateBuffer(dev, &bi, nullptr, &b.buf));
@@ -471,6 +571,10 @@ public:
         VkMemoryAllocateInfo mi{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         mi.allocationSize = req.size;
         mi.memoryTypeIndex = find_mem(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        // Taking a device address from a buffer requires its memory to have been allocated
+        // with the matching flag; without it vkGetBufferDeviceAddress is invalid.
+        VkMemoryAllocateFlagsInfo maf{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+        if (ray_tracing_enabled_) { maf.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT; mi.pNext = &maf; }
         VK_OK(vkAllocateMemory(dev, &mi, nullptr, &b.mem));
         vkBindBufferMemory(dev, b.buf, b.mem, 0);
         if (d.initial_data) { void* p = nullptr; vkMapMemory(dev, b.mem, 0, b.size, 0, &p); std::memcpy(p, d.initial_data, d.size); vkUnmapMemory(dev, b.mem); }
@@ -547,7 +651,61 @@ public:
         });
         free_staging(stage);
     }
-    void generate_mipmaps(TextureHandle) override { vk_unsupported("generate_mipmaps"); }
+    // Successive halving blits, mip N-1 -> mip N, for every array layer. Each level is
+    // transitioned to TRANSFER_SRC once it has been written, so the next blit reads a
+    // level the GPU has finished with; the whole image ends in SHADER_READ_ONLY.
+    //
+    // Blitting requires the format to advertise linear filtering as a blit source, which
+    // is not guaranteed (notably for compressed formats) — checked rather than assumed,
+    // since a failed blit here would silently leave garbage in the tail mips.
+    void generate_mipmaps(TextureHandle h) override {
+        auto* t = textures_.get(h.id);
+        if (!t || !t->image) return;
+        if (t->levels <= 1) return;   // nothing to generate
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(phys, t->format, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        if ((fp.optimalTilingFeatures & need) != need) {
+            vk_unsupported("generate_mipmaps (format cannot be linearly blitted)");
+            return;
+        }
+        const uint32_t levels = (uint32_t)t->levels, layers = (uint32_t)t->layers;
+        immediate([&](VkCommandBuffer cb) {
+            // Per-level transitions, so this does not disturb the tracked whole-image layout
+            // until the end. Start from whatever the image currently is.
+            auto transition = [&](uint32_t level, VkImageLayout from, VkImageLayout to) {
+                VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                b.oldLayout = from; b.newLayout = to; b.image = t->image;
+                b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.subresourceRange = { t->aspect, level, 1, 0, layers };
+                b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+                b.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                     0, 0, nullptr, 0, nullptr, 1, &b);
+            };
+            transition(0, t->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            int32_t mw = t->w, mh = t->h;
+            for (uint32_t level = 1; level < levels; ++level) {
+                const int32_t nw = mw > 1 ? mw / 2 : 1, nh = mh > 1 ? mh / 2 : 1;
+                transition(level, t->layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                VkImageBlit bl{};
+                bl.srcSubresource = { t->aspect, level - 1, 0, layers };
+                bl.dstSubresource = { t->aspect, level,     0, layers };
+                bl.srcOffsets[0] = { 0, 0, 0 }; bl.srcOffsets[1] = { mw, mh, 1 };
+                bl.dstOffsets[0] = { 0, 0, 0 }; bl.dstOffsets[1] = { nw, nh, 1 };
+                vkCmdBlitImage(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               1, &bl, VK_FILTER_LINEAR);
+                // This level becomes the next blit's source.
+                transition(level, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                mw = nw; mh = nh;
+            }
+            // Every level is TRANSFER_SRC now; hand the whole image to the shader.
+            t->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier(cb, t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        });
+    }
     void destroy_texture(TextureHandle h) override {
         auto* t = textures_.get(h.id); if (!t) return;
         if (t->view) vkDestroyImageView(dev, t->view, nullptr);
@@ -641,6 +799,9 @@ public:
     void write_set(int id, const DescriptorSetDesc& d) {
         auto* ds = dsets_.get(id); if (!ds) return;
         std::vector<VkWriteDescriptorSet> writes; std::vector<VkDescriptorBufferInfo> bufs(d.write_count); std::vector<VkDescriptorImageInfo> imgs(d.write_count);
+        std::vector<VkWriteDescriptorSetAccelerationStructureKHR> as_writes(d.write_count);
+        std::vector<VkAccelerationStructureKHR> as_handles(d.write_count, VK_NULL_HANDLE);
+        ds->storage_textures.clear();
         for (int i = 0; i < d.write_count; ++i) {
             const auto& w = d.writes[i];
             VkWriteDescriptorSet ws{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -648,11 +809,23 @@ public:
             if (w.type == BindingType::UniformBuffer || w.type == BindingType::StorageBuffer) {
                 auto* b = buffers_.get(w.buffer.id); if (!b) continue;
                 bufs[i] = { b->buf, w.buffer_offset, w.buffer_size ? w.buffer_size : VK_WHOLE_SIZE }; ws.pBufferInfo = &bufs[i];
+            } else if (w.type == BindingType::AccelerationStructure) {
+                // An acceleration structure is not an image or a buffer: its handle is
+                // delivered through a chained write struct.
+                auto* a = accels_.get(w.accel.id); if (!a || !a->as) continue;
+                as_handles[i] = a->as;
+                as_writes[i] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
+                as_writes[i].accelerationStructureCount = 1;
+                as_writes[i].pAccelerationStructures = &as_handles[i];
+                ws.pNext = &as_writes[i];
             } else {
                 auto* t = textures_.get(w.texture.id); auto* s = samplers_.get(w.sampler.id);
                 imgs[i] = { s ? s->sampler : VK_NULL_HANDLE, t ? t->view : VK_NULL_HANDLE,
                             (w.type == BindingType::StorageTexture) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                 ws.pImageInfo = &imgs[i];
+                // Remember it so bind_descriptor_set can put the image into GENERAL; the
+                // descriptor above promises that layout but cannot perform the transition.
+                if (w.type == BindingType::StorageTexture && t) ds->storage_textures.push_back(w.texture.id);
             }
             writes.push_back(ws);
         }
@@ -661,6 +834,11 @@ public:
     void destroy_descriptor_set(DescriptorSetHandle h) override { auto* ds = dsets_.get(h.id); if (ds && ds->pool) vkDestroyDescriptorPool(dev, ds->pool, nullptr); dsets_.release(h.id); }
 
     // ---- pipelines ----------------------------------------------------------
+    // True when the pipeline reads or writes the depth-stencil attachment. Stencil-only
+    // pipelines (depth off) count: the render pass and framebuffer must still carry it.
+    static bool pipeline_uses_depth_stencil(const PipelineDesc& d) {
+        return d.depth_stencil.depth_enable || d.depth_stencil.stencil_enable;
+    }
     VkRenderPass make_render_pass(const PipelineDesc& d) {
         VkAttachmentDescription atts[2]{};
         atts[0].format = tex_format(d.color_formats[0]); atts[0].samples = vk_samples(d.samples);
@@ -673,10 +851,12 @@ public:
         // before the pass, like colour). initial/final layout is the attachment-optimal one.
         VkAttachmentReference dref{ 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
         uint32_t count = 1;
-        if (d.depth_stencil.depth_enable) {
+        // A stencil-only pipeline (the GUI's clip masks: depth off, stencil on) needs the
+        // attachment too — keying this on depth_enable alone would silently drop the stencil.
+        if (pipeline_uses_depth_stencil(d)) {
             atts[1].format = tex_format(d.depth_format); atts[1].samples = vk_samples(d.samples);
             atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD; atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
             atts[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             sub.pDepthStencilAttachment = &dref; count = 2;
         }
@@ -724,15 +904,26 @@ public:
             VK_OK(vkCreateComputePipelines(dev, cache, 1, &ci, nullptr, &p.pipeline));
             return p.pipeline ? PipelineHandle{ pipelines_.alloc(p) } : PipelineHandle{ -1 };
         }
-        if (d.mesh_shader.valid()) { vk_unsupported("mesh-shader pipelines"); return { -1 }; }
+        // A mesh pipeline is a graphics pipeline whose geometry comes from a mesh shader
+        // instead of the input assembler; only the stage set and the absence of vertex input
+        // differ, so it shares everything below.
+        const bool mesh = d.mesh_shader.valid();
+        if (mesh && !mesh_shaders_enabled_) { vk_unsupported("mesh-shader pipelines (VK_EXT_mesh_shader not enabled)"); return { -1 }; }
 
         std::vector<VkPipelineShaderStageCreateInfo> stages;
         auto add = [&](ShaderHandle h) { if (auto* s = shaders_.get(h.id)) { VkPipelineShaderStageCreateInfo si{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO }; si.stage = shader_stage(s->stage); si.module = s->mod; si.pName = s->entry.c_str(); stages.push_back(si); } };
-        add(d.vertex_shader); add(d.fragment_shader);
-        if (d.geometry_shader.valid()) add(d.geometry_shader);
-        if (d.tess_control_shader.valid()) add(d.tess_control_shader);
-        if (d.tess_eval_shader.valid()) add(d.tess_eval_shader);
-        if (!p.layout) build_auto_layout({ d.vertex_shader, d.fragment_shader, d.geometry_shader, d.tess_control_shader, d.tess_eval_shader }, p);
+        if (mesh) {
+            if (d.task_shader.valid()) add(d.task_shader);
+            add(d.mesh_shader); add(d.fragment_shader);
+            if (!p.layout) build_auto_layout({ d.task_shader, d.mesh_shader, d.fragment_shader }, p);
+        } else {
+            add(d.vertex_shader); add(d.fragment_shader);
+            if (d.geometry_shader.valid()) add(d.geometry_shader);
+            if (d.tess_control_shader.valid()) add(d.tess_control_shader);
+            if (d.tess_eval_shader.valid()) add(d.tess_eval_shader);
+            if (!p.layout) build_auto_layout({ d.vertex_shader, d.fragment_shader, d.geometry_shader, d.tess_control_shader, d.tess_eval_shader }, p);
+        }
+        p.mesh = mesh;
 
         const VertexLayout& vl = d.vertex_layout;
         std::vector<VkVertexInputBindingDescription> binds;
@@ -759,13 +950,32 @@ public:
         VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO }; cb.attachmentCount = 1; cb.pAttachments = &cba;
         VkPipelineDepthStencilStateCreateInfo dss{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
         dss.depthTestEnable = d.depth_stencil.depth_enable; dss.depthWriteEnable = d.depth_stencil.depth_write; dss.depthCompareOp = vk_compare(d.depth_stencil.depth_func);
-        VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-        VkPipelineDynamicStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
+        // Stencil (used by the GUI's clip masks). compareMask/writeMask are static here; the
+        // reference is dynamic (vkCmdSetStencilReference via set_stencil_reference()).
+        dss.stencilTestEnable = d.depth_stencil.stencil_enable ? VK_TRUE : VK_FALSE;
+        auto face = [&](const StencilOpDesc& s) {
+            VkStencilOpState o{};
+            o.failOp      = vk_stencil_op(s.stencil_fail);
+            o.depthFailOp = vk_stencil_op(s.depth_fail);
+            o.passOp      = vk_stencil_op(s.pass);
+            o.compareOp   = vk_compare(s.func);
+            o.compareMask = d.depth_stencil.stencil_read_mask;
+            o.writeMask   = d.depth_stencil.stencil_write_mask;
+            o.reference   = 0;   // dynamic
+            return o;
+        };
+        dss.front = face(d.depth_stencil.front_face);
+        dss.back  = face(d.depth_stencil.back_face);
+        VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_STENCIL_REFERENCE };
+        VkPipelineDynamicStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; ds.dynamicStateCount = 3; ds.pDynamicStates = dyn;
         p.render_pass = make_render_pass(d);
-        p.has_depth = d.depth_stencil.depth_enable;
+        p.has_depth = pipeline_uses_depth_stencil(d);
         VkGraphicsPipelineCreateInfo ci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
         ci.stageCount = (uint32_t)stages.size(); ci.pStages = stages.data();
-        ci.pVertexInputState = &vi; ci.pInputAssemblyState = &ia; ci.pViewportState = &vp; ci.pRasterizationState = &rs;
+        // Mesh pipelines must NOT supply vertex-input or input-assembly state: there is no
+        // input assembler to configure, and providing them is invalid.
+        ci.pVertexInputState = mesh ? nullptr : &vi; ci.pInputAssemblyState = mesh ? nullptr : &ia;
+        ci.pViewportState = &vp; ci.pRasterizationState = &rs;
         ci.pMultisampleState = &ms; ci.pColorBlendState = &cb; ci.pDepthStencilState = &dss; ci.pDynamicState = &ds;
         ci.layout = p.layout; ci.renderPass = p.render_pass;
         VK_OK(vkCreateGraphicsPipelines(dev, cache, 1, &ci, nullptr, &p.pipeline));
@@ -914,8 +1124,283 @@ public:
 
     // ---- sparse / ray tracing (optional ext; logged) ------------------------
     void update_texture_residency(TextureHandle, const TextureRegion&, bool) override { vk_unsupported("sparse residency (VK_KHR sparse)"); }
-    AccelStructHandle create_acceleration_structure(const AccelStructDesc&) override { vk_unsupported("acceleration structures (VK_KHR ray tracing)"); return { accels_.alloc(VKAccelStruct{}) }; }
-    void destroy_acceleration_structure(AccelStructHandle h) override { accels_.release(h.id); }
+    VkDeviceAddress buffer_address(BufferHandle h) {
+        auto* b = buffers_.get(h.id);
+        if (!b || !p_get_buf_addr) return 0;
+        VkBufferDeviceAddressInfo ai{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO }; ai.buffer = b->buf;
+        return p_get_buf_addr(dev, &ai);
+    }
+    // Translate an AccelStructDesc into Vulkan build geometry. Shared by create (which sizes
+    // the buffers) and build (which records it), so the two cannot disagree.
+    bool accel_geometry(const AccelStructDesc& d, VkAccelerationStructureGeometryKHR* geom,
+                        VkAccelerationStructureBuildGeometryInfoKHR* info, uint32_t* prim_count) {
+        *geom = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+        *info = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+        VkBuildAccelerationStructureFlagsKHR f = 0;
+        if (d.flags & ACCEL_ALLOW_UPDATE)      f |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+        if (d.flags & ACCEL_ALLOW_COMPACTION)  f |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+        if (d.flags & ACCEL_PREFER_FAST_TRACE) f |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        if (d.flags & ACCEL_PREFER_FAST_BUILD) f |= VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+        if (d.flags & ACCEL_LOW_MEMORY)        f |= VK_BUILD_ACCELERATION_STRUCTURE_LOW_MEMORY_BIT_KHR;
+        info->flags = f;
+        info->mode = d.update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                              : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        if (d.type == AccelStructType::TopLevel) {
+            geom->geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+            geom->geometry.instances = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR };
+            geom->geometry.instances.arrayOfPointers = VK_FALSE;
+            geom->geometry.instances.data.deviceAddress = buffer_address(d.instance_buffer);
+            info->type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+            *prim_count = d.instance_count;
+        } else {
+            const VkDeviceAddress va = buffer_address(d.vertex_buffer);
+            if (!va) return false;
+            geom->geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+            geom->flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+            auto& tri = geom->geometry.triangles;
+            tri = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR };
+            tri.vertexFormat = (d.vertex_format == VertexFormat::Float2) ? VK_FORMAT_R32G32_SFLOAT
+                                                                        : VK_FORMAT_R32G32B32_SFLOAT;
+            tri.vertexData.deviceAddress = va;
+            tri.vertexStride = d.vertex_stride ? d.vertex_stride : 12;
+            tri.maxVertex = d.vertex_count ? d.vertex_count - 1 : 0;
+            tri.indexType = VK_INDEX_TYPE_NONE_KHR;
+            if (d.index_buffer.valid()) {
+                tri.indexType = (d.index_format == IndexFormat::UInt16) ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+                tri.indexData.deviceAddress = buffer_address(d.index_buffer);
+            }
+            if (d.transform_buffer.valid()) tri.transformData.deviceAddress = buffer_address(d.transform_buffer);
+            info->type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+            *prim_count = d.index_buffer.valid() ? d.index_count / 3 : d.vertex_count / 3;
+        }
+        info->geometryCount = 1; info->pGeometries = geom;
+        return true;
+    }
+    // Allocate a device-local buffer usable as acceleration-structure storage or scratch.
+    bool alloc_as_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer* out_buf, VkDeviceMemory* out_mem) {
+        VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = size ? size : 4; bi.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(dev, &bi, nullptr, out_buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req; vkGetBufferMemoryRequirements(dev, *out_buf, &req);
+        VkMemoryAllocateFlagsInfo maf{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+        maf.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        VkMemoryAllocateInfo mi{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO }; mi.pNext = &maf;
+        mi.allocationSize = req.size;
+        mi.memoryTypeIndex = find_mem(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(dev, &mi, nullptr, out_mem) != VK_SUCCESS) return false;
+        vkBindBufferMemory(dev, *out_buf, *out_mem, 0);
+        return true;
+    }
+    AccelStructHandle create_acceleration_structure(const AccelStructDesc& d) override {
+        if (!ray_tracing_enabled_ || !p_get_as_build_sizes || !p_create_as) {
+            vk_unsupported("acceleration structures (VK_KHR ray tracing not enabled)");
+            return { -1 };   // an invalid handle: a valid one here would look like success
+        }
+        VKAccelStruct a;
+        VkAccelerationStructureGeometryKHR geom{};
+        VkAccelerationStructureBuildGeometryInfoKHR info{};
+        uint32_t prims = 0;
+        if (!accel_geometry(d, &geom, &info, &prims)) { vk_unsupported("acceleration structures (invalid geometry)"); return { -1 }; }
+        VkAccelerationStructureBuildSizesInfoKHR sizes{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+        p_get_as_build_sizes(dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &prims, &sizes);
+        if (sizes.accelerationStructureSize == 0) { vk_unsupported("acceleration structures (build sizes returned 0)"); return { -1 }; }
+        a.result_size = sizes.accelerationStructureSize;
+        a.scratch_size = (std::max)(sizes.buildScratchSize, sizes.updateScratchSize);
+        if (!alloc_as_buffer(a.result_size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, &a.result, &a.result_mem) ||
+            !alloc_as_buffer(a.scratch_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &a.scratch, &a.scratch_mem)) {
+            vk_unsupported("acceleration structures (buffer allocation failed)"); return { -1 };
+        }
+        VkAccelerationStructureCreateInfoKHR ci{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+        ci.buffer = a.result; ci.size = a.result_size; ci.type = info.type;
+        if (p_create_as(dev, &ci, nullptr, &a.as) != VK_SUCCESS || !a.as) {
+            vk_unsupported("acceleration structures (vkCreateAccelerationStructureKHR failed)"); return { -1 };
+        }
+        if (p_get_as_addr) {
+            VkAccelerationStructureDeviceAddressInfoKHR ai{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+            ai.accelerationStructure = a.as;
+            a.address = p_get_as_addr(dev, &ai);
+        }
+        return { accels_.alloc(a) };
+    }
+    uint64_t acceleration_structure_address(AccelStructHandle h) override {
+        auto* a = accels_.get(h.id); return a ? a->address : 0;
+    }
+
+    // ---- ray-tracing pipeline + shader binding table ------------------------
+    RayTracingPipelineHandle create_ray_tracing_pipeline(const RayTracingPipelineDesc& d) override {
+        if (!ray_tracing_enabled_ || !p_create_rt_pipes || !p_get_group_handles) {
+            vk_unsupported("ray-tracing pipeline (VK_KHR_ray_tracing_pipeline not enabled)"); return { -1 };
+        }
+        auto* lib = shaders_.get(d.library.id);
+        if (!lib || !lib->mod || !d.ray_gen.entry_point) { vk_unsupported("ray-tracing pipeline (no library / ray-gen)"); return { -1 }; }
+
+        VKRayPipeline rp;
+        // Vulkan takes the library's exports as ordinary pipeline stages selected by entry
+        // point name, then GROUPS them: general groups for ray-gen and miss, triangle-hit
+        // groups tying a closest-hit (and optional any-hit) together.
+        std::vector<VkPipelineShaderStageCreateInfo> stages;
+        std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups;
+        auto add_stage = [&](VkShaderStageFlagBits st, const char* entry) -> uint32_t {
+            VkPipelineShaderStageCreateInfo si{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+            si.stage = st; si.module = lib->mod; si.pName = entry;
+            stages.push_back(si);
+            return uint32_t(stages.size() - 1);
+        };
+        auto general_group = [&](uint32_t stage_index) {
+            VkRayTracingShaderGroupCreateInfoKHR g{ VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR };
+            g.type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+            g.generalShader = stage_index;
+            g.closestHitShader = g.anyHitShader = g.intersectionShader = VK_SHADER_UNUSED_KHR;
+            groups.push_back(g);
+        };
+        general_group(add_stage(VK_SHADER_STAGE_RAYGEN_BIT_KHR, d.ray_gen.entry_point));
+        for (int i = 0; i < d.miss_count; ++i)
+            general_group(add_stage(VK_SHADER_STAGE_MISS_BIT_KHR, d.miss[i].entry_point));
+        for (int i = 0; i < d.hit_group_count; ++i) {
+            const RayHitGroup& hg = d.hit_groups[i];
+            VkRayTracingShaderGroupCreateInfoKHR g{ VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR };
+            g.type = hg.intersection ? VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR
+                                     : VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+            g.generalShader = VK_SHADER_UNUSED_KHR;
+            g.closestHitShader   = hg.closest_hit  ? add_stage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, hg.closest_hit)   : VK_SHADER_UNUSED_KHR;
+            g.anyHitShader       = hg.any_hit      ? add_stage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, hg.any_hit)           : VK_SHADER_UNUSED_KHR;
+            g.intersectionShader = hg.intersection ? add_stage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, hg.intersection) : VK_SHADER_UNUSED_KHR;
+            groups.push_back(g);
+        }
+
+        auto* pl = plls_.get(d.layout.id);
+        rp.layout = pl ? pl->layout : VK_NULL_HANDLE;
+        if (!rp.layout) {   // no explicit layout: an empty one still needs to exist
+            VkPipelineLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+            vkCreatePipelineLayout(dev, &lci, nullptr, &rp.layout);
+            rp.owns_layout = true;
+        }
+        // (VKPipelineLayout holds only the layout handle; set count is not tracked here.)
+
+        VkRayTracingPipelineCreateInfoKHR ci{ VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR };
+        ci.stageCount = (uint32_t)stages.size(); ci.pStages = stages.data();
+        ci.groupCount = (uint32_t)groups.size(); ci.pGroups = groups.data();
+        ci.maxPipelineRayRecursionDepth = d.max_recursion ? d.max_recursion : 1;
+        ci.layout = rp.layout;
+        if (p_create_rt_pipes(dev, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci, nullptr, &rp.pipeline) != VK_SUCCESS || !rp.pipeline) {
+            vk_unsupported("ray-tracing pipeline (vkCreateRayTracingPipelinesKHR failed)"); return { -1 };
+        }
+
+        // Shader binding table. Each record is a group handle plus that record's own
+        // arguments; both the per-record stride and each region's base have their own
+        // alignment requirement, taken from the device rather than assumed.
+        const uint32_t hsize  = rt_props_.shaderGroupHandleSize;
+        const uint32_t halign = rt_props_.shaderGroupHandleAlignment ? rt_props_.shaderGroupHandleAlignment : 1;
+        const uint32_t balign = rt_props_.shaderGroupBaseAlignment ? rt_props_.shaderGroupBaseAlignment : 1;
+        auto align_up = [](uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); };
+        auto record_size = [&](const RayLocalArg* args, int n) {
+            return (uint32_t)align_up(hsize + local_arg_bytes(args, n), halign);
+        };
+        const uint32_t rg_rec = record_size(d.ray_gen.args, d.ray_gen.arg_count);
+        uint32_t miss_rec = hsize, hit_rec = hsize;
+        for (int i = 0; i < d.miss_count; ++i)      miss_rec = (std::max)(miss_rec, record_size(d.miss[i].args, d.miss[i].arg_count));
+        for (int i = 0; i < d.hit_group_count; ++i) hit_rec  = (std::max)(hit_rec,  record_size(d.hit_groups[i].args, d.hit_groups[i].arg_count));
+        miss_rec = (uint32_t)align_up(miss_rec, halign); hit_rec = (uint32_t)align_up(hit_rec, halign);
+
+        const uint64_t rg_off   = 0;
+        const uint64_t miss_off = align_up(rg_off + align_up(rg_rec, balign), balign);
+        const uint64_t hit_off  = align_up(miss_off + uint64_t(miss_rec) * d.miss_count, balign);
+        const uint64_t total    = align_up(hit_off + uint64_t(hit_rec) * d.hit_group_count, balign);
+
+        std::vector<uint8_t> handles(size_t(hsize) * groups.size());
+        if (p_get_group_handles(dev, rp.pipeline, 0, (uint32_t)groups.size(), handles.size(), handles.data()) != VK_SUCCESS) {
+            vk_unsupported("ray-tracing pipeline (shader group handles)"); return { -1 };
+        }
+        if (!alloc_sbt_buffer(total ? total : balign, &rp.sbt, &rp.sbt_mem)) {
+            vk_unsupported("ray-tracing pipeline (shader table allocation)"); return { -1 };
+        }
+        uint8_t* map = nullptr;
+        vkMapMemory(dev, rp.sbt_mem, 0, VK_WHOLE_SIZE, 0, (void**)&map);
+        std::memset(map, 0, size_t(total ? total : balign));
+        auto write_record = [&](uint8_t* dst, uint32_t group, const RayLocalArg* args, int n) {
+            std::memcpy(dst, handles.data() + size_t(hsize) * group, hsize);
+            encode_local_args(dst + hsize, args, n);
+        };
+        uint32_t g = 0;
+        write_record(map + rg_off, g++, d.ray_gen.args, d.ray_gen.arg_count);
+        for (int i = 0; i < d.miss_count; ++i)
+            write_record(map + miss_off + uint64_t(miss_rec) * i, g++, d.miss[i].args, d.miss[i].arg_count);
+        for (int i = 0; i < d.hit_group_count; ++i)
+            write_record(map + hit_off + uint64_t(hit_rec) * i, g++, d.hit_groups[i].args, d.hit_groups[i].arg_count);
+        vkUnmapMemory(dev, rp.sbt_mem);
+
+        const VkDeviceAddress base = buffer_device_address(rp.sbt);
+        rp.raygen = { base + rg_off, rg_rec, rg_rec };   // ray-gen: size must equal stride
+        rp.miss   = { base + miss_off, miss_rec, uint64_t(miss_rec) * d.miss_count };
+        rp.hit    = { base + hit_off,  hit_rec,  uint64_t(hit_rec) * d.hit_group_count };
+        return { rt_pipes_.alloc(rp) };
+    }
+    void destroy_ray_tracing_pipeline(RayTracingPipelineHandle h) override {
+        if (auto* p = rt_pipes_.get(h.id)) {
+            if (p->pipeline) vkDestroyPipeline(dev, p->pipeline, nullptr);
+            if (p->owns_layout && p->layout) vkDestroyPipelineLayout(dev, p->layout, nullptr);
+            if (p->sbt) vkDestroyBuffer(dev, p->sbt, nullptr);
+            if (p->sbt_mem) vkFreeMemory(dev, p->sbt_mem, nullptr);
+        }
+        rt_pipes_.release(h.id);
+    }
+    VKRayPipeline* rt_pipeline(int id) { return rt_pipes_.get(id); }
+
+    // Bytes a record's local arguments occupy. Vulkan reads them as a shader-record buffer,
+    // so constants are laid out as-is and a buffer argument becomes its device address.
+    uint32_t local_arg_bytes(const RayLocalArg* args, int count) { return encode_local_args(nullptr, args, count); }
+    uint32_t encode_local_args(uint8_t* dst, const RayLocalArg* args, int count) {
+        uint32_t off = 0;
+        for (int i = 0; i < count; ++i) {
+            const RayLocalArg& a = args[i];
+            switch (a.kind) {
+                case RayArgKind::Constants: {
+                    const uint32_t n = (a.constants_size + 3u) & ~3u;
+                    if (dst && a.constants) std::memcpy(dst + off, a.constants, a.constants_size);
+                    off += n; break;
+                }
+                case RayArgKind::BufferAddress: {
+                    VkDeviceAddress va = 0;
+                    if (auto* b = buffers_.get(a.buffer.id)) va = buffer_device_address(b->buf) + a.buffer_offset;
+                    if (dst) std::memcpy(dst + off, &va, sizeof va);
+                    off += sizeof va; break;
+                }
+                case RayArgKind::DescriptorTable:
+                    // Vulkan has no descriptor-table-in-a-record concept; a shader record
+                    // carries plain data. Bind such resources through the global layout.
+                    if (dst) vk_unsupported("ray-tracing local arg (DescriptorTable; use Constants/BufferAddress)");
+                    break;
+            }
+        }
+        return off;
+    }
+    bool alloc_sbt_buffer(VkDeviceSize size, VkBuffer* out_buf, VkDeviceMemory* out_mem) {
+        VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = size; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        bi.usage = VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (vkCreateBuffer(dev, &bi, nullptr, out_buf) != VK_SUCCESS) return false;
+        VkMemoryRequirements req; vkGetBufferMemoryRequirements(dev, *out_buf, &req);
+        VkMemoryAllocateFlagsInfo maf{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+        maf.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        VkMemoryAllocateInfo mi{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO }; mi.pNext = &maf;
+        mi.allocationSize = req.size;
+        mi.memoryTypeIndex = find_mem(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(dev, &mi, nullptr, out_mem) != VK_SUCCESS) return false;
+        vkBindBufferMemory(dev, *out_buf, *out_mem, 0);
+        return true;
+    }
+    void destroy_acceleration_structure(AccelStructHandle h) override {
+        if (auto* a = accels_.get(h.id)) {
+            if (a->as && p_destroy_as) p_destroy_as(dev, a->as, nullptr);
+            if (a->result)      vkDestroyBuffer(dev, a->result, nullptr);
+            if (a->result_mem)  vkFreeMemory(dev, a->result_mem, nullptr);
+            if (a->scratch)     vkDestroyBuffer(dev, a->scratch, nullptr);
+            if (a->scratch_mem) vkFreeMemory(dev, a->scratch_mem, nullptr);
+        }
+        accels_.release(h.id);
+    }
 
     // ---- debug labels -------------------------------------------------------
     void set_debug_name(ObjectType type, uint32_t id, const char* name) override {
@@ -939,6 +1424,13 @@ public:
 
     // accessors for the commander
     VKBuffer* buffer(int id) { return buffers_.get(id); }
+    VKAccelStruct* accel(int id) { return accels_.get(id); }
+    // Device address of a raw VkBuffer (acceleration-structure scratch is not a BufferHandle).
+    VkDeviceAddress buffer_device_address(VkBuffer b) {
+        if (!b || !p_get_buf_addr) return 0;
+        VkBufferDeviceAddressInfo ai{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO }; ai.buffer = b;
+        return p_get_buf_addr(dev, &ai);
+    }
     VKTexture* texture(int id) { return textures_.get(id); }
     VKSampler* sampler(int id) { return samplers_.get(id); }
     VKPipeline* pipeline(int id) { return pipelines_.get(id); }
@@ -951,7 +1443,7 @@ public:
     Pool<VKBuffer> buffers_; Pool<VKTexture> textures_; Pool<VKSampler> samplers_; Pool<VKShader> shaders_;
     Pool<VKPipeline> pipelines_; Pool<VKRenderTarget> rts_; Pool<VKFence> fences_; Pool<VKSem> sems_;
     Pool<VKTimeline> timelines_; Pool<VKQuery> queries_; Pool<VKDescSetLayout> dsls_; Pool<VKPipelineLayout> plls_;
-    Pool<VKDescriptorSet> dsets_; Pool<VKPipelineCache> pcaches_; Pool<VKAccelStruct> accels_;
+    Pool<VKDescriptorSet> dsets_; Pool<VKPipelineCache> pcaches_; Pool<VKAccelStruct> accels_; Pool<VKRayPipeline> rt_pipes_;
 };
 
 //=============================================================================
@@ -982,7 +1474,7 @@ public:
         VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }; bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         vkBeginCommandBuffer(cb_, &bi); in_pass_ = false;
         if (desc_pool_) vkResetDescriptorPool(dev_->dev, desc_pool_, 0);
-        for (int i = 0; i < MAX_BIND; ++i) { ubo_[i] = {}; ssbo_[i] = {}; tex_[i] = VK_NULL_HANDLE; samp_[i] = VK_NULL_HANDLE; }
+        for (int i = 0; i < MAX_BIND; ++i) { ubo_[i] = {}; ssbo_[i] = {}; tex_[i] = VK_NULL_HANDLE; samp_[i] = VK_NULL_HANDLE; simg_[i] = VK_NULL_HANDLE; }
         desc_dirty_ = false;
     }
     void end() override {
@@ -993,7 +1485,14 @@ public:
     }
 
     // Acquire the next swapchain image and bind it as the colour target (windowed present).
-    void set_render_target_backbuffer() override { end_pass(); color_tex_ = dev_->acquire_backbuffer(); depth_tex_ = -1; }
+    // `depth_stencil` (optional) is attached alongside — a swapchain image is colour-only, so
+    // depth testing and stencil clipping against the backbuffer need one supplied here.
+    void set_render_target_backbuffer(RenderTargetHandle depth_stencil) override {
+        end_pass();
+        color_tex_ = dev_->acquire_backbuffer();
+        depth_tex_ = -1;
+        if (depth_stencil.valid()) if (auto* rt = dev_->rt(depth_stencil.id)) depth_tex_ = rt->depth_tex;
+    }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
         end_pass(); color_tex_ = -1; depth_tex_ = -1;
         if (count > 0 && colors) if (auto* rt = dev_->rt(colors[0].id)) color_tex_ = rt->color_tex;
@@ -1016,7 +1515,7 @@ public:
         VkImageSubresourceRange rng{ depth->aspect, 0, (uint32_t)depth->levels, 0, (uint32_t)depth->layers };
         vkCmdClearDepthStencilImage(cb_, depth->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &dsv, 1, &rng);
     }
-    void set_pipeline(PipelineHandle h) override { auto* p = dev_->pipeline(h.id); if (!p) return; cur_pipeline_ = p; vkCmdBindPipeline(cb_, p->bind, p->pipeline); }
+    void set_pipeline(PipelineHandle h) override { auto* p = dev_->pipeline(h.id); if (!p) return; cur_pipeline_ = p; rt_ = nullptr; vkCmdBindPipeline(cb_, p->bind, p->pipeline); }
     void bind_vertex_buffer(uint32_t slot, BufferHandle h, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (!b) return; VkDeviceSize off = offset; vkCmdBindVertexBuffers(cb_, slot, 1, &b->buf, &off); }
     void bind_index_buffer(BufferHandle h, IndexFormat fmt, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (!b) return; vkCmdBindIndexBuffer(cb_, b->buf, offset, fmt == IndexFormat::UInt16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32); }
     // Slot binds record into the pending tables; flush_descriptors() writes + binds an auto
@@ -1026,9 +1525,32 @@ public:
     void bind_uniform_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override { if (slot >= MAX_BIND) return; auto* b = dev_->buffer(h.id); if (!b) return; ubo_[slot] = { b->buf, offset, size ? size : VK_WHOLE_SIZE }; desc_dirty_ = true; }
     void push_constants(uint32_t offset, const void* data, uint32_t size) override { if (cur_pipeline_ && cur_pipeline_->layout) vkCmdPushConstants(cb_, cur_pipeline_->layout, VK_SHADER_STAGE_ALL, offset, size, data); }
     void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override { if (slot >= MAX_BIND) return; auto* b = dev_->buffer(h.id); if (!b) return; ssbo_[slot] = { b->buf, offset, size ? size : VK_WHOLE_SIZE }; desc_dirty_ = true; }
-    void bind_storage_texture(uint32_t, TextureHandle, int, StorageAccess) override {}
+    // Storage image (RWTexture2D / image2D). Kept in its own slot array rather than tex_[]:
+    // a sampled image and a storage image can share a binding number in different sets, and
+    // they need different descriptor types and layouts. The image is transitioned to GENERAL
+    // here — a storage image cannot be read/written in SHADER_READ_ONLY layout.
+    void bind_storage_texture(uint32_t slot, TextureHandle h, int mip, StorageAccess access) override {
+        (void)mip; (void)access;   // the shader's declaration carries the access; mip views are per-texture
+        if (slot >= MAX_BIND) return;
+        auto* t = dev_->texture(h.id); if (!t) return;
+        VKDevice::barrier(cb_, t, VK_IMAGE_LAYOUT_GENERAL);
+        simg_[slot] = t->view;
+        desc_dirty_ = true;
+    }
     void bind_descriptor_set(uint32_t set_index, DescriptorSetHandle h, const uint32_t* dyn, int dyn_count) override {
-        auto* ds = dev_->descriptor_set(h.id); if (!ds || !cur_pipeline_) return;
+        auto* ds = dev_->descriptor_set(h.id); if (!ds) return;
+        // The set's descriptors promise GENERAL for any storage image; perform that
+        // transition now, since writing the set had no command buffer to do it with.
+        for (int tid : ds->storage_textures)
+            if (auto* t = dev_->texture(tid)) VKDevice::barrier(cb_, t, VK_IMAGE_LAYOUT_GENERAL);
+        // A ray-tracing pipeline has its own bind point and layout; descriptor sets bound to
+        // the graphics/compute point are not visible to a trace.
+        if (rt_) {
+            vkCmdBindDescriptorSets(cb_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, rt_->layout,
+                                    set_index, 1, &ds->set, (uint32_t)dyn_count, dyn);
+            return;
+        }
+        if (!cur_pipeline_) return;
         vkCmdBindDescriptorSets(cb_, cur_pipeline_->bind, cur_pipeline_->layout, set_index, 1, &ds->set, (uint32_t)dyn_count, dyn);
     }
     void draw(uint32_t vc, uint32_t first, uint32_t inst, uint32_t first_inst) override { ensure_pass(); flush_descriptors(); vkCmdDraw(cb_, vc, inst ? inst : 1, first, first_inst); }
@@ -1037,8 +1559,18 @@ public:
     void draw_indirect(BufferHandle a, uint32_t off, uint32_t count, uint32_t stride) override { ensure_pass(); auto* b = dev_->buffer(a.id); if (b) vkCmdDrawIndirect(cb_, b->buf, off, count, stride ? stride : sizeof(VkDrawIndirectCommand)); }
     void draw_indexed_indirect(BufferHandle a, uint32_t off, uint32_t count, uint32_t stride) override { ensure_pass(); auto* b = dev_->buffer(a.id); if (b) vkCmdDrawIndexedIndirect(cb_, b->buf, off, count, stride ? stride : sizeof(VkDrawIndexedIndirectCommand)); }
     void dispatch_indirect(BufferHandle a, uint32_t off) override { auto* b = dev_->buffer(a.id); if (b) vkCmdDispatchIndirect(cb_, b->buf, off); }
-    void draw_mesh_tasks(uint32_t, uint32_t, uint32_t) override { vk_unsupported("draw_mesh_tasks"); }
-    void draw_mesh_tasks_indirect(BufferHandle, uint32_t, uint32_t, uint32_t) override { vk_unsupported("draw_mesh_tasks_indirect"); }
+    void draw_mesh_tasks(uint32_t x, uint32_t y, uint32_t z) override {
+        if (!dev_->p_draw_mesh) { vk_unsupported("draw_mesh_tasks (VK_EXT_mesh_shader not enabled)"); return; }
+        ensure_pass(); flush_descriptors();
+        dev_->p_draw_mesh(cb_, x ? x : 1, y ? y : 1, z ? z : 1);
+    }
+    void draw_mesh_tasks_indirect(BufferHandle a, uint32_t off, uint32_t count, uint32_t stride) override {
+        auto p = (PFN_vkCmdDrawMeshTasksIndirectEXT)vkGetDeviceProcAddr(dev_->dev, "vkCmdDrawMeshTasksIndirectEXT");
+        if (!p) { vk_unsupported("draw_mesh_tasks_indirect (VK_EXT_mesh_shader not enabled)"); return; }
+        ensure_pass(); flush_descriptors();
+        auto* b = dev_->buffer(a.id); if (!b) return;
+        p(cb_, b->buf, off, count, stride ? stride : sizeof(VkDrawMeshTasksIndirectCommandEXT));
+    }
     void memory_barrier(uint32_t) override {
         VkMemoryBarrier b{ VK_STRUCTURE_TYPE_MEMORY_BARRIER }; b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT; b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
@@ -1086,12 +1618,63 @@ public:
     void set_scissors(const ScissorRect* r, int n) override { std::vector<VkRect2D> rs(n); for (int i=0;i<n;++i) rs[i]={{r[i].x,r[i].y},{(uint32_t)r[i].width,(uint32_t)r[i].height}}; vkCmdSetScissor(cb_,0,(uint32_t)n,rs.data()); }
     void draw_indirect_count(BufferHandle a, uint32_t ao, BufferHandle cnt, uint32_t co, uint32_t maxd, uint32_t stride) override { ensure_pass(); auto* b = dev_->buffer(a.id); auto* c = dev_->buffer(cnt.id); if (b && c && vkCmdDrawIndirectCount) vkCmdDrawIndirectCount(cb_, b->buf, ao, c->buf, co, maxd, stride ? stride : sizeof(VkDrawIndirectCommand)); }
     void draw_indexed_indirect_count(BufferHandle a, uint32_t ao, BufferHandle cnt, uint32_t co, uint32_t maxd, uint32_t stride) override { ensure_pass(); auto* b = dev_->buffer(a.id); auto* c = dev_->buffer(cnt.id); if (b && c && vkCmdDrawIndexedIndirectCount) vkCmdDrawIndexedIndirectCount(cb_, b->buf, ao, c->buf, co, maxd, stride ? stride : sizeof(VkDrawIndexedIndirectCommand)); }
-    void build_acceleration_structure(AccelStructHandle, const AccelStructDesc&) override { vk_unsupported("build_acceleration_structure"); }
-    void trace_rays(uint32_t, uint32_t, uint32_t) override { vk_unsupported("trace_rays"); }
+    void build_acceleration_structure(AccelStructHandle h, const AccelStructDesc& d) override {
+        auto* a = dev_->accel(h.id);
+        if (!a || !a->as || !dev_->p_cmd_build_as) { vk_unsupported("build_acceleration_structure (ray tracing not enabled)"); return; }
+        // A build is not a render-pass operation; an open pass must be closed first.
+        end_pass();
+        VkAccelerationStructureGeometryKHR geom{};
+        VkAccelerationStructureBuildGeometryInfoKHR info{};
+        uint32_t prims = 0;
+        if (!dev_->accel_geometry(d, &geom, &info, &prims)) return;
+        info.dstAccelerationStructure = a->as;
+        if (d.update) info.srcAccelerationStructure = a->as;   // refit in place
+        info.scratchData.deviceAddress = dev_->buffer_device_address(a->scratch);
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        range.primitiveCount = prims;
+        const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
+        dev_->p_cmd_build_as(cb_, 1, &info, &ranges);
+        // Anything reading the structure — a trace, or a TLAS build over this BLAS — must see
+        // the build's writes.
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb_, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    // Ray tracing has its own bind point, so binding an RT pipeline does not disturb the
+    // graphics/compute one — but descriptor sets must then be bound to that bind point,
+    // which is why the bound pipeline is remembered here.
+    void set_ray_tracing_pipeline(RayTracingPipelineHandle h) override {
+        auto* p = dev_->rt_pipeline(h.id);
+        if (!p || !p->pipeline) { vk_unsupported("set_ray_tracing_pipeline (invalid pipeline)"); return; }
+        end_pass();   // tracing is not a render-pass operation
+        vkCmdBindPipeline(cb_, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, p->pipeline);
+        rt_ = p;
+        cur_pipeline_ = nullptr;
+    }
+    void trace_rays(uint32_t width, uint32_t height, uint32_t depth) override {
+        if (!rt_ || !dev_->p_cmd_trace) { vk_unsupported("trace_rays (no ray-tracing pipeline bound)"); return; }
+        VkStridedDeviceAddressRegionKHR callable{};
+        dev_->p_cmd_trace(cb_, &rt_->raygen, &rt_->miss, &rt_->hit, &callable,
+                          width, height ? height : 1, depth ? depth : 1);
+    }
 
 private:
     void ensure_pass() {
-        if (in_pass_ || !cur_pipeline_ || cur_pipeline_->bind != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
+        if (!cur_pipeline_ || cur_pipeline_->bind != VK_PIPELINE_BIND_POINT_GRAPHICS) return;
+        // A pipeline may only be used inside a render pass COMPATIBLE with the one it was
+        // built against, and attachment count is part of compatibility. So an open pass
+        // whose attachments don't match the bound pipeline's must be restarted, not reused
+        // — otherwise switching between a depth/stencil pipeline and a colour-only one
+        // mid-frame (which the GUI does whenever clipping starts) binds into the wrong pass.
+        // Pipeline, descriptor and dynamic state all survive a render-pass boundary.
+        const bool want_depth = cur_pipeline_->has_depth && dev_->texture(depth_tex_) != nullptr;
+        if (in_pass_) {
+            if (want_depth == pass_has_depth_) return;
+            end_pass();
+        }
         auto* color = dev_->texture(color_tex_); if (!color) return;   // look up fresh: the Pool may have reallocated
         // Begin a transient framebuffer + render pass matching the bound target. When the
         // pipeline has a depth attachment, include the bound depth target as attachment 1
@@ -1099,12 +1682,13 @@ private:
         VKDevice::barrier(cb_, color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         VkImageView views[2] = { color->view, VK_NULL_HANDLE };
         uint32_t att = 1;
-        if (cur_pipeline_->has_depth) {
+        if (want_depth) {
             if (auto* depth = dev_->texture(depth_tex_)) {
                 VKDevice::barrier(cb_, depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
                 views[1] = depth->view; att = 2;
             }
         }
+        pass_has_depth_ = want_depth;
         VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
         fci.renderPass = cur_pipeline_->render_pass; fci.attachmentCount = att; fci.pAttachments = views;
         fci.width = color->w; fci.height = color->h; fci.layers = 1;
@@ -1148,6 +1732,10 @@ private:
                 case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
                     if (!tex_[b.binding] || !samp_[b.binding]) continue;
                     imgs.push_back({ samp_[b.binding], tex_[b.binding], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }); w.pImageInfo = &imgs.back(); break;
+                case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                    // GENERAL, not SHADER_READ_ONLY: a storage image is written, not sampled.
+                    if (!simg_[b.binding]) continue;
+                    imgs.push_back({ VK_NULL_HANDLE, simg_[b.binding], VK_IMAGE_LAYOUT_GENERAL }); w.pImageInfo = &imgs.back(); break;
                 default: continue;
             }
             writes.push_back(w);
@@ -1163,13 +1751,16 @@ private:
     VkFramebuffer fb_ = VK_NULL_HANDLE;
     int color_tex_ = -1;   // bound colour target's texture id (looked up per use; Pool may move)
     int depth_tex_ = -1;   // bound depth target's texture id (-1 = none)
+    VKRayPipeline* rt_ = nullptr;   // bound ray-tracing pipeline (its tables feed trace_rays)
     VKPipeline* cur_pipeline_ = nullptr;
     bool in_pass_ = false;
+    bool pass_has_depth_ = false;   // attachment shape of the open pass (render-pass compatibility)
     // Pending slot binds (auto descriptor path) + the per-frame pool they allocate from.
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
     struct SlotBuf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceSize off = 0; VkDeviceSize range = VK_WHOLE_SIZE; };
     SlotBuf  ubo_[MAX_BIND]{}, ssbo_[MAX_BIND]{};
     VkImageView tex_[MAX_BIND]{};
+    VkImageView simg_[MAX_BIND]{};   // storage images (bind_storage_texture), bound as STORAGE_IMAGE in GENERAL layout
     VkSampler   samp_[MAX_BIND]{};
     bool desc_dirty_ = false;
 };

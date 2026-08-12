@@ -108,6 +108,33 @@ MTLPixelFormat tex_format(TextureFormat f) {
     }
 }
 
+MTLCompareFunction mtl_compare(CompareFunc f) {
+    switch (f) {
+        case CompareFunc::Never:        return MTLCompareFunctionNever;
+        case CompareFunc::Less:         return MTLCompareFunctionLess;
+        case CompareFunc::Equal:        return MTLCompareFunctionEqual;
+        case CompareFunc::LessEqual:    return MTLCompareFunctionLessEqual;
+        case CompareFunc::Greater:      return MTLCompareFunctionGreater;
+        case CompareFunc::NotEqual:     return MTLCompareFunctionNotEqual;
+        case CompareFunc::GreaterEqual: return MTLCompareFunctionGreaterEqual;
+        case CompareFunc::Always:       return MTLCompareFunctionAlways;
+    }
+    return MTLCompareFunctionLess;
+}
+MTLStencilOperation mtl_stencil_op(StencilOp o) {
+    switch (o) {
+        case StencilOp::Keep:     return MTLStencilOperationKeep;
+        case StencilOp::Zero:     return MTLStencilOperationZero;
+        case StencilOp::Replace:  return MTLStencilOperationReplace;
+        case StencilOp::IncrSat:  return MTLStencilOperationIncrementClamp;
+        case StencilOp::DecrSat:  return MTLStencilOperationDecrementClamp;
+        case StencilOp::Invert:   return MTLStencilOperationInvert;
+        case StencilOp::IncrWrap: return MTLStencilOperationIncrementWrap;
+        case StencilOp::DecrWrap: return MTLStencilOperationDecrementWrap;
+    }
+    return MTLStencilOperationKeep;
+}
+
 struct MTBuffer  { id<MTLBuffer> buf = nil; uint32_t size = 0; };
 struct MTTexture { id<MTLTexture> tex = nil; MTLPixelFormat fmt = MTLPixelFormatRGBA8Unorm; TextureFormat tf = TextureFormat::RGBA8_UNORM; int w = 0, h = 0; };
 struct MTSampler { id<MTLSamplerState> s = nil; };
@@ -189,6 +216,21 @@ public:
         p.rps = [dev newRenderPipelineStateWithDescriptor:rd error:&err];
         if (err) mtl_unsupported("render pipeline");
         MTLDepthStencilDescriptor* dd = [MTLDepthStencilDescriptor new]; dd.depthWriteEnabled = d.depth_stencil.depth_write; dd.depthCompareFunction = d.depth_stencil.depth_enable ? MTLCompareFunctionLess : MTLCompareFunctionAlways;
+        // Stencil (used by the GUI's clip masks); the reference is dynamic (setStencilReferenceValue).
+        if (d.depth_stencil.stencil_enable) {
+            auto face = [&](const StencilOpDesc& s) {
+                MTLStencilDescriptor* o = [MTLStencilDescriptor new];
+                o.stencilFailureOperation   = mtl_stencil_op(s.stencil_fail);
+                o.depthFailureOperation     = mtl_stencil_op(s.depth_fail);
+                o.depthStencilPassOperation = mtl_stencil_op(s.pass);
+                o.stencilCompareFunction    = mtl_compare(s.func);
+                o.readMask                  = d.depth_stencil.stencil_read_mask;
+                o.writeMask                 = d.depth_stencil.stencil_write_mask;
+                return o;
+            };
+            dd.frontFaceStencil = face(d.depth_stencil.front_face);
+            dd.backFaceStencil  = face(d.depth_stencil.back_face);
+        }
         p.dss = [dev newDepthStencilStateWithDescriptor:dd];
         return { pipelines_.alloc(p) };
     }
@@ -276,16 +318,29 @@ public:
 
     void begin() override { cb_ = [dev_->queue commandBuffer]; }
     void end() override { if (enc_) { [enc_ endEncoding]; enc_ = nil; } }
-    void set_render_target_backbuffer() override { mtl_unsupported("backbuffer target (CAMetalLayer drawable path TODO)"); }
+    void set_render_target_backbuffer(RenderTargetHandle) override { mtl_unsupported("backbuffer target (CAMetalLayer drawable path TODO)"); }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
         if (enc_) { [enc_ endEncoding]; enc_ = nil; }
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         for (int i = 0; i < count && colors; ++i) if (auto* rt = dev_->rt(colors[i].id)) if (auto* t = dev_->texture(rt->color_tex)) { rp.colorAttachments[i].texture = t->tex; rp.colorAttachments[i].loadAction = MTLLoadActionLoad; rp.colorAttachments[i].storeAction = MTLStoreActionStore; }
-        if (depth.valid()) if (auto* rt = dev_->rt(depth.id)) if (auto* t = dev_->texture(rt->depth_tex)) rp.depthAttachment.texture = t->tex;
+        // A combined depth-stencil format feeds BOTH attachments — Metal keeps them separate,
+        // and stencil ops are dropped unless stencilAttachment carries the texture too.
+        if (depth.valid()) if (auto* rt = dev_->rt(depth.id)) if (auto* t = dev_->texture(rt->depth_tex)) {
+            rp.depthAttachment.texture = t->tex;
+            if (texture_format_has_stencil(t->tf)) rp.stencilAttachment.texture = t->tex;
+        }
         pending_rp_ = rp;
     }
     void clear_color(const ClearColor& c) override { if (pending_rp_) { pending_rp_.colorAttachments[0].loadAction = MTLLoadActionClear; pending_rp_.colorAttachments[0].clearColor = MTLClearColorMake(c.r, c.g, c.b, c.a); } }
-    void clear_depth_stencil(const ClearDepthStencil& ds) override { if (pending_rp_) { pending_rp_.depthAttachment.loadAction = MTLLoadActionClear; pending_rp_.depthAttachment.clearDepth = ds.depth; } }
+    void clear_depth_stencil(const ClearDepthStencil& ds) override {
+        if (!pending_rp_) return;
+        pending_rp_.depthAttachment.loadAction = MTLLoadActionClear;
+        pending_rp_.depthAttachment.clearDepth = ds.depth;
+        if (pending_rp_.stencilAttachment.texture) {
+            pending_rp_.stencilAttachment.loadAction  = MTLLoadActionClear;
+            pending_rp_.stencilAttachment.clearStencil = ds.stencil;
+        }
+    }
     void ensure_encoder() { if (!enc_ && pending_rp_) { enc_ = [cb_ renderCommandEncoderWithDescriptor:pending_rp_]; if (cur_ && cur_->rps) { [enc_ setRenderPipelineState:cur_->rps]; if (cur_->dss) [enc_ setDepthStencilState:cur_->dss]; } } }
     void set_viewport(const Viewport& v) override { ensure_encoder(); if (enc_) [enc_ setViewport:(MTLViewport){ v.x, v.y, v.width, v.height, v.min_depth, v.max_depth }]; }
     void set_scissor(const ScissorRect& r) override { ensure_encoder(); if (enc_) [enc_ setScissorRect:(MTLScissorRect){ (NSUInteger)r.x, (NSUInteger)r.y, (NSUInteger)r.width, (NSUInteger)r.height }]; }

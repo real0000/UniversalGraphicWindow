@@ -62,7 +62,8 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     vs_       = ShaderCompiler::compile_and_create_cached(device_, atlas.c_str(), atlas.size(), ShaderStage::Vertex,   "vs_main");
     fs_       = ShaderCompiler::compile_and_create_cached(device_, atlas.c_str(), atlas.size(), ShaderStage::Fragment, "ps_atlas");
     fs_image_ = ShaderCompiler::compile_and_create_cached(device_, image.c_str(), image.size(), ShaderStage::Fragment, "ps_image");
-    if (!vs_.valid() || !fs_.valid() || !fs_image_.valid()) return false;
+    fs_clip_  = ShaderCompiler::compile_and_create_cached(device_, atlas.c_str(), atlas.size(), ShaderStage::Fragment, "ps_clip_mask");
+    if (!vs_.valid() || !fs_.valid() || !fs_image_.valid() || !fs_clip_.valid()) return false;
 #else
     return false;   // the GUI renderer's shaders now require the built-in shader compiler
 #endif
@@ -108,9 +109,8 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     pd.layout          = pipe_layout_;     // invalid on GL → reflected/auto bindings
     pd.topology        = PrimitiveTopology::TriangleList;
     pd.blend           = BlendState::alpha_blend();
-    pd.depth_stencil   = DepthStencilState::disabled();
     pd.rasterizer      = RasterizerState::no_cull();
-    pd.rasterizer.scissor_enable = true;   // we always scissor (full-screen rect = no clip)
+    pd.rasterizer.scissor_enable = false;  // clipping is stencil masks now, not scissor
     VertexLayout& l = pd.vertex_layout;
     l.attributes[0] = { 0, VertexFormat::Float2, 0,  0 };   // pos
     l.attributes[1] = { 1, VertexFormat::Float3, 8,  0 };   // uvw (z selects shader path)
@@ -120,8 +120,16 @@ bool GpuGuiRenderer::init(GraphicDevice* device) {
     l.strides[0]      = FLOATS_PER_VERT * sizeof(float);
     l.buffer_count    = 1;
 
+    // Every content draw goes through the stencil test — including content with no clip
+    // of its own, which gets a full-framebuffer mask. One pipeline shape rather than a
+    // clipped/unclipped pair is deliberate: Vulkan requires a pipeline's render pass to be
+    // compatible with the open one, and a stencil pipeline carries a depth-stencil
+    // attachment while a stencil-free one does not. Alternating them mid-pass — which a
+    // GUI does constantly — would bind a pipeline into an incompatible render pass.
+    pd.depth_stencil = gfx::StencilClipper::content_state();
     pd.fragment_shader = fs_;        pipeline_       = device_->create_pipeline(pd);
     pd.fragment_shader = fs_image_;  image_pipeline_ = device_->create_pipeline(pd);
+    if (!clipper_.init(device_, vs_, fs_clip_)) return false;
     return pipeline_.valid() && image_pipeline_.valid();
 }
 
@@ -149,16 +157,18 @@ DescriptorSetHandle GpuGuiRenderer::desc_set_for(TextureHandle tex, uint32_t ubo
 
 void GpuGuiRenderer::shutdown() {
     if (!device_) return;
+    clipper_.shutdown();
     if (vbo_.valid())            device_->destroy_buffer(vbo_);
     for (uint32_t i = 0; i < kUboSlots; ++i)
         if (proj_ubo_[i].valid()) device_->destroy_buffer(proj_ubo_[i]);
     if (dummy_atlas_.valid())       device_->destroy_texture(dummy_atlas_);
     if (dummy_color_atlas_.valid()) device_->destroy_texture(dummy_color_atlas_);
-    if (pipeline_.valid())       device_->destroy_pipeline(pipeline_);
-    if (image_pipeline_.valid()) device_->destroy_pipeline(image_pipeline_);
+    if (pipeline_.valid())             device_->destroy_pipeline(pipeline_);
+    if (image_pipeline_.valid())       device_->destroy_pipeline(image_pipeline_);
     if (vs_.valid())             device_->destroy_shader(vs_);
     if (fs_.valid())             device_->destroy_shader(fs_);
     if (fs_image_.valid())       device_->destroy_shader(fs_image_);
+    if (fs_clip_.valid())        device_->destroy_shader(fs_clip_);
     for (auto& kv : desc_sets_) device_->destroy_descriptor_set(kv.second);
     desc_sets_.clear();
     if (set_layout_.valid())  device_->destroy_descriptor_set_layout(set_layout_);
@@ -241,7 +251,7 @@ TextureHandle GpuGuiRenderer::resolve_texture(const WidgetRenderInfo::TextureCmd
 
 void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
                             TextureHandle atlas, const float proj[16],
-                            int fb_w, int fb_h, float scale, TextureHandle color_atlas) {
+                            int fb_w, int fb_h, TextureHandle color_atlas) {
     if (!device_ || !cmd) return;
 
     // The colour-emoji atlas bound at binding 3 for every draw this pass.
@@ -255,15 +265,22 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
     // Solid + glyph quads use the atlas pipeline (one bound sampler2DArray, so they
     // batch freely); each image is its own sampler2D texture. To keep correct depth
     // order, walk the draw order once into segments — a run of primitives sharing a
-    // pipeline (and, for images, the same texture) under one scissor — and replay
+    // pipeline (and, for images, the same texture) under one clip mask — and replay
     // them in order. A run of glyphs/solids stays a single draw; a new image texture
     // (or a clip change) starts a new segment.
+    //
+    // A clip change allocates a stencil mask instead of a scissor rect: the mask is
+    // stamped just before the segment that needs it, and the segment draws through a
+    // stencil-testing pipeline. Nothing here is limited to axis-aligned rectangles —
+    // ClipShape carries a transform, so a rotated or rounded clip is the same code path.
     enum class Kind { Atlas, Image };
-    struct Segment { Kind kind; int tex; uint32_t first, count; int sx, sy, sw, sh; };
+    struct Segment { Kind kind; int tex; uint32_t first, count; uint32_t mask; };
     std::vector<Segment> segs;
 
-    int sx = 0, sy = 0, sw = fb_w, sh = fb_h;   // running scissor (full = no clip)
-    Segment cur{ Kind::Atlas, -1, 0, 0, sx, sy, sw, sh };
+    clipper_.begin_pass(proj, fb_w, fb_h);
+    uint32_t mask = gfx::StencilClipper::kNoMask;   // running clip (kNoMask = unclipped)
+    bool clip_kills_all = false;                    // clip that admits nothing: skip content
+    Segment cur{ Kind::Atlas, -1, 0, 0, mask };
     bool have_cur = false, force_break = false;
     uint32_t vc = 0;
     auto flush = [&]() { if (have_cur && cur.count > 0) segs.push_back(cur); };
@@ -271,17 +288,26 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
     using Pool = WidgetRenderInfo::DrawRef::Pool;
     for (const auto& ref : info.get_draw_order()) {
         if (ref.clip_changed) {
-            sx = 0; sy = 0; sw = fb_w; sh = fb_h;
+            // An empty clip box is the "no clip" identity here (widgets enable clipping
+            // without ever setting a rect), matching collect_canvases' clip_isect(). It
+            // becomes a full-framebuffer mask so unclipped content shares the one
+            // stencil-tested pipeline instead of needing a stencil-free twin.
+            // The clip box is in the same space as the draw commands, and the mask is
+            // transformed by the same `proj` they are — so, unlike the scissor rect this
+            // replaced, it needs no conversion into framebuffer pixels.
             const float bw = math::box_width(ref.clip), bh = math::box_height(ref.clip);
-            if (bw > 0.0f && bh > 0.0f) {
-                const float bx = math::x(math::box_min(ref.clip));
-                const float by = math::y(math::box_min(ref.clip));
-                sx = int(bx * scale); sw = int(bw * scale); sh = int(bh * scale);
-                // GL scissor origin is bottom-left (Y flip); Vulkan/D3D/Metal are top-left.
-                sy = flip_scissor_y() ? int(fb_h - (by + bh) * scale) : int(by * scale);
-            }
+            const gfx::ClipShape shape =
+                (bw > 0.0f && bh > 0.0f)
+                    ? gfx::ClipShape::from_rect(math::x(math::box_min(ref.clip)),
+                                                math::y(math::box_min(ref.clip)), bw, bh)
+                    : clipper_.cover_shape();
+            mask = clipper_.add(shape);
+            clip_kills_all = (mask == gfx::StencilClipper::kNoMask);
             force_break = true;   // applies even if the next primitive(s) are skipped
         }
+        // Either the clip admits nothing, or no stencil is available to enforce it —
+        // both mean this content cannot be drawn correctly, so it is not drawn at all.
+        if (clip_kills_all) continue;
 
         // Classify the primitive: which pipeline, and (for images) which texture.
         Kind kind = Kind::Atlas; int tex = -1;
@@ -296,7 +322,7 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
 
         if (!have_cur || force_break || kind != cur.kind || (kind == Kind::Image && tex != cur.tex)) {
             flush();
-            cur = Segment{ kind, tex, vc, 0, sx, sy, sw, sh };
+            cur = Segment{ kind, tex, vc, 0, mask };
             have_cur = true; force_break = false;
         }
 
@@ -347,15 +373,30 @@ void GpuGuiRenderer::render(GraphicCommander* cmd, WidgetRenderInfo& info,
     ubo_slot_ = (ubo_slot_ + 1) % kUboSlots;
     device_->update_buffer(proj_ubo_[slot], proj, 16 * sizeof(float), 0);
 
+    // Mask geometry uploads with the content's, before anything is recorded — writing to
+    // a buffer between recorded draws would race on the deferred backends.
+    clipper_.upload();
+
+    // Vulkan and D3D12 declare the scissor as dynamic state, so a draw with none ever set
+    // is invalid (D3D12) or undefined (Vulkan). This full-framebuffer rect satisfies that
+    // contract and nothing more — it is not the clip, which is entirely stencil-driven.
+    cmd->set_scissor(ScissorRect{ 0, 0, fb_w, fb_h });
+
+    uint32_t stamped = gfx::StencilClipper::kNoMask;   // mask currently in the stencil buffer
     for (const auto& s : segs) {
+        // Stamp this segment's clip, unless the previous segment already left it there.
+        if (s.mask != stamped) {
+            clipper_.draw_mask(cmd, s.mask);
+            stamped = s.mask;
+        }
         cmd->set_pipeline(s.kind == Kind::Image ? image_pipeline_ : pipeline_);
+        cmd->set_stencil_reference(clipper_.ref_of(s.mask));
         cmd->bind_vertex_buffer(0, vbo_, vbo_base);
         // Atlas-kind draws fall back to the 1x1 dummy atlas when none was supplied, so the set
         // (which carries the projection UBO) is always complete and bindable.
         TextureHandle tex = (s.kind == Kind::Image) ? TextureHandle{ s.tex }
                                                     : (atlas.valid() ? atlas : dummy_atlas_);
         cmd->bind_descriptor_set(0, desc_set_for(tex, slot));   // UBO slot + texture + sampler; same on every backend
-        cmd->set_scissor(ScissorRect{ s.sx, s.sy, s.sw, s.sh });
         cmd->draw(s.count, s.first);
     }
 }
@@ -462,8 +503,8 @@ bool clip_isect(const math::Box& a, const math::Box& b, math::Box* out) {
 
 // One canvas to draw, with the clip it inherits from the widget hierarchy.
 struct CanvasDraw {
-    IGuiCanvasView*              cv;
-    gfx::VectorRenderer::ClipRect clip;   // physical px
+    IGuiCanvasView* cv;
+    gfx::ClipShape  clip;   // physical px
 };
 
 // Walk the tree exactly like the retained pass does, narrowing the clip at every
@@ -480,11 +521,13 @@ void collect_canvases(std::vector<CanvasDraw>& out, IGuiWidget* w, float ui, con
         // Unlike a clip rect, empty BOUNDS mean "nothing to draw" (a canvas that was
         // never laid out), so check before intersecting or it would inherit `sub`.
         if (!math::box_is_empty(w->get_bounds()) && clip_isect(sub, w->get_bounds(), &own)) {
-            const float x0 = math::x(math::box_min(own)) * ui, y0 = math::y(math::box_min(own)) * ui;
+            // The mask is real geometry, so the clip stays in float pixels — the
+            // floor/ceil the integer scissor rect forced is gone with it.
             out.push_back({ static_cast<IGuiCanvasView*>(w),
-                            { int(std::floor(x0)), int(std::floor(y0)),
-                              int(std::ceil(math::box_width(own) * ui)),
-                              int(std::ceil(math::box_height(own) * ui)) } });
+                            gfx::ClipShape::from_rect(math::x(math::box_min(own)) * ui,
+                                                      math::y(math::box_min(own)) * ui,
+                                                      math::box_width(own) * ui,
+                                                      math::box_height(own) * ui) });
         }
     }
     for (int i = 0; i < w->get_child_count(); ++i)
@@ -549,11 +592,21 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
         collect_canvases(canvases, ctx->get_root(), ui,
                          math::make_box(0.0f, 0.0f, fb_w / ui, fb_h / ui));
     cmd->begin();
-    cmd->set_render_target_backbuffer();
+    // Clipping is stencil-based, so the pass needs a stencil buffer. OpenGL's default
+    // framebuffer already has one; the other backends' swapchain images are colour-only,
+    // so the clipper hands us a depth-stencil target to attach alongside.
+    cmd->set_render_target_backbuffer(clipper_.depth_target(fb_w, fb_h));
     window::Viewport vp; vp.x = 0; vp.y = 0; vp.width = float(fb_w); vp.height = float(fb_h);
     cmd->set_viewport(vp);
     cmd->clear_color(clear);
+    // Stencil back to 0 ("outside every clip") before any mask is stamped, and reference
+    // allocation restarts from 1. Every pass below shares this one buffer.
+    cmd->clear_depth_stencil(ClearDepthStencil{ 1.0f, 0 });
+    clipper_.begin_frame();
     if (underlay && ctx) {
+        // The underlay clips through the same stencil buffer, so it must allocate its
+        // references from the same clipper or the two could stamp the same value.
+        underlay->set_clipper(&clipper_);
         for (const CanvasDraw& cd : canvases) {
             underlay->begin(proj, fb_w, fb_h);
             emit_canvas(*underlay, cd.cv, ui);
@@ -563,12 +616,12 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
         underlay->end(cmd);
     }
     if (immediate && immediate->is_valid())
-        render(cmd, *immediate, atlas, proj, fb_w, fb_h, 1.0f, raster->color_atlas());
+        render(cmd, *immediate, atlas, proj, fb_w, fb_h, raster->color_atlas());
     if (gri && gri->is_valid())
-        render(cmd, const_cast<WidgetRenderInfo&>(*gri), atlas, proj, fb_w, fb_h, 1.0f,
+        render(cmd, const_cast<WidgetRenderInfo&>(*gri), atlas, proj, fb_w, fb_h,
                raster->color_atlas());
     if (overlay && overlay->is_valid())   // popups/menus on top of the retained widgets
-        render(cmd, *overlay, atlas, proj, fb_w, fb_h, 1.0f, raster->color_atlas());
+        render(cmd, *overlay, atlas, proj, fb_w, fb_h, raster->color_atlas());
     cmd->end();
     submit_commander(gfx, cmd);
 }

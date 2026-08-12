@@ -20,6 +20,8 @@
 
 #include <d3d11.h>
 #include <d3d11_1.h>   // ID3D11DeviceContext1 — offset (first-constant) CB binding
+#include <d3dcompiler.h>   // D3DCompile — the scaled-blit pass's shaders (see D11Device::ensure_blit)
+#pragma comment(lib, "d3dcompiler.lib")
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -147,6 +149,48 @@ D3D11_COMPARISON_FUNC d11_compare(CompareFunc f) {
     }
     return D3D11_COMPARISON_LESS;
 }
+// The TYPELESS family a format can be cast within, or UNKNOWN when it has none.
+// D3D11 only lets a view reinterpret a texture's format when the RESOURCE is typeless
+// (create_texture_view's whole purpose), so a sampled texture is allocated in its
+// typeless family and its own views are created with the requested typed format.
+// Depth formats are excluded: their typeless casts need per-view depth/stencil aspect
+// formats, and depth textures here are attachments rather than view sources.
+DXGI_FORMAT d11_typeless_family(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R8_UNORM:              return DXGI_FORMAT_R8_TYPELESS;
+        case DXGI_FORMAT_R8G8_UNORM:            return DXGI_FORMAT_R8G8_TYPELESS;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:   return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:        return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+        case DXGI_FORMAT_R16_FLOAT:             return DXGI_FORMAT_R16_TYPELESS;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:    return DXGI_FORMAT_R16G16B16A16_TYPELESS;
+        case DXGI_FORMAT_R32_FLOAT:             return DXGI_FORMAT_R32_TYPELESS;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:    return DXGI_FORMAT_R32G32B32A32_TYPELESS;
+        case DXGI_FORMAT_BC1_UNORM:
+        case DXGI_FORMAT_BC1_UNORM_SRGB:        return DXGI_FORMAT_BC1_TYPELESS;
+        case DXGI_FORMAT_BC2_UNORM:
+        case DXGI_FORMAT_BC2_UNORM_SRGB:        return DXGI_FORMAT_BC2_TYPELESS;
+        case DXGI_FORMAT_BC3_UNORM:
+        case DXGI_FORMAT_BC3_UNORM_SRGB:        return DXGI_FORMAT_BC3_TYPELESS;
+        case DXGI_FORMAT_BC7_UNORM:
+        case DXGI_FORMAT_BC7_UNORM_SRGB:        return DXGI_FORMAT_BC7_TYPELESS;
+        default:                                return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+D3D11_STENCIL_OP d11_stencil_op(StencilOp o) {
+    switch (o) {
+        case StencilOp::Keep:     return D3D11_STENCIL_OP_KEEP;
+        case StencilOp::Zero:     return D3D11_STENCIL_OP_ZERO;
+        case StencilOp::Replace:  return D3D11_STENCIL_OP_REPLACE;
+        case StencilOp::IncrSat:  return D3D11_STENCIL_OP_INCR_SAT;
+        case StencilOp::DecrSat:  return D3D11_STENCIL_OP_DECR_SAT;
+        case StencilOp::Invert:   return D3D11_STENCIL_OP_INVERT;
+        case StencilOp::IncrWrap: return D3D11_STENCIL_OP_INCR;
+        case StencilOp::DecrWrap: return D3D11_STENCIL_OP_DECR;
+    }
+    return D3D11_STENCIL_OP_KEEP;
+}
 
 struct D11Buffer  { ID3D11Buffer* buf = nullptr; UINT size = 0; UINT byte_width = 0; UINT stride = 0; BufferType type = BufferType::Vertex; ID3D11UnorderedAccessView* uav = nullptr; ID3D11Buffer* map_staging = nullptr; };
 struct D11Texture { ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; ID3D11RenderTargetView* rtv = nullptr;
@@ -180,7 +224,54 @@ public:
         if (ctx) ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&ctx1);
         swap_chain = (IDXGISwapChain*)g->native_swapchain();
     }
-    ~D11Device() override { if (ctx1) ctx1->Release(); }
+    // ---- scaled-blit pass ---------------------------------------------------
+    // D3D11 has no scaling copy (CopyResource/CopySubresourceRegion are 1:1), so a
+    // stretched blit is a fullscreen-triangle draw that samples the source. Built once
+    // and cached; the shaders are compiled with D3DCompile rather than shipped as blobs.
+    ID3D11VertexShader*  blit_vs_ = nullptr;
+    ID3D11PixelShader*   blit_ps_ = nullptr;
+    ID3D11SamplerState*  blit_samp_point_ = nullptr;
+    ID3D11SamplerState*  blit_samp_linear_ = nullptr;
+    ID3D11Buffer*        blit_cb_ = nullptr;   // float4 source rect in normalised UV
+    bool ensure_blit() {
+        if (blit_vs_) return true;
+        static const char kHLSL[] =
+            "cbuffer B : register(b0) { float4 uSrc; }\n"          // u0,v0,u1,v1
+            "struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };\n"
+            "VSOut vs_main(uint id : SV_VertexID) {\n"
+            "  float2 p = float2((id << 1) & 2, id & 2);\n"        // (0,0) (2,0) (0,2)
+            "  VSOut o; o.pos = float4(p * float2(2,-2) + float2(-1,1), 0, 1);\n"
+            "  o.uv = lerp(uSrc.xy, uSrc.zw, p);\n"
+            "  return o;\n"
+            "}\n"
+            "Texture2D uTex : register(t0);\n"
+            "SamplerState uSamp : register(s0);\n"
+            "float4 ps_main(VSOut i) : SV_Target { return uTex.Sample(uSamp, i.uv); }\n";
+        ID3DBlob* vsb = nullptr; ID3DBlob* psb = nullptr; ID3DBlob* err = nullptr;
+        if (FAILED(D3DCompile(kHLSL, sizeof(kHLSL) - 1, nullptr, nullptr, nullptr, "vs_main", "vs_5_0", 0, 0, &vsb, &err)) ||
+            FAILED(D3DCompile(kHLSL, sizeof(kHLSL) - 1, nullptr, nullptr, nullptr, "ps_main", "ps_5_0", 0, 0, &psb, &err))) {
+            if (err) err->Release(); if (vsb) vsb->Release(); if (psb) psb->Release();
+            return false;
+        }
+        if (err) err->Release();
+        dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &blit_vs_);
+        dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &blit_ps_);
+        vsb->Release(); psb->Release();
+        D3D11_SAMPLER_DESC sd = {};
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;  dev->CreateSamplerState(&sd, &blit_samp_point_);
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; dev->CreateSamplerState(&sd, &blit_samp_linear_);
+        D3D11_BUFFER_DESC bd = {}; bd.ByteWidth = 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        dev->CreateBuffer(&bd, nullptr, &blit_cb_);
+        return blit_vs_ && blit_ps_ && blit_cb_;
+    }
+
+    ~D11Device() override {
+        if (blit_vs_) blit_vs_->Release(); if (blit_ps_) blit_ps_->Release();
+        if (blit_samp_point_) blit_samp_point_->Release(); if (blit_samp_linear_) blit_samp_linear_->Release();
+        if (blit_cb_) blit_cb_->Release();
+        if (ctx1) ctx1->Release();
+    }
 
     Backend get_backend() const override { return Backend::D3D11; }
     void get_capabilities(GraphicsCapabilities* out) const override {
@@ -244,15 +335,72 @@ public:
         if (d.usage & TEXTURE_USAGE_DEPTH_STENCIL) td.BindFlags |= D3D11_BIND_DEPTH_STENCIL;
         if (d.usage & TEXTURE_USAGE_STORAGE)       td.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
         if (d.cube) { td.ArraySize = 6; td.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE; }
+        // GenerateMips is a no-op unless the texture opted into it at creation, and it needs
+        // the render-target bind flag as well. Without this, generate_mipmaps() silently left
+        // levels 1..N holding whatever the allocation happened to contain.
+        // Compressed and depth formats cannot be render targets, so they are excluded.
+        const bool want_mipgen = td.MipLevels != 1 && (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) &&
+                                 !depth && !texture_format_is_compressed(d.format) && td.SampleDesc.Count == 1;
+        if (want_mipgen) {
+            td.BindFlags |= D3D11_BIND_RENDER_TARGET;
+            td.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        }
         D3D11_SUBRESOURCE_DATA srd = {}; srd.pSysMem = d.initial_data;
         srd.SysMemPitch = (UINT)texture_format_row_pitch(d.format, d.width);   // block-aware (compressed = blocks*blockBytes)
         srd.SysMemSlicePitch = (UINT)texture_format_image_size(d.format, d.width, d.height);
-        dev->CreateTexture2D(&td, d.initial_data ? &srd : nullptr, &t.tex);
-        if (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) dev->CreateShaderResourceView(t.tex, nullptr, &t.srv);
-        if (td.BindFlags & D3D11_BIND_RENDER_TARGET)   dev->CreateRenderTargetView(t.tex, nullptr, &t.rtv);
+        // CreateTexture2D wants one D3D11_SUBRESOURCE_DATA per subresource, so a single entry
+        // is only valid for a 1-mip, 1-layer texture; anything else would read past it. For
+        // multi-subresource textures, create empty and upload mip 0 afterwards (as D3D12 does).
+        const bool multi_sub = td.MipLevels != 1 || td.ArraySize != 1;
+        const void* deferred_upload = (d.initial_data && multi_sub) ? d.initial_data : nullptr;
+        if (deferred_upload) srd.pSysMem = nullptr;
+        // Allocate a sampled texture in its TYPELESS family so create_texture_view() can
+        // reinterpret the format later (an sRGB view of a UNORM texture, say). A typeless
+        // resource has no implied view format, so every view below must name one explicitly
+        // — passing a null desc, which works for a typed resource, fails here.
+        const DXGI_FORMAT typeless = (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) ? d11_typeless_family(t.fmt)
+                                                                                 : DXGI_FORMAT_UNKNOWN;
+        bool cast = typeless != DXGI_FORMAT_UNKNOWN;
+        if (cast) td.Format = typeless;
+        dev->CreateTexture2D(&td, srd.pSysMem ? &srd : nullptr, &t.tex);
+        if (!t.tex && cast) {   // driver refused the typeless form: fall back to the typed one
+            td.Format = t.fmt;
+            cast = false;       // typed resource: the views below can use their default descs
+            dev->CreateTexture2D(&td, srd.pSysMem ? &srd : nullptr, &t.tex);
+        }
+        const bool arr = td.ArraySize > 1;
+        const bool ms  = td.SampleDesc.Count > 1;   // multisampled: the *MS view dimensions
+        if (td.BindFlags & D3D11_BIND_SHADER_RESOURCE) {
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format = t.fmt;
+            if (d.cube) { sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE; sd.TextureCube.MipLevels = td.MipLevels; }
+            else if (ms && arr) { sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY; sd.Texture2DMSArray.ArraySize = td.ArraySize; }
+            else if (ms)  sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+            else if (arr) { sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY; sd.Texture2DArray.MipLevels = td.MipLevels; sd.Texture2DArray.ArraySize = td.ArraySize; }
+            else { sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels = td.MipLevels; }
+            dev->CreateShaderResourceView(t.tex, cast ? &sd : nullptr, &t.srv);
+        }
+        if (td.BindFlags & D3D11_BIND_RENDER_TARGET) {
+            D3D11_RENDER_TARGET_VIEW_DESC rd{}; rd.Format = t.fmt;
+            if (ms && arr) { rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY; rd.Texture2DMSArray.ArraySize = td.ArraySize; }
+            else if (ms)  rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+            else if (arr) { rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY; rd.Texture2DArray.ArraySize = td.ArraySize; }
+            else          rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            dev->CreateRenderTargetView(t.tex, cast ? &rd : nullptr, &t.rtv);
+        }
         if (td.BindFlags & D3D11_BIND_DEPTH_STENCIL)   dev->CreateDepthStencilView(t.tex, nullptr, &t.dsv);
-        if (td.BindFlags & D3D11_BIND_UNORDERED_ACCESS) dev->CreateUnorderedAccessView(t.tex, nullptr, &t.uav);
-        return { textures_.alloc(t) };
+        if (td.BindFlags & D3D11_BIND_UNORDERED_ACCESS) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC ud{}; ud.Format = t.fmt;
+            if (arr) { ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY; ud.Texture2DArray.ArraySize = td.ArraySize; }
+            else       ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            dev->CreateUnorderedAccessView(t.tex, cast ? &ud : nullptr, &t.uav);
+        }
+        const TextureHandle out = { textures_.alloc(t) };
+        // Multi-subresource textures were created empty (see above); upload mip 0 now.
+        if (deferred_upload) {
+            TextureRegion r; r.x = 0; r.y = 0; r.width = d.width; r.height = d.height; r.mip = 0; r.layer = 0;
+            update_texture(out, r, deferred_upload);
+        }
+        return out;
     }
     void update_texture(TextureHandle h, const TextureRegion& r, const void* data) override {
         auto* t = textures_.get(h.id); if (!t || !t->tex) return;
@@ -325,6 +473,21 @@ public:
         bd.RenderTarget[0].SrcBlendAlpha = d11_blend_factor_alpha(d.blend.src_alpha); bd.RenderTarget[0].DestBlendAlpha = d11_blend_factor_alpha(d.blend.dst_alpha); bd.RenderTarget[0].BlendOpAlpha = d11_blend_op(d.blend.alpha_op);
         dev->CreateBlendState(&bd, &p.blend);
         D3D11_DEPTH_STENCIL_DESC dd = {}; dd.DepthEnable = d.depth_stencil.depth_enable; dd.DepthWriteMask = d.depth_stencil.depth_write ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO; dd.DepthFunc = d11_compare(d.depth_stencil.depth_func);
+        // Stencil (used by the GUI's clip masks): the reference value is dynamic —
+        // OMSetDepthStencilState takes it, so set_stencil_reference() re-binds this state.
+        dd.StencilEnable    = d.depth_stencil.stencil_enable;
+        dd.StencilReadMask  = d.depth_stencil.stencil_read_mask;
+        dd.StencilWriteMask = d.depth_stencil.stencil_write_mask;
+        auto face = [](const StencilOpDesc& s) {
+            D3D11_DEPTH_STENCILOP_DESC o{};
+            o.StencilFailOp      = d11_stencil_op(s.stencil_fail);
+            o.StencilDepthFailOp = d11_stencil_op(s.depth_fail);
+            o.StencilPassOp      = d11_stencil_op(s.pass);
+            o.StencilFunc        = d11_compare(s.func);
+            return o;
+        };
+        dd.FrontFace = face(d.depth_stencil.front_face);
+        dd.BackFace  = face(d.depth_stencil.back_face);
         dev->CreateDepthStencilState(&dd, &p.depth);
         return { pipelines_.alloc(p) };
     }
@@ -346,7 +509,48 @@ public:
     TextureHandle render_target_texture(RenderTargetHandle h) override { auto* rt = rts_.get(h.id); if (!rt) return { -1 }; return { rt->color_tex >= 0 ? rt->color_tex : rt->depth_tex }; }
     void destroy_render_target(RenderTargetHandle h) override { auto* rt = rts_.get(h.id); if (!rt) return; if (rt->color_tex >= 0) destroy_texture({ rt->color_tex }); if (rt->depth_tex >= 0) destroy_texture({ rt->depth_tex }); rts_.release(h.id); }
 
-    TextureHandle create_texture_view(const TextureViewDesc& d) override { d11_unsupported("create_texture_view (use the source texture's SRV)"); return d.texture; }
+    // A reinterpreting SRV over the SAME ID3D11Texture2D: different format and/or a
+    // mip/array sub-range. The view entry does NOT own the underlying texture (owns_tex
+    // = false), so destroying it releases only the view — returning the source handle
+    // instead, as this used to, silently ignored every field of the desc.
+    TextureHandle create_texture_view(const TextureViewDesc& d) override {
+        auto* src = textures_.get(d.texture.id);
+        if (!src || !src->tex) return { -1 };
+        D3D11_TEXTURE2D_DESC td{}; src->tex->GetDesc(&td);
+        if (!(td.BindFlags & D3D11_BIND_SHADER_RESOURCE)) {
+            d11_unsupported("create_texture_view (source lacks TEXTURE_USAGE_SAMPLED)");
+            return { -1 };
+        }
+        D11Texture v;
+        // Shares the source's ID3D11Texture2D, holding its own reference: owns_tex = true so
+        // destroy_texture() releases exactly the AddRef below, leaving the source unaffected.
+        // The view therefore outlives an early destroy of the source handle.
+        v.tex = src->tex; v.owns_tex = true;
+        v.tf  = (d.format == TextureFormat::Unknown) ? src->tf : d.format;
+        v.fmt = (d.format == TextureFormat::Unknown) ? src->fmt : tex_format(d.format);
+        v.w = src->w; v.h = src->h;
+        const UINT mips   = d.mip_count   ? (UINT)d.mip_count   : td.MipLevels - d.base_mip;
+        const UINT layers = d.layer_count ? (UINT)d.layer_count : td.ArraySize - d.base_layer;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = v.fmt;
+        if (d.cube) {
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+            sd.TextureCube.MostDetailedMip = d.base_mip; sd.TextureCube.MipLevels = mips;
+        } else if (td.ArraySize > 1) {
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+            sd.Texture2DArray.MostDetailedMip = d.base_mip; sd.Texture2DArray.MipLevels = mips;
+            sd.Texture2DArray.FirstArraySlice = d.base_layer; sd.Texture2DArray.ArraySize = layers;
+        } else {
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sd.Texture2D.MostDetailedMip = d.base_mip; sd.Texture2D.MipLevels = mips;
+        }
+        if (FAILED(dev->CreateShaderResourceView(src->tex, &sd, &v.srv))) {
+            d11_unsupported("create_texture_view (incompatible format/range)");
+            return { -1 };
+        }
+        src->tex->AddRef();   // the view keeps the resource alive independently of the source
+        return { textures_.alloc(v) };
+    }
 
     // Zero-copy interop: wrap an existing ID3D11Texture2D* (e.g. from a GStreamer
     // d3d11 decoder sharing this device) as a sampled RHI texture. We create our own
@@ -427,11 +631,24 @@ public:
         stg->Release();
     }
     void read_texture(TextureHandle h, const TextureRegion& r, void* dst) override {
-        auto* t = textures_.get(h.id); if (!t || !dst) return;
-        D3D11_TEXTURE2D_DESC td = {}; td.Width = t->w; td.Height = t->h; td.MipLevels = 1; td.ArraySize = 1; td.Format = t->fmt;
+        auto* t = textures_.get(h.id); if (!t || !t->tex || !dst) return;
+        D3D11_TEXTURE2D_DESC src_desc = {}; t->tex->GetDesc(&src_desc);
+        // Size the staging texture to the REQUESTED MIP, and copy that one subresource.
+        // CopyResource demands identical descriptions, so a mipped source against a 1-mip
+        // staging copy silently did nothing and the readback returned uninitialised memory.
+        const UINT mip   = (UINT)(r.mip   < 0 ? 0 : r.mip);
+        const UINT layer = (UINT)(r.layer < 0 ? 0 : r.layer);
+        const UINT lw = src_desc.Width  >> mip ? src_desc.Width  >> mip : 1;
+        const UINT lh = src_desc.Height >> mip ? src_desc.Height >> mip : 1;
+        D3D11_TEXTURE2D_DESC td = {}; td.Width = lw; td.Height = lh; td.MipLevels = 1; td.ArraySize = 1;
+        // Match the resource's own format: a sampled texture is TYPELESS here, and the copy
+        // requires the two formats to be compatible.
+        td.Format = src_desc.Format;
         td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        ID3D11Texture2D* stg = nullptr; dev->CreateTexture2D(&td, nullptr, &stg);
-        ctx->CopyResource(stg, t->tex);
+        ID3D11Texture2D* stg = nullptr;
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &stg)) || !stg) return;
+        ctx->CopySubresourceRegion(stg, 0, 0, 0, 0, t->tex,
+                                   D3D11CalcSubresource(mip, layer, src_desc.MipLevels), nullptr);
         D3D11_MAPPED_SUBRESOURCE m{}; if (ctx->Map(stg, 0, D3D11_MAP_READ, 0, &m) == S_OK) {
             int bw = 1, bh = 1; texture_format_block_dims(t->tf, &bw, &bh);
             const int    bpp        = texture_format_bytes_per_pixel(t->tf);   // per-pixel or per-block
@@ -484,12 +701,14 @@ public:
     D11Commander(D11Device* d) : dev_(d), ctx_(d->ctx) {}
     D11Device* device() const { return dev_; }
 
-    ~D11Commander() { if (bb_rtv_) bb_rtv_->Release(); }
+    ~D11Commander() { if (bb_rtv_) bb_rtv_->Release(); if (push_cb_) push_cb_->Release(); }
     void begin() override {}
     void end() override {}
     // Bind the swapchain backbuffer as the sole colour target (windowed present). FLIP_DISCARD
     // recycles buffer 0 each Present, so re-acquire it and rebuild the RTV every bind.
-    void set_render_target_backbuffer() override {
+    // `depth_stencil` (optional) is attached alongside — a swapchain buffer is colour-only, so
+    // depth testing and stencil clipping against the backbuffer need one supplied here.
+    void set_render_target_backbuffer(RenderTargetHandle depth_stencil) override {
         if (bb_rtv_) { bb_rtv_->Release(); bb_rtv_ = nullptr; }
         color0_ = nullptr; depth0_ = nullptr; cur_color_rtv_ = nullptr;
         if (!dev_->swap_chain) return;
@@ -498,7 +717,9 @@ public:
         dev_->dev->CreateRenderTargetView(bb, nullptr, &bb_rtv_);
         bb->Release();
         cur_color_rtv_ = bb_rtv_;
-        ctx_->OMSetRenderTargets(1, &bb_rtv_, nullptr);
+        if (depth_stencil.valid())
+            if (auto* rt = dev_->rt(depth_stencil.id)) if (auto* t = dev_->texture(rt->depth_tex)) depth0_ = t;
+        ctx_->OMSetRenderTargets(1, &bb_rtv_, depth0_ ? depth0_->dsv : nullptr);
     }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
         ID3D11RenderTargetView* rtvs[8] = {}; int n = 0; color0_ = nullptr; depth0_ = nullptr;
@@ -516,7 +737,10 @@ public:
         if (p->cs) { ctx_->CSSetShader(p->cs, nullptr, 0); return; }
         ctx_->VSSetShader(p->vs, nullptr, 0); ctx_->PSSetShader(p->ps, nullptr, 0); ctx_->GSSetShader(p->gs, nullptr, 0);
         ctx_->IASetInputLayout(p->layout); ctx_->IASetPrimitiveTopology(p->topo);
-        ctx_->RSSetState(p->raster); float bf[4]{ 1,1,1,1 }; ctx_->OMSetBlendState(p->blend, bf, 0xFFFFFFFF); ctx_->OMSetDepthStencilState(p->depth, 0);
+        // Carry the current stencil reference across the state swap (it lives in the
+        // depth-stencil bind, not the state object) — as the GL backend does, so a
+        // set_stencil_reference() before set_pipeline() isn't silently dropped.
+        ctx_->RSSetState(p->raster); float bf[4]{ 1,1,1,1 }; ctx_->OMSetBlendState(p->blend, bf, 0xFFFFFFFF); ctx_->OMSetDepthStencilState(p->depth, stencil_ref_);
     }
     void bind_vertex_buffer(uint32_t slot, BufferHandle h, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (!b) return; UINT stride = cur_ && slot < VertexLayout::MAX_BUFFER_SLOTS ? cur_->vl.strides[slot] : 0; UINT off = offset; ID3D11Buffer* vb = b->buf; ctx_->IASetVertexBuffers(slot, 1, &vb, &stride, &off); }
     void bind_index_buffer(BufferHandle h, IndexFormat fmt, uint32_t offset) override { auto* b = dev_->buffer(h.id); if (b) ctx_->IASetIndexBuffer(b->buf, fmt == IndexFormat::UInt16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT, offset); }
@@ -541,7 +765,31 @@ public:
             ctx_->VSSetConstantBuffers(slot, 1, &b->buf); ctx_->PSSetConstantBuffers(slot, 1, &b->buf); ctx_->CSSetConstantBuffers(slot, 1, &b->buf);
         }
     }
-    void push_constants(uint32_t, const void*, uint32_t) override { d11_unsupported("push_constants (use a constant buffer)"); }
+    // D3D11 has no root/push constants, so they are emulated with a dedicated dynamic
+    // constant buffer bound at register b0 — the same register the other backends' push
+    // constants land in. Grown on demand and rounded up to the 16-byte constant-buffer
+    // granularity; `offset` writes into the same block so several partial updates compose.
+    void push_constants(uint32_t offset, const void* data, uint32_t size) override {
+        if (!data || size == 0) return;
+        const UINT need = (offset + size + 15u) & ~15u;
+        if (need > push_cb_size_) {
+            if (push_cb_) { push_cb_->Release(); push_cb_ = nullptr; }
+            D3D11_BUFFER_DESC bd = {};
+            bd.ByteWidth = need; bd.Usage = D3D11_USAGE_DEFAULT;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            if (FAILED(dev_->dev->CreateBuffer(&bd, nullptr, &push_cb_))) { push_cb_size_ = 0; return; }
+            push_cb_size_ = need;
+            push_cpu_.assign(need, 0);
+        }
+        if (push_cpu_.size() < need) push_cpu_.resize(need, 0);
+        std::memcpy(push_cpu_.data() + offset, data, size);
+        // UpdateSubresource on a whole DEFAULT buffer: partial CB updates need D3D11.1
+        // UpdateSubresource1, so the shadow copy above keeps the untouched bytes intact.
+        ctx_->UpdateSubresource(push_cb_, 0, nullptr, push_cpu_.data(), 0, 0);
+        ctx_->VSSetConstantBuffers(0, 1, &push_cb_);
+        ctx_->PSSetConstantBuffers(0, 1, &push_cb_);
+        ctx_->CSSetConstantBuffers(0, 1, &push_cb_);
+    }
     void bind_storage_buffer(uint32_t slot, BufferHandle h, uint32_t offset, uint32_t size) override {
         auto* b = dev_->buffer(h.id); if (!b) return;
         if (offset == 0) { if (b->uav) ctx_->CSSetUnorderedAccessViews(slot, 1, &b->uav, nullptr); return; }   // whole-buffer UAV
@@ -580,15 +828,49 @@ public:
     }
     void copy_texture(TextureHandle dst, const TextureRegion&, TextureHandle src, const TextureRegion&) override { auto* s = dev_->texture(src.id); auto* d = dev_->texture(dst.id); if (s && d) ctx_->CopyResource(d->tex, s->tex); }
     void blit_render_target(RenderTargetHandle dh, RenderTargetHandle sh,
-                            int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1, bool) override {
+                            int sx0,int sy0,int sx1,int sy1,int dx0,int dy0,int dx1,int dy1, bool linear) override {
         auto* d = dev_->rt(dh.id); auto* s = dev_->rt(sh.id); if (!d || !s) return;
         auto* dt = dev_->texture(d->color_tex); auto* st = dev_->texture(s->color_tex); if (!dt || !st) return;
-        // 1:1, same-extent, same-origin blit == a resource copy; scaled/flipped blits
-        // would need a fullscreen-quad pass (not wired here).
-        if (sx0 == dx0 && sy0 == dy0 && (sx1 - sx0) == (dx1 - dx0) && (sy1 - sy0) == (dy1 - dy0))
+        // 1:1, same-extent, same-origin blit == a resource copy.
+        if (sx0 == dx0 && sy0 == dy0 && (sx1 - sx0) == (dx1 - dx0) && (sy1 - sy0) == (dy1 - dy0)) {
             ctx_->CopyResource(dt->tex, st->tex);
-        else
-            d11_unsupported("blit_render_target scaling (draw a fullscreen quad)");
+            return;
+        }
+        // Otherwise stretch through a fullscreen-triangle pass: the destination rect becomes
+        // the viewport, and the source rect becomes the sampled UV range, so scaling and
+        // flipping both fall out of the interpolation.
+        if (!dev_->ensure_blit() || !st->srv || !dt->rtv) { d11_unsupported("blit_render_target scaling"); return; }
+        D3D11_TEXTURE2D_DESC sd{}; st->tex->GetDesc(&sd);
+        const float uv[4] = { float(sx0) / float(sd.Width), float(sy0) / float(sd.Height),
+                              float(sx1) / float(sd.Width), float(sy1) / float(sd.Height) };
+        ctx_->UpdateSubresource(dev_->blit_cb_, 0, nullptr, uv, 0, 0);
+
+        ctx_->OMSetRenderTargets(1, &dt->rtv, nullptr);
+        D3D11_VIEWPORT vp{ float(dx0 < dx1 ? dx0 : dx1), float(dy0 < dy1 ? dy0 : dy1),
+                           float(dx1 > dx0 ? dx1 - dx0 : dx0 - dx1),
+                           float(dy1 > dy0 ? dy1 - dy0 : dy0 - dy1), 0.0f, 1.0f };
+        ctx_->RSSetViewports(1, &vp);
+        ctx_->IASetInputLayout(nullptr);
+        ctx_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx_->VSSetShader(dev_->blit_vs_, nullptr, 0);
+        ctx_->PSSetShader(dev_->blit_ps_, nullptr, 0);
+        ctx_->GSSetShader(nullptr, nullptr, 0);
+        ctx_->VSSetConstantBuffers(0, 1, &dev_->blit_cb_);
+        ID3D11SamplerState* samp = linear ? dev_->blit_samp_linear_ : dev_->blit_samp_point_;
+        ctx_->PSSetSamplers(0, 1, &samp);
+        ctx_->PSSetShaderResources(0, 1, &st->srv);
+        // Default fixed-function state, so a caller's blend/depth/raster cannot alter the copy.
+        float bf[4]{ 1, 1, 1, 1 };
+        ctx_->OMSetBlendState(nullptr, bf, 0xFFFFFFFF);
+        ctx_->OMSetDepthStencilState(nullptr, 0);
+        ctx_->RSSetState(nullptr);
+        ctx_->Draw(3, 0);
+        // Unbind the source: it is a render target too, and leaving it bound as an SRV would
+        // trip the read/write hazard the next time it is drawn into.
+        ID3D11ShaderResourceView* none = nullptr; ctx_->PSSetShaderResources(0, 1, &none);
+        // This pass replaced the pipeline state wholesale; the next set_pipeline reapplies it
+        // in full, so just drop the cached pointer rather than trying to restore.
+        cur_ = nullptr;
     }
     void resolve_render_target(RenderTargetHandle dh, RenderTargetHandle sh) override { auto* d = dev_->rt(dh.id); auto* s = dev_->rt(sh.id); if (d && s) { auto* dt = dev_->texture(d->color_tex); auto* st = dev_->texture(s->color_tex); if (dt && st) ctx_->ResolveSubresource(dt->tex, 0, st->tex, 0, dt->fmt); } }
     void write_timestamp(QueryHandle h) override { if (auto* q = dev_->query(h.id)) ctx_->End(q->q); }
@@ -597,7 +879,7 @@ public:
     void push_debug_group(const char*) override {}   // ID3DUserDefinedAnnotation — omitted
     void pop_debug_group() override {}
     void insert_debug_marker(const char*) override {}
-    void set_stencil_reference(uint32_t ref) override { if (cur_) ctx_->OMSetDepthStencilState(cur_->depth, ref); }
+    void set_stencil_reference(uint32_t ref) override { stencil_ref_ = ref; if (cur_) ctx_->OMSetDepthStencilState(cur_->depth, ref); }
     void set_blend_constants(const float rgba[4]) override { if (cur_) ctx_->OMSetBlendState(cur_->blend, rgba, 0xFFFFFFFF); }
     void set_depth_bias(float, float, float) override { d11_unsupported("dynamic depth bias (set in the rasterizer state)"); }
     void set_line_width(float) override {}
@@ -613,6 +895,10 @@ private:
     D11Pipeline* cur_ = nullptr; D11Texture* color0_ = nullptr; D11Texture* depth0_ = nullptr;
     ID3D11RenderTargetView* cur_color_rtv_ = nullptr;  // current colour target's RTV (RT or backbuffer), for clear
     ID3D11RenderTargetView* bb_rtv_ = nullptr;         // owned backbuffer RTV (recreated each bind)
+    UINT stencil_ref_ = 0;                             // dynamic stencil reference (re-applied on set_pipeline)
+    ID3D11Buffer* push_cb_ = nullptr;                  // emulated push constants (register b0)
+    UINT push_cb_size_ = 0;
+    std::vector<uint8_t> push_cpu_;                    // shadow copy: partial updates need the whole block
 };
 
 } // namespace

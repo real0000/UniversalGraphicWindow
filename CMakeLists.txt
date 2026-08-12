@@ -774,6 +774,7 @@ endif()
 if(WINDOW_ENABLE_RENDERER)
     list(APPEND WINDOW_SOURCES
         renderer/material.cpp
+        renderer/stencil_clip.cpp   # stencil-mask clipping, shared by the vector + GUI renderers
         renderer/vector_renderer.cpp
         renderer/buffer/gpu_buffer.cpp
         renderer/buffer/gpu_texture.cpp
@@ -1668,6 +1669,12 @@ target_link_libraries(window PUBLIC ${WINDOW_LIBS})
 # Fix parallel PDB write contention on MSVC debug builds
 if(MSVC)
     target_compile_options(window PRIVATE /FS)
+    # The sources are UTF-8 and carry non-ASCII comments/literals. Without /utf-8 MSVC
+    # decodes them in the system ANSI codepage, and on a double-byte locale (cp932/936/950)
+    # a lead byte swallows the following byte -- a trailing "// ✓" comment eats its own
+    # newline and comments out the next line, producing syntax errors far from the cause.
+    # PUBLIC so consumers including these headers decode them the same way.
+    target_compile_options(window PUBLIC /utf-8)
 endif()
 
 # SIMD math acceleration
@@ -1940,6 +1947,13 @@ if(WINDOW_BUILD_EXAMPLES AND NOT ANDROID AND NOT IOS)
             # Slot-based binding cross-API check (UBO by slot, no explicit pipeline layout)
             add_executable(example_slot_binding examples/slot_binding.cpp)
             target_link_libraries(example_slot_binding PRIVATE window)
+
+            # Features above the basic draw/copy pipeline: storage-image writes (both the
+            # descriptor-set and the slot-bind path), mip generation, sparse residency,
+            # ray-tracing acceleration structures and mesh shaders. Uses the runtime compiler
+            # where it can, so most of it needs no offline glslc/fxc step.
+            add_executable(example_gpu_features examples/gpu_features.cpp)
+            target_link_libraries(example_gpu_features PRIVATE window)
 
             # GStreamer video playback demo (needs the video renderer + the shader compiler
             # for the blit pipeline). Only built when WINDOW_ENABLE_VIDEO built GStreamer.

@@ -836,7 +836,10 @@ public:
     }
     void end() override {}
 
-    void set_render_target_backbuffer() override { glBindFramebuffer(GL_FRAMEBUFFER, 0); }
+    // FBO 0 takes no attachments: the default framebuffer already carries the depth/stencil
+    // the context was created with (Config::depth_bits / stencil_bits), so a caller-supplied
+    // depth-stencil target is accepted for API parity and ignored.
+    void set_render_target_backbuffer(RenderTargetHandle) override { glBindFramebuffer(GL_FRAMEBUFFER, 0); }
     void set_render_targets(const RenderTargetHandle* colors, int count, RenderTargetHandle depth) override {
         // Use the first color target's FBO (or the depth target's) as the base, then
         // (re)attach the whole set onto it: colors → COLOR_ATTACHMENT0..N-1 (MRT),
@@ -1187,12 +1190,14 @@ private:
     void configure_attribs() {
         auto* p = dev_->pipeline(pipeline_); if (!p) return;
         const VertexLayout& l = p->layout;
+        uint32_t want = 0;
         for (int i = 0; i < l.attribute_count; ++i) {
             const VertexAttribute& a = l.attributes[i];
             const GLuint vbo = (a.buffer_slot < VertexLayout::MAX_BUFFER_SLOTS) ? vbo_[a.buffer_slot] : 0;
             if (!vbo) continue;
             glBindBuffer(GL_ARRAY_BUFFER, vbo);
             glEnableVertexAttribArray(a.location);
+            if (a.location < 32) want |= (1u << a.location);
             GLint comps; GLenum type; GLboolean norm; bool integer;
             gl_vertex_attrib(a.format, comps, type, norm, integer);
             const GLsizei stride = GLsizei(l.strides[a.buffer_slot]);
@@ -1201,10 +1206,23 @@ private:
             else         glVertexAttribPointer(a.location, comps, type, norm, stride, off);
             glVertexAttribDivisor(a.location, l.input_rates[a.buffer_slot] == VertexInputRate::PerInstance ? 1u : 0u);
         }
+        // Disable the attributes the PREVIOUS pipeline enabled that this one does not use.
+        // Every pipeline shares one VAO, so an enabled array persists across set_pipeline:
+        // an instanced pipeline's per-instance attribute would stay enabled, still pointing
+        // into its vertex buffer, and the next draw would fetch from it. Once that buffer is
+        // destroyed the driver dereferences freed memory and crashes inside the GL driver —
+        // far from the call that actually leaked the state.
+        for (uint32_t stale = enabled_attribs_ & ~want; stale; stale &= stale - 1) {
+            uint32_t loc = 0, bit = stale & (~stale + 1u);
+            while (bit >>= 1) ++loc;
+            glDisableVertexAttribArray(loc);
+        }
+        enabled_attribs_ = want;
     }
 
     Graphics* ctx_; GLDevice* dev_;
     GLuint vao_ = 0, push_ubo_ = 0;
+    uint32_t enabled_attribs_ = 0;   // bitmask of vertex attribute locations currently enabled on vao_
     GLuint vbo_[VertexLayout::MAX_BUFFER_SLOTS] = {}; uint32_t vbo_off_[VertexLayout::MAX_BUFFER_SLOTS] = {};
     GLuint ibo_ = 0; GLenum index_type_ = GL_UNSIGNED_INT; uint32_t index_off_ = 0; int index_size_ = 4;
     int pipeline_ = -1;

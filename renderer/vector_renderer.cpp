@@ -68,9 +68,10 @@ VSOut vs_thick(ThickIn i) {
 
 // Build a pipeline sharing the renderer's render state. `thick` swaps in the
 // expanded vertex layout (locations 0..3) used by the thick-line shader.
+// `clipped` adds the stencil test that bounds the batch to a clip mask.
 PipelineHandle make_pipeline(GraphicDevice* dev, const VectorRendererDesc& d,
                              ShaderHandle vs, ShaderHandle fs, PipelineLayoutHandle layout,
-                             PrimitiveTopology topo, bool thick) {
+                             PrimitiveTopology topo, bool thick, bool clipped) {
     PipelineDesc pd;
     pd.vertex_shader   = vs;
     pd.fragment_shader = fs;
@@ -80,8 +81,18 @@ PipelineHandle make_pipeline(GraphicDevice* dev, const VectorRendererDesc& d,
     pd.depth_stencil.depth_enable = d.depth_test;
     pd.depth_stencil.depth_write  = d.depth_write;
     pd.depth_stencil.depth_func   = d.depth_func;
+    if (clipped) {
+        // Stencil test only — the depth config above is preserved, since a 3D batch may
+        // want both. content_state() supplies the Equal(ref)/write-nothing stencil.
+        const DepthStencilState cs = StencilClipper::content_state();
+        pd.depth_stencil.stencil_enable     = cs.stencil_enable;
+        pd.depth_stencil.stencil_read_mask  = cs.stencil_read_mask;
+        pd.depth_stencil.stencil_write_mask = cs.stencil_write_mask;
+        pd.depth_stencil.front_face         = cs.front_face;
+        pd.depth_stencil.back_face          = cs.back_face;
+    }
     pd.rasterizer      = RasterizerState::no_cull();
-    pd.rasterizer.scissor_enable = true;    // a full-size scissor is set in end()
+    pd.rasterizer.scissor_enable = false;   // clipping is stencil masks now, not scissor
     pd.color_formats[0]    = d.color_format;
     pd.color_format_count  = 1;
     pd.depth_format        = d.depth_format;
@@ -137,17 +148,23 @@ bool VectorRenderer::init(GraphicDevice* device, const VectorRendererDesc& desc)
 
     // Two pipelines: solid fills (basic VS) and screen-space line quads (thick VS). No layout
     // (pipe_layout_ invalid) -> auto reflected layout. Both use TriangleList (uniform support).
-    tri_pipeline_   = make_pipeline(device_, desc, vs_basic_, fs_color_, pipe_layout_, PrimitiveTopology::TriangleList, false);
-    thick_pipeline_ = make_pipeline(device_, desc, vs_thick_, fs_color_, pipe_layout_, PrimitiveTopology::TriangleList, true);
-    return tri_pipeline_.valid() && thick_pipeline_.valid();
+    // Each gets a stencil-tested twin, used when end() is handed a clip.
+    tri_pipeline_        = make_pipeline(device_, desc, vs_basic_, fs_color_, pipe_layout_, PrimitiveTopology::TriangleList, false, false);
+    thick_pipeline_      = make_pipeline(device_, desc, vs_thick_, fs_color_, pipe_layout_, PrimitiveTopology::TriangleList, true,  false);
+    tri_pipeline_clip_   = make_pipeline(device_, desc, vs_basic_, fs_color_, pipe_layout_, PrimitiveTopology::TriangleList, false, true);
+    thick_pipeline_clip_ = make_pipeline(device_, desc, vs_thick_, fs_color_, pipe_layout_, PrimitiveTopology::TriangleList, true,  true);
+    return tri_pipeline_.valid() && thick_pipeline_.valid()
+        && tri_pipeline_clip_.valid() && thick_pipeline_clip_.valid();
 }
 
 void VectorRenderer::shutdown() {
     if (!device_) return;
     if (vbo_.valid())            device_->destroy_buffer(vbo_);
     for (uint32_t i = 0; i < kUboSlots; ++i) if (ubo_[i].valid()) device_->destroy_buffer(ubo_[i]);
-    if (tri_pipeline_.valid())   device_->destroy_pipeline(tri_pipeline_);
-    if (thick_pipeline_.valid()) device_->destroy_pipeline(thick_pipeline_);
+    if (tri_pipeline_.valid())        device_->destroy_pipeline(tri_pipeline_);
+    if (thick_pipeline_.valid())      device_->destroy_pipeline(thick_pipeline_);
+    if (tri_pipeline_clip_.valid())   device_->destroy_pipeline(tri_pipeline_clip_);
+    if (thick_pipeline_clip_.valid()) device_->destroy_pipeline(thick_pipeline_clip_);
     if (vs_basic_.valid())       device_->destroy_shader(vs_basic_);
     if (fs_color_.valid())       device_->destroy_shader(fs_color_);
     if (vs_thick_.valid())       device_->destroy_shader(vs_thick_);
@@ -484,9 +501,11 @@ void VectorRenderer::fill_circle(float cx, float cy, float r, const math::Vec4& 
 
 //--- Flush -------------------------------------------------------------------
 
-void VectorRenderer::end(GraphicCommander* cmd, const ClipRect* clip) {
+void VectorRenderer::end(GraphicCommander* cmd, const ClipShape* clip) {
     if (!device_ || !cmd) return;
     if (tris_.empty() && thick_.empty()) return;
+    // A degenerate clip admits nothing — bail before touching any GPU state.
+    if (clip && clip->is_degenerate()) return;
 
     // One buffer holds both streams back to back: solid-fill triangles (7-float layout),
     // then line quads (12-float layout). Each stream is bound at its own byte offset and
@@ -524,40 +543,45 @@ void VectorRenderer::end(GraphicCommander* cmd, const ClipRect* clip) {
     ubo_slot_ = (ubo_slot_ + 1) % kUboSlots;
     device_->update_buffer(ubo_[slot], &u, sizeof(u), 0);
 
-    // Default = whole viewport; a caller-supplied clip (the widget's effective clip
-    // rect) bounds the batch instead, intersected with the viewport so a stale or
-    // oversized rect can't widen it.
-    ScissorRect full{ 0, 0, viewport_w_, viewport_h_ };
-    if (clip) {
-        const int x0 = std::max(0, clip->x), y0 = std::max(0, clip->y);
-        const int x1 = std::min(viewport_w_, clip->x + clip->w);
-        const int y1 = std::min(viewport_h_, clip->y + clip->h);
-        if (x1 <= x0 || y1 <= y0) return;                 // fully clipped away
-        // The clip arrives top-left origin (like widget bounds); GL's scissor
-        // origin is bottom-left, so flip there — without this the batch is
-        // scissored to the mirrored band and vanishes.
-        const int sy = (backend_ == Backend::OpenGL) ? viewport_h_ - y1 : y0;
-        full = ScissorRect{ x0, sy, x1 - x0, y1 - y0 };
+    // A caller-supplied clip (the widget's effective clip) becomes a stencil mask stamped
+    // just before the batch; the batch then draws through the stencil-testing pipelines.
+    // Unlike the scissor rect this replaced, the shape may be rounded and rotated, and it
+    // needs no Y flip: the stencil buffer shares the render target's orientation, so the
+    // mask lands where its geometry says it does on every backend.
+    uint32_t mask = StencilClipper::kNoMask;
+    if (clip && clipper_) {
+        clipper_->begin_pass(view_proj_, viewport_w_, viewport_h_);
+        mask = clipper_->add(*clip);
+        clipper_->upload();
     }
+    const bool clipped = mask != StencilClipper::kNoMask;
+
+    // Vulkan and D3D12 declare the scissor as dynamic state, so a draw with none ever set
+    // is invalid (D3D12) or undefined (Vulkan). This full-viewport rect satisfies that
+    // contract and nothing more — it is not the clip, which is stencil-driven.
+    cmd->set_scissor(ScissorRect{ 0, 0, viewport_w_, viewport_h_ });
+    if (clipped) clipper_->draw_mask(cmd, mask);
+
     const uint32_t tri_verts      = tri_floats   / FLOATS_PER_VERT;
     const uint32_t thick_verts    = thick_floats / THICK_FLOATS_PER_VERT;
     const uint32_t thick_byte_off = tri_floats * sizeof(float);
 
     auto bind_ubo = [&]() { cmd->bind_uniform_buffer(0, ubo_[slot], 0, sizeof(Uniforms)); };
+    auto bind_stencil = [&]() { if (clipped) cmd->set_stencil_reference(clipper_->ref_of(mask)); };
 
     // Fills first, then line quads — wireframe reads on top of fills.
     if (tri_verts > 0) {
-        cmd->set_pipeline(tri_pipeline_);
+        cmd->set_pipeline(clipped ? tri_pipeline_clip_ : tri_pipeline_);
+        bind_stencil();
         bind_ubo();
         cmd->bind_vertex_buffer(0, vbo_, vbo_base);
-        cmd->set_scissor(full);
         cmd->draw(tri_verts, 0);
     }
     if (thick_verts > 0) {
-        cmd->set_pipeline(thick_pipeline_);
+        cmd->set_pipeline(clipped ? thick_pipeline_clip_ : thick_pipeline_);
+        bind_stencil();
         bind_ubo();
         cmd->bind_vertex_buffer(0, vbo_, vbo_base + thick_byte_off);   // 12-float stream at its byte offset
-        cmd->set_scissor(full);
         cmd->draw(thick_verts, 0);
     }
 }

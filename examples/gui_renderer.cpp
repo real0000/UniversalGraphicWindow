@@ -94,12 +94,18 @@ static bool run_backend(Backend backend, const char* name) {
 
     RenderTargetDesc rd; rd.width = RT_W; rd.height = RT_H; rd.format = TextureFormat::RGBA8_UNORM;
     RenderTargetHandle rt = dev->create_render_target(rd);
+    // The GUI clips with stencil masks, so the target needs a stencil buffer. Offscreen
+    // targets have to supply their own; the renderer's clipper owns one sized to match.
+    DepthStencilDesc dsd; dsd.width = RT_W; dsd.height = RT_H;
+    RenderTargetHandle ds = dev->create_depth_target(dsd);
 
     cmd->begin();
-    cmd->set_render_targets(&rt, 1, RenderTargetHandle{});
+    cmd->set_render_targets(&rt, 1, ds);
     Viewport vp; vp.x = 0; vp.y = 0; vp.width = RT_W; vp.height = RT_H; cmd->set_viewport(vp);
     cmd->clear_color(ClearColor(0.0f, 0.0f, 0.0f, 1.0f));
-    renderer.render(cmd, info, atlas, proj, RT_W, RT_H, 1.0f);
+    cmd->clear_depth_stencil(ClearDepthStencil{ 1.0f, 0 });
+    renderer.begin_frame();
+    renderer.render(cmd, info, atlas, proj, RT_W, RT_H);
     cmd->end();
     submit_commander(gfx, cmd);
 
@@ -125,6 +131,7 @@ static bool run_backend(Backend backend, const char* name) {
     check("rect.outside_clear", black, d2);
 
     dev->destroy_render_target(rt);
+    dev->destroy_render_target(ds);
     dev->destroy_texture(atlas);
     renderer.shutdown();
     destroy_commander(cmd); destroy_device(dev); windows[0]->destroy();
