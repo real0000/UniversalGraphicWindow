@@ -5,17 +5,21 @@
  * graphics abstraction (GraphicDevice / GraphicCommander), so the editor is just a
  * client of the same building blocks any project would use:
  *
- *   - gui::GpuGuiRenderer    draws a flattened WidgetRenderInfo (editor chrome AND the
- *                            design canvas widgets). Zoom/pan is baked into the
- *                            projection matrix, so the same renderer draws both.
- *   - gfx::VectorRenderer    draws the 2D overlay (canvas background, grid, selection
+ *   - gui::GpuGuiRenderer    draws EVERYTHING: the editor chrome, the design canvas
+ *                            widgets and the canvas overlay (background, grid, selection
  *                            outlines, resize handles, rubber band, panel splitters).
+ *                            Its render_window_frame() owns the whole frame — backbuffer
+ *                            and stencil bind, clears, per-layer draws and submit.
  *   - gui::GpuTextRasterizer the shared glyph-atlas text rasterizer/measurer used by
  *                            both GUI contexts and GpuGuiRenderer.
  *
+ * The frame is a list of layers drawn back to front, each naming its own projection: the
+ * design surface is zoomed and panned, the overlay and chrome are not. That is why the
+ * overlay is an immediate WidgetRenderInfo rather than hand-rolled vector primitives —
+ * one renderer, one frame path, and every command carries its own clip box.
+ *
  * There is no hand-written GL here: the backend is selected at window creation and the
- * frame is recorded into one commander, then presented through the swapchain. Other
- * projects reproduce the canvas by wiring these three renderers the same way.
+ * frame is recorded into one commander, then presented through the swapchain.
  *
  * Keyboard shortcuts:
  *   Ctrl+N       New layout
@@ -38,7 +42,6 @@
 #include "gui/gui_context.hpp"
 #include "renderer/gui_renderer.hpp"
 #include "renderer/gui_text_rasterizer.hpp"
-#include "renderer/vector_renderer.hpp"
 #include "editor.hpp"
 #include "input/input_keyboard.hpp"
 #include "input/input_mouse.hpp"
@@ -54,8 +57,6 @@ using namespace window;
 using namespace window::math;
 using namespace window::gui;
 using namespace window::gui::editor;
-using window::gfx::VectorRenderer;
-using window::gfx::VectorRendererDesc;
 
 // ============================================================================
 // Globals — the engine renderers + the per-frame draw state the draw_* helpers read.
@@ -63,7 +64,6 @@ using window::gfx::VectorRendererDesc;
 
 static GraphicCommander*   g_cmd  = nullptr;   // current frame's commander
 static GpuGuiRenderer*     g_gui  = nullptr;   // WidgetRenderInfo renderer (chrome + design)
-static VectorRenderer*     g_vec  = nullptr;   // 2D overlay primitives
 static TextureHandle       g_atlas;            // glyph atlas (refreshed each frame)
 static float               g_proj[16] = {};    // chrome ortho: logical px -> clip
 static int                 g_fb_w = 0, g_fb_h = 0;  // framebuffer (physical px)
@@ -97,45 +97,63 @@ static void draw_render_info(WidgetRenderInfo& ri) {
 // Design canvas widgets — the user-designed layout, transformed by canvas zoom/pan.
 // ============================================================================
 
-static void draw_design_widgets(GuiEditor& editor, WidgetRenderInfo& design_ri, int window_h) {
-    (void)window_h;
-    EditorCanvas& canvas = editor.get_canvas();
+// The canvas viewport expressed in DESIGN coordinates. A design point p is drawn at the
+// logical-screen point p*zoom + (viewport_origin + pan), so inverting that gives the region
+// of design space the viewport shows. Used to clip the design content to the canvas.
+static Box design_visible_box(EditorCanvas& canvas) {
     Box vp = canvas.get_viewport_bounds();
-    float vpx = x(box_min(vp)), vpy = y(box_min(vp));
-    float vpw = box_width(vp), vph = box_height(vp);
+    const float zoom = canvas.get_zoom();
+    const Vec2 pan = canvas.get_pan();
+    if (zoom <= 0.0f) return make_box(0, 0, 0, 0);
+    return make_box(-x(pan) / zoom, -y(pan) / zoom,
+                    box_width(vp) / zoom, box_height(vp) / zoom);
+}
 
-    // Canvas background, under the widgets.
-    g_vec->begin(g_proj, g_fb_w, g_fb_h);
-    g_vec->fill_rect(vpx, vpy, vpw, vph, Vec4(0.16f, 0.16f, 0.17f, 1.0f));
-    g_vec->end(g_cmd);
-
-    // The zoom/pan transform is folded into the projection: a design point p maps to the
-    // logical-screen point p*zoom + (viewport_origin + pan), then the usual ortho. Painter
-    // order (opaque chrome drawn last) hides any overflow into the panels, so no scissor
-    // is needed here. g_proj is column-major, so composing scale+translate is element-wise.
-    float zoom = canvas.get_zoom();
-    Vec2  pan  = canvas.get_pan();
-    float ox = vpx + x(pan), oy = vpy + y(pan);
-    float dp[16] = {};
-    dp[0]  = g_proj[0] * zoom;
-    dp[5]  = g_proj[5] * zoom;
-    dp[10] = g_proj[10];
-    dp[12] = g_proj[0] * ox + g_proj[12];
-    dp[13] = g_proj[5] * oy + g_proj[13];
-    dp[15] = 1.0f;
-    g_gui->render(g_cmd, design_ri, g_atlas, dp, g_fb_w, g_fb_h);
+// The zoom/pan projection the design surface is drawn through: a design point p maps to
+// the logical-screen point p*zoom + (viewport_origin + pan), then the usual ortho.
+// g_proj is column-major, so composing scale+translate is element-wise.
+static void make_design_proj(EditorCanvas& canvas, float out[16]) {
+    Box vp = canvas.get_viewport_bounds();
+    const float zoom = canvas.get_zoom();
+    const Vec2  pan  = canvas.get_pan();
+    const float ox = x(box_min(vp)) + x(pan), oy = y(box_min(vp)) + y(pan);
+    std::memset(out, 0, sizeof(float) * 16);
+    out[0]  = g_proj[0] * zoom;
+    out[5]  = g_proj[5] * zoom;
+    out[10] = g_proj[10];
+    out[12] = g_proj[0] * ox + g_proj[12];
+    out[13] = g_proj[5] * oy + g_proj[13];
+    out[15] = 1.0f;
 }
 
 // ============================================================================
-// Canvas overlay — grid, selection outlines/handles, rubber band, panel splitters.
-// One vector-renderer batch in logical-pixel space (top-left origin).
+// Canvas overlay — canvas background, grid, selection outlines/handles, rubber band and
+// panel splitters, built as an immediate WidgetRenderInfo layer.
+//
+// This used to be hand-rolled VectorRenderer primitives. Going through the GUI renderer
+// instead means each command carries its OWN clip box, so the canvas-space content is
+// bounded to the canvas viewport per command rather than by splitting the work into
+// separately-clipped batches — and the editor no longer needs a second renderer at all.
+//
+// The clip matters for the selection handles and the rubber band: those follow the widget
+// being dragged, so they reach outside the canvas whenever a widget is dragged towards a
+// panel — and unlike the grid, their extent is not derived from the viewport. The panel
+// splitters are chrome, so they pass an empty clip box ("no clip").
 // ============================================================================
 
-static void draw_canvas_overlay(GuiEditor& editor, int window_h) {
+static void build_canvas_overlay(GuiEditor& editor, WidgetRenderInfo& ov, int window_h) {
     EditorCanvas& canvas = editor.get_canvas();
     const Vec4 selc(0.0f, 0.48f, 0.8f, 1.0f);
+    WidgetRenderInfo* g_ov = &ov;
+    int32_t depth = 0;
+    Box clip = canvas.get_viewport_bounds();   // canvas-space content is bounded to the canvas
 
-    g_vec->begin(g_proj, g_fb_w, g_fb_h);
+    // Canvas background, under everything else the canvas draws.
+    {
+        Box vp = canvas.get_viewport_bounds();
+        g_ov->push_rect(x(box_min(vp)), y(box_min(vp)), box_width(vp), box_height(vp),
+                        Vec4(0.16f, 0.16f, 0.17f, 1.0f), depth++, clip);
+    }
 
     // Grid. The line ranges derive from the viewport, so they stay inside it.
     const CanvasGrid& grid = canvas.get_grid();
@@ -154,22 +172,22 @@ static void draw_canvas_overlay(GuiEditor& editor, int window_h) {
             Vec2 sp = canvas.canvas_to_screen(Vec2(gx, start_y));
             Vec2 ep = canvas.canvas_to_screen(Vec2(gx, end_y));
             bool major = (std::fmod(std::abs(gx), grid.major_spacing) < 0.01f);
-            g_vec->fill_rect(x(sp), y(sp), 1.0f, y(ep) - y(sp), major ? grid.major_color : grid.color);
+            g_ov->push_rect(x(sp), y(sp), 1.0f, y(ep) - y(sp), major ? grid.major_color : grid.color, depth++, clip);
         }
         for (float gy = std::floor(start_y / spacing) * spacing; gy <= end_y; gy += spacing) {
             Vec2 sp = canvas.canvas_to_screen(Vec2(start_x, gy));
             Vec2 ep = canvas.canvas_to_screen(Vec2(end_x, gy));
             bool major = (std::fmod(std::abs(gy), grid.major_spacing) < 0.01f);
-            g_vec->fill_rect(x(sp), y(sp), x(ep) - x(sp), 1.0f, major ? grid.major_color : grid.color);
+            g_ov->push_rect(x(sp), y(sp), x(ep) - x(sp), 1.0f, major ? grid.major_color : grid.color, depth++, clip);
         }
 
         // Origin axes (canvas 0,0) — slightly brighter than major grid.
         Vec2 ox_s = canvas.canvas_to_screen(Vec2(0, start_y));
         Vec2 ox_e = canvas.canvas_to_screen(Vec2(0, end_y));
-        g_vec->fill_rect(x(ox_s), y(ox_s), 1.0f, y(ox_e) - y(ox_s), Vec4(0.35f, 0.35f, 0.4f, 0.8f));
+        g_ov->push_rect(x(ox_s), y(ox_s), 1.0f, y(ox_e) - y(ox_s), Vec4(0.35f, 0.35f, 0.4f, 0.8f), depth++, clip);
         Vec2 oy_s = canvas.canvas_to_screen(Vec2(start_x, 0));
         Vec2 oy_e = canvas.canvas_to_screen(Vec2(end_x, 0));
-        g_vec->fill_rect(x(oy_s), y(oy_s), x(oy_e) - x(oy_s), 1.0f, Vec4(0.35f, 0.35f, 0.4f, 0.8f));
+        g_ov->push_rect(x(oy_s), y(oy_s), x(oy_e) - x(oy_s), 1.0f, Vec4(0.35f, 0.35f, 0.4f, 0.8f), depth++, clip);
     }
 
     // Selection outlines (solid blue, 1-px borders).
@@ -180,10 +198,10 @@ static void draw_canvas_overlay(GuiEditor& editor, int window_h) {
         Vec2 br = canvas.canvas_to_screen(box_max(b));
         float tlx = x(tl), tly = y(tl), brx = x(br), bry = y(br);
         float sw = brx - tlx, sh = bry - tly;
-        g_vec->fill_rect(tlx, tly, sw, 1.0f, selc);
-        g_vec->fill_rect(tlx, bry, sw, 1.0f, selc);
-        g_vec->fill_rect(tlx, tly, 1.0f, sh, selc);
-        g_vec->fill_rect(brx, tly, 1.0f, sh, selc);
+        g_ov->push_rect(tlx, tly, sw, 1.0f, selc, depth++, clip);
+        g_ov->push_rect(tlx, bry, sw, 1.0f, selc, depth++, clip);
+        g_ov->push_rect(tlx, tly, 1.0f, sh, selc, depth++, clip);
+        g_ov->push_rect(brx, tly, 1.0f, sh, selc, depth++, clip);
     }
 
     // Resize handles (white fill, blue inner border; blue fill when hovered).
@@ -192,8 +210,8 @@ static void draw_canvas_overlay(GuiEditor& editor, int window_h) {
     for (const auto& h : handles) {
         float hx = x(box_min(h.rect)), hy = y(box_min(h.rect));
         float hw = box_width(h.rect), hh = box_height(h.rect);
-        g_vec->fill_rect(hx, hy, hw, hh, h.hovered ? selc : Vec4(1.0f, 1.0f, 1.0f, 0.9f));
-        g_vec->fill_rect(hx + 1, hy + 1, hw - 2, hh - 2, selc);
+        g_ov->push_rect(hx, hy, hw, hh, h.hovered ? selc : Vec4(1.0f, 1.0f, 1.0f, 0.9f), depth++, clip);
+        g_ov->push_rect(hx + 1, hy + 1, hw - 2, hh - 2, selc, depth++, clip);
     }
 
     // Rubber band (translucent fill + border).
@@ -202,27 +220,28 @@ static void draw_canvas_overlay(GuiEditor& editor, int window_h) {
         float rx = x(box_min(rb)), ry = y(box_min(rb));
         float rw = box_width(rb), rh = box_height(rb);
         const Vec4 rbb(0.0f, 0.48f, 0.8f, 0.6f);
-        g_vec->fill_rect(rx, ry, rw, rh, Vec4(0.0f, 0.48f, 0.8f, 0.15f));
-        g_vec->fill_rect(rx, ry, rw, 1.0f, rbb);
-        g_vec->fill_rect(rx, ry + rh, rw, 1.0f, rbb);
-        g_vec->fill_rect(rx, ry, 1.0f, rh, rbb);
-        g_vec->fill_rect(rx + rw, ry, 1.0f, rh, rbb);
+        g_ov->push_rect(rx, ry, rw, rh, Vec4(0.0f, 0.48f, 0.8f, 0.15f), depth++, clip);
+        g_ov->push_rect(rx, ry, rw, 1.0f, rbb, depth++, clip);
+        g_ov->push_rect(rx, ry + rh, rw, 1.0f, rbb, depth++, clip);
+        g_ov->push_rect(rx, ry, 1.0f, rh, rbb, depth++, clip);
+        g_ov->push_rect(rx + rw, ry, 1.0f, rh, rbb, depth++, clip);
     }
 
-    // Panel splitters (1-px bright + 1-px dark = 2-px visual handle).
+    // Panel splitters (1-px bright + 1-px dark = 2-px visual handle). These sit on the
+    // panel edges, i.e. outside the canvas, so from here on the clip is the empty box the
+    // renderer reads as "no clip".
+    clip = make_box(0, 0, 0, 0);
     {
         float sw_log = g_fb_w / g_dpi_scale;
         float top = GuiEditor::MENUBAR_H + GuiEditor::TOOLBAR_H;
         float bot = (float)window_h - GuiEditor::STATUSBAR_H;
         float tree_x = editor.get_tree_panel_w();
         float insp_x = sw_log - editor.get_inspector_w();
-        g_vec->fill_rect(tree_x - 1, top, 1, bot - top, Vec4(0.12f, 0.12f, 0.14f, 1.0f));
-        g_vec->fill_rect(tree_x,     top, 1, bot - top, Vec4(0.35f, 0.35f, 0.38f, 1.0f));
-        g_vec->fill_rect(insp_x - 1, top, 1, bot - top, Vec4(0.12f, 0.12f, 0.14f, 1.0f));
-        g_vec->fill_rect(insp_x,     top, 1, bot - top, Vec4(0.35f, 0.35f, 0.38f, 1.0f));
+        g_ov->push_rect(tree_x - 1, top, 1, bot - top, Vec4(0.12f, 0.12f, 0.14f, 1.0f), depth++, clip);
+        g_ov->push_rect(tree_x,     top, 1, bot - top, Vec4(0.35f, 0.35f, 0.38f, 1.0f), depth++, clip);
+        g_ov->push_rect(insp_x - 1, top, 1, bot - top, Vec4(0.12f, 0.12f, 0.14f, 1.0f), depth++, clip);
+        g_ov->push_rect(insp_x,     top, 1, bot - top, Vec4(0.35f, 0.35f, 0.38f, 1.0f), depth++, clip);
     }
-
-    g_vec->end(g_cmd);
 }
 
 // ============================================================================
@@ -436,17 +455,11 @@ int main(int argc, char* argv[]) {
     gui_rend.set_text_rasterizer(&text_rast);
     g_gui = &gui_rend;
 
-    // Vector renderer for the 2D overlay (depth off — it draws on top of the GUI).
-    VectorRenderer vec;
-    VectorRendererDesc vd;
-    vd.depth_test = false;
-    vd.depth_write = false;
-    if (!vec.init(dev, vd)) {
-        printf("Failed to init vector renderer\n");
-        gui_rend.shutdown(); text_rast.shutdown();
-        destroy_commander(cmd); destroy_device(dev); win->destroy(); return 1;
-    }
-    g_vec = &vec;
+    // The canvas overlay (background, grid, selection, handles, rubber band, splitters) is
+    // rebuilt into this every frame and drawn as an immediate layer by the GUI renderer.
+    // It used to be a second renderer's worth of hand-rolled primitives; going through the
+    // GUI renderer gives every command its own clip box for free.
+    WidgetRenderInfo overlay_ri;
 
     // Create editor GUI context
     GuiResult gresult;
@@ -474,7 +487,7 @@ int main(int argc, char* argv[]) {
     if (!gui_editor.initialize(editor_ctx, win)) {
         printf("Failed to initialize GUI editor\n");
         destroy_gui_context(editor_ctx);
-        vec.shutdown(); gui_rend.shutdown(); text_rast.shutdown();
+        gui_rend.shutdown(); text_rast.shutdown();
         destroy_commander(cmd); destroy_device(dev); win->destroy();
         return 1;
     }
@@ -539,38 +552,50 @@ int main(int argc, char* argv[]) {
 
         // Also update design context frame
         if (design_ctx) {
+            // Bound the design content to what the canvas viewport actually shows. The
+            // context intersects a clip-enabled widget's rect into everything below it, so
+            // setting it on the root clips the whole design tree — in DESIGN coordinates,
+            // which is the space those widgets' clips live in. Set before begin_frame so
+            // this frame's collect sees it.
+            if (IGuiWidget* design_root = design_ctx->get_root()) {
+                design_root->set_clip_enabled(true);
+                design_root->set_clip_rect(design_visible_box(gui_editor.get_canvas()));
+            }
             design_ctx->begin_frame(dt);
             design_ctx->end_frame();
         }
 
-        // Build the frame's render infos, flatten them (rasterising any new glyphs into the
-        // RAM atlas), then upload the atlas once before recording draws.
+        // The overlay is rebuilt each frame as an immediate layer.
+        overlay_ri.invalidate();
+        build_canvas_overlay(gui_editor, overlay_ri, sh);
+
+        // The whole frame goes through the GUI renderer: it owns the backbuffer bind (with
+        // the stencil buffer clipping needs), the clears, the per-layer draws, and the
+        // submit. Layers are drawn in order, back to front:
+        //
+        //   1. the design surface, through the zoom/pan projection
+        //   2. the canvas overlay + panel splitters, in logical px
+        //   3. the editor chrome, in logical px — opaque, so it goes last
+        //
+        // Each layer names its own projection, which is why this uses the layered form:
+        // the design surface is zoomed and panned while the chrome is not.
+        // The contexts are handed over as their already-collected render infos rather than
+        // as `context` layers: GuiEditor::update() and the loop above already drive their
+        // begin_frame/end_frame, and letting the renderer drive them too would advance each
+        // context twice per frame.
         WidgetRenderInfo& editor_ri = const_cast<WidgetRenderInfo&>(gui_editor.get_render_info(win));
         WidgetRenderInfo* design_ri = design_ctx ? &const_cast<WidgetRenderInfo&>(design_ctx->get_render_info()) : nullptr;
-        editor_ri.flatten(&text_rast);
-        if (design_ri) design_ri->flatten(&text_rast);
-        g_atlas = text_rast.sync_atlas();
 
-        // Record + present one frame.
-        cmd->begin();
-        // The GUI clips with stencil masks, so the pass needs a stencil buffer cleared to 0.
-        cmd->set_render_target_backbuffer(gui_rend.depth_stencil_target(sw_p, sh_p));
-        window::Viewport rvp; rvp.x = 0; rvp.y = 0; rvp.width = (float)sw_p; rvp.height = (float)sh_p;
-        rvp.min_depth = 0; rvp.max_depth = 1;
-        cmd->set_viewport(rvp);
-        cmd->clear_color(ClearColor(0.12f, 0.12f, 0.13f, 1.0f));
-        cmd->clear_depth_stencil(ClearDepthStencil{ 1.0f, 0 });
-        gui_rend.begin_frame();
-
-        // 1. Design canvas (background + zoom/pan'd widgets) — under the chrome.
-        if (design_ri) draw_design_widgets(gui_editor, *design_ri, sh);
-        // 2. Canvas overlay (grid, selection, handles, rubber band, splitters).
-        draw_canvas_overlay(gui_editor, sh);
-        // 3. Editor chrome (menubar, toolbar, panels, popups) — on top.
-        draw_render_info(editor_ri);
-
-        cmd->end();
-        submit_commander(gfx, cmd);
+        float design_proj[16];
+        make_design_proj(gui_editor.get_canvas(), design_proj);
+        GpuGuiRenderer::FrameLayer layers[3];
+        int n = 0;
+        if (design_ri) { layers[n].immediate = design_ri;  layers[n].proj = design_proj; ++n; }
+        layers[n].immediate = &overlay_ri;  layers[n].proj = g_proj; ++n;
+        layers[n].immediate = &editor_ri;   layers[n].proj = g_proj; ++n;
+        gui_rend.render_window_frame(gfx, cmd, &text_rast, sw_p, sh_p,
+                                     ClearColor(0.12f, 0.12f, 0.13f, 1.0f),
+                                     layers, n, dt);
         gfx->present();
     }
 
@@ -578,7 +603,7 @@ int main(int argc, char* argv[]) {
     gui_editor.shutdown();
     editor_ctx->detach_window(win);
     destroy_gui_context(editor_ctx);
-    vec.shutdown();      g_vec = nullptr;
+
     gui_rend.shutdown(); g_gui = nullptr;
     text_rast.shutdown();
     destroy_commander(cmd); g_cmd = nullptr;

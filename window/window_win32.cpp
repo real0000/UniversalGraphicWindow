@@ -1001,6 +1001,48 @@ Graphics* Window::graphics() const { return impl ? impl->gfx : nullptr; }
 void* Window::native_handle() const { return impl ? impl->hwnd : nullptr; }
 void* Window::native_display() const { return nullptr; }
 
+// ---- clipboard --------------------------------------------------------------
+// Declared in window.hpp and used by the GUI's text widgets, but previously defined only
+// in the X11 backend — so anything pulling in gui_context (the editor, for one) failed to
+// link on Windows. Win32 stores UTF-16, so both directions convert.
+
+void Window::set_clipboard_text(const char* utf8) {
+    if (!impl || !impl->hwnd || !utf8) return;
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    if (wlen <= 0) return;
+    // The clipboard takes ownership of this handle once SetClipboardData succeeds, so it
+    // must be GMEM_MOVEABLE and must NOT be freed on the success path.
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, size_t(wlen) * sizeof(wchar_t));
+    if (!mem) return;
+    if (wchar_t* dst = static_cast<wchar_t*>(GlobalLock(mem))) {
+        MultiByteToWideChar(CP_UTF8, 0, utf8, -1, dst, wlen);
+        GlobalUnlock(mem);
+    }
+    if (!OpenClipboard(impl->hwnd)) { GlobalFree(mem); return; }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+    CloseClipboard();
+}
+
+std::string Window::get_clipboard_text() {
+    if (!impl || !impl->hwnd) return {};
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return {};
+    if (!OpenClipboard(impl->hwnd)) return {};
+    std::string out;
+    if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+        if (const wchar_t* src = static_cast<const wchar_t*>(GlobalLock(h))) {
+            const int len = WideCharToMultiByte(CP_UTF8, 0, src, -1, nullptr, 0, nullptr, nullptr);
+            if (len > 1) {                       // len counts the NUL
+                out.resize(size_t(len) - 1);
+                WideCharToMultiByte(CP_UTF8, 0, src, -1, out.data(), len, nullptr, nullptr);
+            }
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+    return out;
+}
+
 float Window::get_dpi_scale() const { return impl ? impl->dpi_scale : 1.0f; }
 int   Window::get_dpi() const       { return impl ? impl->dpi       : 96;  }
 

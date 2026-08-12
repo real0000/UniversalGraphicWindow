@@ -626,5 +626,58 @@ void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, G
     submit_commander(gfx, cmd);
 }
 
+void GpuGuiRenderer::render_window_frame(Graphics* gfx, GraphicCommander* cmd, GpuTextRasterizer* raster,
+                                         int fb_w, int fb_h, const ClearColor& clear,
+                                         const FrameLayer* layers, int layer_count, float dt,
+                                         window::gfx::VectorRenderer* underlay) {
+    if (!gfx || !cmd || !raster || fb_w <= 0 || fb_h <= 0) return;
+    const float ui = 1.0f;   // layers carry their own space; see the header
+
+    // Collect every layer BEFORE sync_atlas(), so glyphs rasterized this frame are uploaded
+    // before the draw — the same ordering the fixed-form overload relies on.
+    std::vector<const WidgetRenderInfo*> infos((size_t)(layer_count > 0 ? layer_count : 0), nullptr);
+    for (int i = 0; i < layer_count; ++i) {
+        const FrameLayer& l = layers[i];
+        if (l.context) {
+            l.context->begin_frame(dt);
+            infos[(size_t)i] = &l.context->get_render_info();
+        } else if (l.immediate) {
+            // Only a layer WITHOUT its own projection is lifted into framebuffer pixels;
+            // an explicit projection means the caller already owns the space.
+            if (!l.proj) scale_render_info(*l.immediate, ui);
+            l.immediate->finalize();
+            l.immediate->flatten(raster);
+            infos[(size_t)i] = l.immediate;
+        }
+    }
+    TextureHandle atlas = raster->sync_atlas();
+    const float fb_proj[16] = {
+        2.0f / fb_w, 0.0f,          0.0f, 0.0f,
+        0.0f,       -2.0f / fb_h,   0.0f, 0.0f,
+        0.0f,        0.0f,         -1.0f, 0.0f,
+       -1.0f,        1.0f,          0.0f, 1.0f,
+    };
+
+    cmd->begin();
+    cmd->set_render_target_backbuffer(clipper_.depth_target(fb_w, fb_h));
+    window::Viewport vp; vp.x = 0; vp.y = 0; vp.width = float(fb_w); vp.height = float(fb_h);
+    cmd->set_viewport(vp);
+    cmd->clear_color(clear);
+    cmd->clear_depth_stencil(ClearDepthStencil{ 1.0f, 0 });
+    clipper_.begin_frame();
+    // A caller-filled vector batch draws first, under every layer. Sharing this renderer's
+    // clipper keeps their stencil references from colliding.
+    if (underlay) { underlay->set_clipper(&clipper_); underlay->end(cmd); }
+
+    for (int i = 0; i < layer_count; ++i) {
+        const WidgetRenderInfo* ri = infos[(size_t)i];
+        if (!ri || !ri->is_valid()) continue;
+        render(cmd, const_cast<WidgetRenderInfo&>(*ri), atlas,
+               layers[i].proj ? layers[i].proj : fb_proj, fb_w, fb_h, raster->color_atlas());
+    }
+    cmd->end();
+    submit_commander(gfx, cmd);
+}
+
 } // namespace gui
 } // namespace window

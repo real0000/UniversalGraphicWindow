@@ -86,7 +86,14 @@ struct ClipShape {
 class StencilClipper {
 public:
     // `vs` is gui.hlsl's vs_main, `fs` its ps_clip_mask; the clipper does not own them.
+    // Use this when the caller already has them compiled (GpuGuiRenderer does).
     bool init(GraphicDevice* device, ShaderHandle vs, ShaderHandle fs);
+
+    // Self-contained init: loads and compiles the mask shaders from the shipped gui.hlsl.
+    // Without this, clipping was only available to whoever happened to own a GUI renderer —
+    // a VectorRenderer used on its own had no way to obtain a clipper at all. The shaders
+    // it creates are owned and destroyed here.
+    bool init(GraphicDevice* device);
     void shutdown();
     bool valid() const { return mask_pipeline_.valid(); }
 
@@ -175,6 +182,8 @@ private:
     uint32_t                  cur_slot_ = 0;
     DescriptorSetLayoutHandle set_layout_;
     PipelineLayoutHandle      pipe_layout_;
+    // Shaders compiled by the self-contained init() overload; owned only in that case.
+    ShaderHandle              own_vs_, own_fs_;
 };
 
 } // namespace gfx

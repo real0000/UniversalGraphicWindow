@@ -105,6 +105,27 @@ public:
                              window::gfx::VectorRenderer* underlay = nullptr,
                              WidgetRenderInfo* overlay = nullptr);
 
+    // One layer of a frame: an immediate WidgetRenderInfo or a retained context, drawn in
+    // list order. `proj` overrides the framebuffer projection for that layer alone.
+    //
+    // The fixed immediate/ctx/overlay form above covers the common case of one context in
+    // one coordinate space. An editor-style app does not fit it: a design surface and its
+    // chrome are two contexts, and the design surface is drawn through a zoom/pan
+    // projection while the chrome is not.
+    //
+    // A layer with an explicit `proj` is NOT rescaled: supplying a projection means the
+    // caller owns that layer's coordinate space, whereas the default path lifts a
+    // logically-authored layer into framebuffer pixels for you.
+    struct FrameLayer {
+        WidgetRenderInfo* immediate = nullptr;   // exclusive with `context`
+        IGuiContext*      context   = nullptr;
+        const float*      proj      = nullptr;   // 16 floats, column-major; null = framebuffer ortho
+    };
+    void render_window_frame(Graphics* gfx, GraphicCommander* cmd, GpuTextRasterizer* raster,
+                             int fb_w, int fb_h, const ClearColor& clear,
+                             const FrameLayer* layers, int layer_count, float dt,
+                             window::gfx::VectorRenderer* underlay = nullptr);
+
 private:
     // One vertex (13 floats): pos2 | uvw3 | rgba4 | sdf4.
     void push_vert(float px, float py, float u, float vv, float layer,

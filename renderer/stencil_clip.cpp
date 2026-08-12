@@ -1,8 +1,19 @@
 #include "stencil_clip.hpp"
 
+#ifdef WINDOW_SUPPORT_SHADER_COMPILER
+#include "shader_compiler/shader_compiler.hpp"   // self-contained init() compiles the mask shaders
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <string>
+
+// Directory the GUI shaders are read from at runtime, matching gui_renderer.cpp.
+#ifndef WINDOW_SHADER_DIR
+#define WINDOW_SHADER_DIR "renderer/shaders"
+#endif
 
 namespace window {
 namespace gfx {
@@ -76,6 +87,31 @@ DepthStencilState StencilClipper::content_state() {
     return ds;
 }
 
+// Self-contained init: compile the mask shaders from the shipped gui.hlsl. Reads the same
+// file GpuGuiRenderer does, so there is one source of truth for the mask shape.
+bool StencilClipper::init(GraphicDevice* device) {
+#ifdef WINDOW_SUPPORT_SHADER_COMPILER
+    if (!device) return false;
+    const std::string path = std::string(WINDOW_SHADER_DIR) + "/gui.hlsl";
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamsize n = f.tellg();
+    if (n <= 0) return false;
+    std::string src((size_t)n, '\0');
+    f.seekg(0);
+    f.read(&src[0], n);
+    own_vs_ = ShaderCompiler::compile_and_create_cached(device, src.c_str(), src.size(),
+                                                        ShaderStage::Vertex, "vs_main");
+    own_fs_ = ShaderCompiler::compile_and_create_cached(device, src.c_str(), src.size(),
+                                                        ShaderStage::Fragment, "ps_clip_mask");
+    if (!own_vs_.valid() || !own_fs_.valid()) return false;
+    return init(device, own_vs_, own_fs_);
+#else
+    (void)device;
+    return false;   // the mask shaders need the built-in compiler
+#endif
+}
+
 bool StencilClipper::init(GraphicDevice* device, ShaderHandle vs, ShaderHandle fs) {
     device_ = device;
     if (!device_ || !vs.valid() || !fs.valid()) return false;
@@ -144,6 +180,9 @@ void StencilClipper::shutdown() {
         if (proj_ubo_[i].valid()) device_->destroy_buffer(proj_ubo_[i]);
     }
     if (mask_pipeline_.valid()) device_->destroy_pipeline(mask_pipeline_);
+    // Only the self-contained init() owns shaders; the explicit overload borrows them.
+    if (own_vs_.valid()) device_->destroy_shader(own_vs_);
+    if (own_fs_.valid()) device_->destroy_shader(own_fs_);
     if (pipe_layout_.valid())   device_->destroy_pipeline_layout(pipe_layout_);
     if (set_layout_.valid())    device_->destroy_descriptor_set_layout(set_layout_);
     if (depth_target_.valid())  device_->destroy_render_target(depth_target_);
