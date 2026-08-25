@@ -134,6 +134,53 @@ float GpuTextRasterizer::measure_advance(const char* text, int n, float size, co
     return w;
 }
 
+// One shaping pass of the WHOLE run → the geometry a caret needs. Reusing the same
+// shaper call shape() draws with is the whole point: prefixes shaped in isolation
+// drift from the laid-out glyphs (kerning / ligatures / contextual forms).
+void GpuTextRasterizer::caret_shape(const char* text, float size, std::vector<float>& pen_x,
+                                    std::vector<int>& cluster, std::vector<float>& advance, float& total) {
+    pen_x.clear(); cluster.clear(); advance.clear(); total = 0.0f;
+    if (!text || !text[0] || !shaper_ || !mgr_) return;
+    font::IFontFace* primary = mgr_->get_font(0);
+    if (!primary) return;
+    primary->set_size(size);
+    std::vector<font::PositionedGlyph> glyphs;
+    shaper_->shape_text(primary, text, -1, glyphs, font::TextLayoutOptions());
+    for (const auto& g : glyphs) {
+        pen_x.push_back(g.x);
+        cluster.push_back(g.cluster);
+        advance.push_back(g.advance);
+        const float end = g.x + g.advance;
+        if (end > total) total = end;
+    }
+}
+
+float GpuTextRasterizer::caret_offset(const char* text, int byte, float size, const char*) {
+    if (!text || byte <= 0) return 0.0f;
+    std::vector<float> pen, adv; std::vector<int> cl; float total = 0.0f;
+    caret_shape(text, size, pen, cl, adv, total);
+    if (pen.empty()) return 0.0f;
+    // Caret before byte offset `byte` = pen of the first glyph whose source cluster
+    // is at or past it; past the last glyph → the run's total advance (end caret).
+    for (size_t i = 0; i < cl.size(); ++i)
+        if (cl[i] >= byte) return pen[i];
+    return total;
+}
+
+int GpuTextRasterizer::caret_index_at(const char* text, float local_x, float size, const char*) {
+    if (!text || !text[0] || local_x <= 0.0f) return 0;
+    std::vector<float> pen, adv; std::vector<int> cl; float total = 0.0f;
+    caret_shape(text, size, pen, cl, adv, total);
+    if (pen.empty()) return 0;
+    // Nearest caret slot: a click on a glyph's left half snaps before it, right half
+    // after it. Returns a source byte offset (cluster), so it is codepoint-aligned.
+    for (size_t i = 0; i < pen.size(); ++i) {
+        const float mid = pen[i] + adv[i] * 0.5f;
+        if (local_x < mid) return cl[i];
+    }
+    return int(std::strlen(text));
+}
+
 float GpuTextRasterizer::get_time() const { return float(now_ms() - start_ms_) / 1000.0f; }
 
 // Upload one atlas manager's layers into its GPU array texture. The R8 SDF atlas and

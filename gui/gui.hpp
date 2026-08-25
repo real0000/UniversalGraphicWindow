@@ -159,6 +159,28 @@ public:
     virtual ~ITextMeasurer() = default;
     virtual math::Vec2 measure_text(const char* text, float font_size, const char* font_name = nullptr) = 0;
     virtual float get_line_height(float font_size, const char* font_name = nullptr) = 0;
+
+    // ── Caret metrics (the ONE place a click maps to a character) ─────────────
+    // Byte offset within `text` whose caret sits nearest `local_x` (measured from
+    // the text's own origin, 0 = start), snapped to a UTF-8 codepoint boundary.
+    // The default re-measures prefixes, but a shaping measurer overrides it to use
+    // the SAME single layout it draws with — so the caret never drifts from the
+    // glyphs under kerning/ligatures. Every text widget routes clicks through this.
+    virtual int caret_index_at(const char* text, float local_x, float font_size,
+                               const char* font_name = nullptr) {
+        if (!text || !text[0] || local_x <= 0.0f) return 0;
+        const std::string s(text);
+        const int n = static_cast<int>(s.size());
+        int best = 0; float best_d = local_x;
+        for (int i = 0; i <= n;) {
+            const float w = (i == 0) ? 0.0f : measure_text(s.substr(0, i).c_str(), font_size, font_name).x();
+            const float d = local_x > w ? local_x - w : w - local_x;
+            if (d < best_d) { best_d = d; best = i; }
+            if (i == n) break;
+            int j = i + 1; while (j < n && (static_cast<unsigned char>(s[j]) & 0xC0) == 0x80) ++j; i = j;
+        }
+        return best;
+    }
 };
 
 // ============================================================================
@@ -223,6 +245,15 @@ public:
     // Return pixel advance of the first n characters (for cursor placement).
     virtual float measure_advance(const char* text, int n, float font_size,
                                   const char* font_name = nullptr) = 0;
+
+    // Pen x of the caret sitting BEFORE byte offset `byte` (codepoint-clamped),
+    // measured from the text origin. Used to draw the caret + selection edges. A
+    // shaping rasterizer overrides this to read the SAME layout it renders, so the
+    // caret lands exactly on the glyph boundary; the default is the prefix advance.
+    virtual float caret_offset(const char* text, int byte, float font_size,
+                               const char* font_name = nullptr) {
+        return measure_advance(text, byte, font_size, font_name);
+    }
 
     // Return current time in seconds (for cursor blink animation).
     virtual float get_time() const = 0;
@@ -724,23 +755,11 @@ inline void draw_text_edit(WidgetRenderInfo& ri, ITextMeasurer& tm, int32_t& dep
 }
 
 // Byte offset within `text` whose caret position is nearest `local_x` (0 = the
-// start of the text). Codepoint-aware (never lands inside a UTF-8 sequence).
-// Shared so callers map a click to a character without re-rolling glyph metrics.
+// start of the text). Thin forwarder to the canonical ITextMeasurer::caret_index_at
+// (kept for existing callers); the measurer owns the mapping so a shaping measurer
+// uses the same layout it draws with.
 inline int index_at_x(ITextMeasurer& tm, const char* text, float font, float local_x) {
-    if (!text || !text[0] || local_x <= 0.0f) return 0;
-    const std::string s(text);
-    const int n = static_cast<int>(s.size());
-    int best = 0; float best_d = local_x;   // distance to offset 0
-    for (int i = 0; i <= n;) {
-        const float w = (i == 0) ? 0.0f : math::x(tm.measure_text(s.substr(0, i).c_str(), font));
-        const float d = local_x > w ? local_x - w : w - local_x;
-        if (d < best_d) { best_d = d; best = i; }
-        if (i == n) break;
-        int j = i + 1;   // advance one codepoint
-        while (j < n && (static_cast<unsigned char>(s[j]) & 0xC0) == 0x80) ++j;
-        i = j;
-    }
-    return best;
+    return tm.caret_index_at(text, local_x, font);
 }
 
 // ── Popup menu (reusable immediate-mode dropdown / context menu) ─────────────

@@ -35,16 +35,23 @@ public:
     // ITextMeasurer
     math::Vec2 measure_text(const char* text, float font_size, const char* font_name = nullptr) override;
     float      get_line_height(float font_size, const char* font_name = nullptr) override;
+    int        caret_index_at(const char* text, float local_x, float font_size, const char* font_name = nullptr) override;
 
     // IGuiTextRasterizer
     TextQuad rasterize(const char*, float, const char*) override { return TextQuad{}; }
     bool     rasterize_glyphs(const char* text, float font_size, const char* font_name,
                               std::vector<GlyphQuad>& out_quads, float* out_w, float* out_h) override;
     float    measure_advance(const char* text, int n, float font_size, const char* font_name = nullptr) override;
+    float    caret_offset(const char* text, int byte, float font_size, const char* font_name = nullptr) override;
     float    get_time() const override;
 
 private:
     void shape(const char* text, float size, std::vector<GlyphQuad>& out, float& out_w, float& out_h);
+    // One shaping pass exposing the caret geometry: pen x + source byte offset
+    // (cluster) per glyph, plus the total advance. The single source of truth for
+    // caret_offset / caret_index_at, using the exact layout shape() draws.
+    void caret_shape(const char* text, float size, std::vector<float>& pen_x,
+                     std::vector<int>& cluster, std::vector<float>& advance, float& total);
     // Upload one atlas manager's dirty layers into a GPU array texture.
     void sync_layers(font::IGlyphAtlasManager* mgr, TextureHandle& tex, int& layers, TextureFormat fmt);
 

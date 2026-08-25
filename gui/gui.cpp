@@ -324,63 +324,59 @@ void WidgetRenderInfo::flatten(IGuiTextRasterizer* rasterizer) {
             float px = x(box_min(t.dest)), py = y(box_min(t.dest));
             float pw = box_width(t.dest),  ph = box_height(t.dest);
 
-            // Rasterize text body into per-glyph quads (falls back to a single
-            // whole-string quad for rasterizers that don't override rasterize_glyphs).
-            if (!t.text.empty()) {
-                static thread_local std::vector<IGuiTextRasterizer::GlyphQuad> quads;
-                quads.clear();
-                float tw = 0, th = 0;
-                if (rasterizer->rasterize_glyphs(t.text.c_str(), t.font_size, nullptr,
-                                                 quads, &tw, &th) && !quads.empty()) {
-                    // Alignment of the whole text block within dest: pick the x by
-                    // the horizontal third (Left/Center/Right) and y by the vertical
-                    // third (Top/Center/Bottom). Previously only Center/CenterRight
-                    // were handled and everything else fell back to left+vcenter, so
-                    // e.g. right-aligned (TopRight) output-pin labels were drawn left,
-                    // overlapping the left-aligned (TopLeft) input-pin labels.
-                    float tx, ty;
-                    switch (t.alignment) {
-                        case Alignment::TopRight: case Alignment::CenterRight: case Alignment::BottomRight:
-                            tx = px + pw - tw; break;
-                        case Alignment::TopCenter: case Alignment::Center: case Alignment::BottomCenter:
-                            tx = px + (pw - tw) * 0.5f; break;
-                        default: // *Left
-                            tx = px + 2; break;
-                    }
-                    switch (t.alignment) {
-                        case Alignment::BottomLeft: case Alignment::BottomCenter: case Alignment::BottomRight:
-                            ty = py + ph - th; break;
-                        case Alignment::TopLeft: case Alignment::TopCenter: case Alignment::TopRight:
-                            ty = py; break;
-                        default: // Center*
-                            ty = py + (ph - th) * 0.5f; break;
-                    }
-                    for (const auto& gq : quads) {
-                        if (gq.atlas_layer < 0 || gq.w <= 0 || gq.h <= 0) continue;
-                        textures.push_back({TextureSourceType::Memory, nullptr, nullptr, 0,
-                                            gq.atlas_layer,
-                                            make_box(tx + gq.x, ty + gq.y, gq.w, gq.h),
-                                            make_box(gq.u0, gq.v0, gq.u1 - gq.u0, gq.v1 - gq.v0),
-                                            Vec4(t.color.x, t.color.y, t.color.z, t.color.w),
-                                            t.depth, t.clip});
-                    }
-                }
+            // Lay the run out ONCE, then use that single layout for glyphs, the
+            // selection band AND the caret — so the caret can never drift from the
+            // glyphs (re-measuring prefixes separately was the old bug). tw is the
+            // run's advance; it drives horizontal alignment and is 0 for empty text.
+            static thread_local std::vector<IGuiTextRasterizer::GlyphQuad> quads;
+            quads.clear();
+            float tw = 0, th = 0;
+            if (!t.text.empty())
+                rasterizer->rasterize_glyphs(t.text.c_str(), t.font_size, nullptr, quads, &tw, &th);
+
+            // Alignment of the whole text block within dest: x by the horizontal
+            // third (Left/Center/Right), y by the vertical third. `origin_x` is the
+            // text's pen origin — the ONE reference the caret/selection also use, so
+            // a centred/right-aligned field's caret lands correctly too (it used to
+            // assume left).
+            float origin_x, ty;
+            switch (t.alignment) {
+                case Alignment::TopRight: case Alignment::CenterRight: case Alignment::BottomRight:
+                    origin_x = px + pw - tw; break;
+                case Alignment::TopCenter: case Alignment::Center: case Alignment::BottomCenter:
+                    origin_x = px + (pw - tw) * 0.5f; break;
+                default: // *Left
+                    origin_x = px + 2; break;
+            }
+            switch (t.alignment) {
+                case Alignment::BottomLeft: case Alignment::BottomCenter: case Alignment::BottomRight:
+                    ty = py + ph - th; break;
+                case Alignment::TopLeft: case Alignment::TopCenter: case Alignment::TopRight:
+                    ty = py; break;
+                default: // Center*
+                    ty = py + (ph - th) * 0.5f; break;
+            }
+            for (const auto& gq : quads) {
+                if (gq.atlas_layer < 0 || gq.w <= 0 || gq.h <= 0) continue;
+                textures.push_back({TextureSourceType::Memory, nullptr, nullptr, 0,
+                                    gq.atlas_layer,
+                                    make_box(origin_x + gq.x, ty + gq.y, gq.w, gq.h),
+                                    make_box(gq.u0, gq.v0, gq.u1 - gq.u0, gq.v1 - gq.v0),
+                                    Vec4(t.color.x, t.color.y, t.color.z, t.color.w),
+                                    t.depth, t.clip});
             }
 
-            // Selection highlight
+            // Selection highlight — same origin + the same layout's caret offsets.
             if (t.sel_start >= 0 && t.sel_end > t.sel_start) {
-                float sx = px + 2 + rasterizer->measure_advance(t.text.c_str(), t.sel_start,
-                                                                  t.font_size, nullptr);
-                float ex = px + 2 + rasterizer->measure_advance(t.text.c_str(), t.sel_end,
-                                                                  t.font_size, nullptr);
+                float sx = origin_x + rasterizer->caret_offset(t.text.c_str(), t.sel_start, t.font_size, nullptr);
+                float ex = origin_x + rasterizer->caret_offset(t.text.c_str(), t.sel_end,   t.font_size, nullptr);
                 colors.push_back({make_box(sx, py + 2, ex - sx, ph - 4),
                                   t.sel_bg_color, DrawShape::Rect, t.depth - 1, t.clip});
             }
 
-            // Blinking cursor
+            // Blinking cursor.
             if (t.show_cursor && fmodf(time, 1.0f) < 0.5f) {
-                float cx_pos = px + 2 + rasterizer->measure_advance(
-                    t.text.c_str(), t.cursor_pos, t.font_size, nullptr);
+                float cx_pos = origin_x + rasterizer->caret_offset(t.text.c_str(), t.cursor_pos, t.font_size, nullptr);
                 colors.push_back({make_box(cx_pos, py + 3, 1.0f, ph - 6),
                                   t.cursor_color, DrawShape::Rect, t.depth + 1, t.clip});
             }

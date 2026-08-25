@@ -125,7 +125,9 @@ private:
         return math::x(math::box_min(base_.get_bounds())) + ti_style_.padding + 2.0f;
     }
     int caret_from_x(float px) const {
-        return measurer_ ? index_at_x(*measurer_, text_.c_str(), ti_style_.font_size, px - text_origin_x()) : cursor_;
+        // The one caret-mapping path: the measurer maps a click to a byte offset with
+        // the SAME layout the renderer draws, so click and drawn caret always agree.
+        return measurer_ ? measurer_->caret_index_at(text_.c_str(), px - text_origin_x(), ti_style_.font_size) : cursor_;
     }
 public:
     bool is_focusable() const override { return true; }
@@ -331,31 +333,60 @@ private:
     // wrap_ != None each logical line is greedily split to fit the content width
     // (same algorithm the immediate-mode chat used) so rendering matches exactly.
     mutable std::vector<std::string> disp_lines_;
+    // Per display line: which logical line (paragraph) it came from, and the byte
+    // offset within that paragraph where it starts. These map the caret (stored in
+    // LOGICAL line/column) to the DISPLAY line it renders on — without them the caret
+    // compares a display index against a logical one and sticks on the first wrapped
+    // row. With wrap == None they are the identity (disp_para_[d]=d, disp_col0_[d]=0).
+    mutable std::vector<int> disp_para_, disp_col0_;
     mutable float disp_w_ = -1.0f;
     mutable EditBoxWordWrap disp_wrap_cached_ = EditBoxWordWrap::None;
     mutable bool disp_dirty_ = true;
     void rewrap(float content_w) const {
         if (!disp_dirty_ && content_w == disp_w_ && wrap_ == disp_wrap_cached_) return;
         disp_dirty_ = false; disp_w_ = content_w; disp_wrap_cached_ = wrap_;
-        disp_lines_.clear();
+        disp_lines_.clear(); disp_para_.clear(); disp_col0_.clear();
+        auto emit = [&](std::string s, int para, int col0) {
+            disp_lines_.push_back(std::move(s)); disp_para_.push_back(para); disp_col0_.push_back(col0);
+        };
         if (wrap_ == EditBoxWordWrap::None || !measurer_ || content_w <= 0.0f) {
-            disp_lines_ = lines_; if (disp_lines_.empty()) disp_lines_.push_back(""); return;
+            for (int p = 0; p < (int)lines_.size(); ++p) emit(lines_[p], p, 0);
+            if (disp_lines_.empty()) emit("", 0, 0);
+            return;
         }
-        for (const auto& para : lines_) {
-            if (para.empty()) { disp_lines_.push_back(""); continue; }
+        for (int p = 0; p < (int)lines_.size(); ++p) {
+            const std::string& para = lines_[p];
+            if (para.empty()) { emit("", p, 0); continue; }
             std::string line; size_t i = 0, len = para.size();
+            int line_start = 0;                       // byte offset in `para` where `line` began
             while (i < len) {
                 size_t ws = i; while (ws < len && para[ws] == ' ') ++ws;
                 size_t we = ws; while (we < len && para[we] != ' ') ++we;
                 std::string word = para.substr(i, we - i), cand = line + word;
                 if (!line.empty() && measurer_->measure_text(cand.c_str(), style_.font_size, style_.font_name).x() > content_w) {
-                    disp_lines_.push_back(line); line = para.substr(ws, we - ws);
+                    emit(line, p, line_start); line = para.substr(ws, we - ws); line_start = (int)ws;
                 } else line = cand;
                 i = we;
             }
-            disp_lines_.push_back(line);
+            emit(line, p, line_start);
         }
-        if (disp_lines_.empty()) disp_lines_.push_back("");
+        if (disp_lines_.empty()) emit("", 0, 0);
+    }
+    // logical caret (para,column) → the display line it sits on + column within it.
+    void to_disp(const TextPosition& lp, int& dline, int& dcol) const {
+        dline = 0; dcol = lp.column;
+        for (int d = 0; d < (int)disp_lines_.size(); ++d) {
+            if (disp_para_[d] != lp.line) { if (disp_para_[d] > lp.line) break; else continue; }
+            if (disp_col0_[d] <= lp.column) { dline = d; dcol = lp.column - disp_col0_[d]; }
+            else break;
+        }
+        dcol = std::max(0, std::min(dcol, (int)disp_lines_[dline].size()));
+    }
+    // display (line,column) → logical caret. Used to map a click back to the model.
+    TextPosition to_logical(int dline, int dcol) const {
+        dline = std::max(0, std::min(dline, (int)disp_lines_.size() - 1));
+        dcol  = std::max(0, std::min(dcol, (int)disp_lines_[dline].size()));
+        return { disp_para_[dline], disp_col0_[dline] + dcol };
     }
     // Height-for-width preferred size: the editbox is as tall as its wrapped
     // content at the width it has been assigned. A sizer that Expands this
@@ -387,7 +418,10 @@ private:
     static constexpr float kGrip = 14.0f;   // grip square edge, px
     ITextMeasurer* measurer_ = nullptr;
     mutable WidgetRenderInfo ri_;
-    float content_height() const { return (float)lines_.size() * style_.font_size * style_.line_height; }
+    // Scroll/height are in DISPLAY lines (wrap makes that > logical lines); falls
+    // back to logical before the first rewrap.
+    int disp_count() const { return disp_lines_.empty() ? (int)lines_.size() : (int)disp_lines_.size(); }
+    float content_height() const { return (float)disp_count() * style_.font_size * style_.line_height; }
     // Bottom-right drag-grip box, in screen coords (empty when not resizable).
     math::Box grip_rect() const {
         if (!resizable_) return math::make_box(0,0,0,0);
@@ -402,29 +436,26 @@ private:
         float by = math::y(math::box_min(b));
         float line_h = style_.font_size * style_.line_height;
         // text_x matches get_render_info: gutter_width + padding, then +2 added by draw_text_vc
-        float text_x = bx + (line_nums_ ? style_.gutter_width + style_.padding : style_.padding) + 2.0f;
-        int line_idx = first_vis_ + (line_h > 0 ? (int)((math::y(p) - by) / line_h) : 0);
-        line_idx = std::max(0, std::min(line_idx, (int)lines_.size() - 1));
-        const std::string& line_str = lines_[line_idx];
+        const float x_off = (line_nums_ ? style_.gutter_width + style_.padding : style_.padding);
+        float text_x = bx + x_off + 2.0f;
+        rewrap(math::box_width(b) - x_off - style_.padding);   // ensure display lines are current
+        // The click lands on a DISPLAY line (wrap-aware); map it back to logical.
+        int dline = first_vis_ + (line_h > 0 ? (int)((math::y(p) - by) / line_h) : 0);
+        dline = std::max(0, std::min(dline, (int)disp_lines_.size() - 1));
+        const std::string& line_str = disp_lines_[dline];
         float rel_x = math::x(p) - text_x;
         int col = 0;
         if (rel_x > 0.0f) {
             if (measurer_) {
-                // Snap to nearest character boundary using midpoint between adjacent positions
-                float prev_w = 0.0f;
-                for (int i = 1; i <= (int)line_str.size(); ++i) {
-                    float w = measurer_->measure_text(line_str.substr(0, i).c_str(), style_.font_size, style_.font_name).x();
-                    if (rel_x < (prev_w + w) / 2.0f) break;  // click is on left half → don't advance
-                    col = i;
-                    prev_w = w;
-                }
+                // Same canonical caret mapping as the single-line field / the drawn
+                // caret — one layout, so click and caret agree.
+                col = measurer_->caret_index_at(line_str.c_str(), rel_x, style_.font_size, style_.font_name);
             } else {
                 float char_w = style_.font_size * 0.6f;
                 col = (char_w > 0) ? (int)((rel_x + char_w * 0.5f) / char_w) : 0;
             }
         }
-        col = std::max(0, std::min(col, (int)line_str.size()));
-        return {line_idx, col};
+        return to_logical(dline, col);
     }
     void set_scroll_from_pixel(float pixel_offset) {
         float line_h = style_.font_size * style_.line_height;
@@ -729,12 +760,12 @@ public:
     int get_tab_size() const override { return tab_size_; }
     void set_tab_size(int s) override { tab_size_=s; }
     int get_first_visible_line() const override { return first_vis_; }
-    void set_first_visible_line(int l) override { first_vis_=std::max(0,std::min(l,(int)lines_.size()-1)); }
+    void set_first_visible_line(int l) override { first_vis_=std::max(0,std::min(l,disp_count()-1)); }
     int get_visible_line_count() const override {
         float h=math::box_height(base_.get_bounds()); float lh=style_.font_size*style_.line_height;
         return lh>0?(int)(h/lh):0;
     }
-    void scroll_to_cursor() override { set_first_visible_line(cursor_.line); }
+    void scroll_to_cursor() override { int dl, dc; to_disp(cursor_, dl, dc); set_first_visible_line(dl); }
     void scroll_to_line(int l) override { set_first_visible_line(l); }
     TextPosition position_from_point(const math::Vec2&) const override { return cursor_; }
     math::Vec2 point_from_position(const TextPosition&) const override { return math::Vec2(0,0); }
@@ -780,11 +811,15 @@ public:
             ri_.push_rect(bx+s.gutter_width, by, 1, bh, s.gutter_border_color, d++, noclip);
         }
 
-        // Get selection range normalized
+        // Get selection range normalized (in logical coords), then map both ends AND
+        // the caret to DISPLAY (line,col) once — the loop below indexes display lines.
         TextRange sel = selection_;
         if (sel.start.line > sel.end.line || (sel.start.line == sel.end.line && sel.start.column > sel.end.column))
             std::swap(sel.start, sel.end);
         bool has_sel = !selection_.is_empty();
+        int cdl = 0, cdc = 0; to_disp(cursor_, cdl, cdc);                       // caret display line/col
+        int sdl0 = 0, sdc0 = 0, sdl1 = 0, sdc1 = 0;
+        if (has_sel) { to_disp(sel.start, sdl0, sdc0); to_disp(sel.end, sdl1, sdc1); }
 
         int vis_count = (line_h > 0) ? (int)(bh / line_h) + 2 : lc;
         int end_line = std::min(first_vis_ + vis_count, lc);
@@ -803,16 +838,17 @@ public:
             const char* lt = disp_lines_[i].c_str();
             int ll = (int)disp_lines_[i].size();
 
-            // Selection highlight (approximate - full-line or partial)
-            if (has_sel && i >= sel.start.line && i <= sel.end.line) {
-                float sx = text_x;
-                float ex = text_x + bw * 0.9f; // approx full line
-                if (i == sel.start.line) sx = text_x; // simplified
-                if (i == sel.end.line) ex = text_x + (ll > 0 ? ll * s.font_size * 0.6f : 4.0f);
-                ri_.push_rect(sx, ly, ex-sx, line_h, s.selection_color, d++, clip);
+            // Per-display-line selection range (byte columns within this display
+            // line): the flatten pass draws the band from the SAME layout + origin as
+            // the glyphs and caret, so nothing here re-measures. Interior lines are
+            // fully covered; the first/last line get the partial range.
+            int line_sel_s = -1, line_sel_e = -1;
+            if (has_sel && i >= sdl0 && i <= sdl1) {
+                line_sel_s = (i == sdl0) ? sdc0 : 0;
+                line_sel_e = (i == sdl1) ? sdc1 : ll;
             }
 
-            // Line text with optional cursor
+            // Line text with optional cursor + selection
             if (lt && lt[0]) {
                 WidgetRenderInfo::TextCmd tc;
                 tc.text      = lt;
@@ -822,13 +858,16 @@ public:
                 tc.alignment = s.text_alignment;
                 tc.depth     = d++;
                 tc.clip      = clip;
-                if (base_.has_focus() && i == cursor_.line) {
+                if (line_sel_e > line_sel_s) {
+                    tc.sel_start = line_sel_s; tc.sel_end = line_sel_e; tc.sel_bg_color = s.selection_color;
+                }
+                if (base_.has_focus() && i == cdl) {
                     tc.show_cursor  = true;
-                    tc.cursor_pos   = cursor_.column;
+                    tc.cursor_pos   = cdc;
                     tc.cursor_color = s.text_color;
                 }
                 ri_.texts.push_back(std::move(tc));
-            } else if (base_.has_focus() && i == cursor_.line) {
+            } else if (base_.has_focus() && i == cdl) {
                 // Empty line with cursor
                 WidgetRenderInfo::TextCmd tc;
                 tc.text       = "";
