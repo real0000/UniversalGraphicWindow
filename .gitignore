@@ -8,10 +8,12 @@ cmake_install.cmake
 install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
+*.log
 _deps
 CMakeUserPresets.json
 build/
 build_*/
+build-*/
 third/
 
 # CLion
