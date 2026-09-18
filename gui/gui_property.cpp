@@ -902,6 +902,16 @@ public:
         refresh_bindings();
         if (!handler_ || !array_key) return false; handler_->on_property_array_remove(array_key, index); return true;
     }
+    bool invoke_action(const char* key, int action_id) override {
+        refresh_bindings();
+        int i = find_idx(find_by_key(key)); if (i < 0) return false;
+        const Prop& p = props_[i];
+        const bool has = std::any_of(p.actions.begin(), p.actions.end(),
+                                     [&](const PropertyAction& a) { return a.id == action_id; });
+        if (!has || !handler_) return false;
+        handler_->on_property_action(p.id, action_id);
+        return true;
+    }
     bool invoke_array_move(const char* array_key, int index, int delta) override {
         if (!handler_ || !array_key) return false; handler_->on_property_array_move(array_key, index, delta); return true;
     }

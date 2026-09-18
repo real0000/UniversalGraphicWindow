@@ -363,6 +363,9 @@ public:
     virtual bool invoke_array_add(const char* array_key) = 0;          // section "+" → on_property_array_add
     virtual bool invoke_array_remove(const char* array_key, int index) = 0;
     virtual bool invoke_array_move(const char* array_key, int index, int delta) = 0;
+    // A row button (PropertyModel::actions) → on_property_action. False if no row matches
+    // `key` or the row has no action with that id.
+    virtual bool invoke_action(const char* key, int action_id) = 0;
     // Options of an Enum row (by key), for a driver to pick by value/label. Returns count
     // (0 if not an enum / not found); fills out_values/out_labels up to max.
     virtual int  get_enum_options(const char* key, const char** out_values, const char** out_labels, int max) const = 0;
