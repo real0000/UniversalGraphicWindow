@@ -5,6 +5,7 @@
 #include "gui_widget_base.hpp"
 
 namespace window { namespace gui { IGuiTextInput* create_text_input_widget(); IGuiEditBox* create_editbox_widget(); } }
+#include <cmath>
 #include <unordered_map>
 
 namespace window {
@@ -17,11 +18,109 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         int int_val=0; float float_val=0; bool bool_val=false;
         math::Vec2 vec2_val; math::Vec4 vec4_val;
         std::vector<std::string> enum_opts, enum_values; int enum_idx=0;
-        float range_min=0, range_max=1;
+        // Range rows. num_val is the value (double: float_val cannot hold large
+        // whole numbers exactly); float_val mirrors it for the legacy float getters.
+        double range_min=0, range_max=1, range_step=0, num_val=0;
+        bool range_log=false, range_integer=false;
+        bool range_has_sentinel=false; double range_sentinel=0, range_sentinel_thumb=0;
+        std::string range_readout;
+        std::function<std::string(double)> range_caption;
         bool read_only=false;
         bool multiline=false;                  // tall, user-resizable word-wrap value box
         std::vector<PropertyAction> actions;   // right-aligned row buttons
     };
+
+    // ── Range rows: value ↔ slider position, and what typed text commits to ─────
+    // Pure functions of the row's descriptor, so the number box, the thumb, a drag
+    // and the automation entry points cannot disagree about a value.
+    static bool range_has_slider(const Prop& p) { return p.range_max > p.range_min; }
+    static double range_clamp(const Prop& p, double v) {
+        if (v < p.range_min) v = p.range_min;
+        if (range_has_slider(p) && v > p.range_max) v = p.range_max;
+        return v;
+    }
+    // Slider position t in [0,1] → value: along the (linear or logarithmic) track,
+    // snapped to the step, kept inside the range (so the right end is exactly max
+    // even when max is not a multiple of the step).
+    static double range_value_at(const Prop& p, double t) {
+        if (!range_has_slider(p)) return p.range_min;
+        t = std::max(0.0, std::min(1.0, t));
+        const bool lg = p.range_log && p.range_min > 0.0;
+        double v = lg ? p.range_min * std::pow(p.range_max / p.range_min, t)
+                      : p.range_min + (p.range_max - p.range_min) * t;
+        if (p.range_step > 0.0) v = std::round(v / p.range_step) * p.range_step;
+        if (p.range_integer) v = std::round(v);
+        return range_clamp(p, v);
+    }
+    static double range_pos_of(const Prop& p, double v) {
+        if (!range_has_slider(p)) return 0.0;
+        v = range_clamp(p, v);
+        const bool lg = p.range_log && p.range_min > 0.0;
+        const double t = lg ? std::log(v / p.range_min) / std::log(p.range_max / p.range_min)
+                            : (v - p.range_min) / (p.range_max - p.range_min);
+        return std::max(0.0, std::min(1.0, t));
+    }
+    // Where the thumb sits for the row's current value (the sentinel has its own spot).
+    static double range_thumb_pos(const Prop& p) {
+        const bool at_sentinel = p.range_has_sentinel && p.num_val == p.range_sentinel;
+        return range_pos_of(p, at_sentinel ? p.range_sentinel_thumb : p.num_val);
+    }
+    // Typed text → the value it commits to (see PropertyModel::range_has_sentinel).
+    static double range_from_text(const Prop& p, const std::string& text) {
+        const char* s = text.c_str(); char* end = nullptr;
+        double v = std::strtod(s, &end);
+        const bool numeric = end != s && std::isfinite(v);
+        if (p.range_has_sentinel) {
+            const double S = p.range_sentinel;
+            if (!numeric) return S;
+            if (v == S || (S < p.range_min && v <= S) || (range_has_slider(p) && S > p.range_max && v >= S))
+                return S;
+        } else if (!numeric) {
+            return p.num_val;            // not a number and no "unset" value: keep what was there
+        }
+        if (p.range_integer) v = std::trunc(v);
+        return range_clamp(p, v);
+    }
+    static std::string range_format(const Prop& p, double v) {
+        char buf[64];
+        if (p.range_integer) std::snprintf(buf, sizeof(buf), "%lld", (long long)std::llround(v));
+        else                 std::snprintf(buf, sizeof(buf), "%.6g", v);
+        return buf;
+    }
+    static void range_set(Prop& p, double v) {
+        p.num_val = v; p.float_val = (float)v; p.str_val = range_format(p, v);
+    }
+    // Caption right of the slider: the app's text for the stored value, or — while a
+    // drag has moved the value away from it — the app's formatter on the live value.
+    std::string range_caption_text(const Prop& p) const {
+        if (range_drag_id_ == p.id && p.range_caption) return p.range_caption(p.num_val);
+        return p.range_readout;
+    }
+    // A Range row's value box splits into [number box][slider track][caption].
+    struct RangeGeom { math::Box num, track; float cap_x = 0, cap_w = 0; bool slider = false; };
+    static constexpr float kRangeThumbR = 6.0f;
+    RangeGeom range_geom(const Prop& p, float fx, float fy, float fw, float fh) const {
+        RangeGeom g; g.slider = range_has_slider(p);
+        const float nw = g.slider ? std::min(110.0f, fw * 0.42f) : fw;
+        g.num = math::make_box(fx, fy, nw, fh);
+        if (!g.slider) return g;
+        g.cap_w = (!p.range_readout.empty() || p.range_caption) ? 46.0f : 0.0f;
+        g.cap_x = fx + fw - g.cap_w;
+        const float tx = fx + nw + 12.0f;
+        const float tw = std::max(0.0f, g.cap_x - (g.cap_w > 0 ? 6.0f : 0.0f) - tx);
+        g.track = math::make_box(tx, fy, tw, fh);
+        return g;
+    }
+    // Mouse x → slider position along the track (the thumb's centre travels between
+    // the two inset ends, so it never pokes out of the track).
+    static double range_t_at(const RangeGeom& g, float x) {
+        const float x0 = math::x(math::box_min(g.track)) + kRangeThumbR;
+        const float span = math::box_width(g.track) - 2.0f * kRangeThumbR;
+        if (span <= 0.0f) return 0.0;
+        return std::max(0.0, std::min(1.0, double((x - x0) / span)));
+    }
+    int    range_drag_id_ = -1;        // property being dragged, -1 = none
+    double range_drag_from_ = 0.0;     // its value when the drag began (release fires only on a change)
     // Canonical value the app should store for a property (Bool→"true"/"false",
     // Enum→selected value (or label), else the text). Backs get_property_value.
     mutable std::string val_str_;
@@ -133,15 +232,24 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         for (int i = 0; i < (int)vis.size(); ++i) {
             if (vis[i].is_cat || props_[vis[i].prop_idx].id != prop_id) continue;
             const float ry = by + row_offset(vis, i) - scroll_y_;
-            if (style_.stacked) {
-                const float fh = props_[vis[i].prop_idx].multiline
-                               ? ml_row_height(props_[vis[i].prop_idx]) : style_.field_height;
-                return math::make_box(bx + style_.side_padding, ry + style_.label_height,
-                                      bw - style_.side_padding * 2, fh);
-            }
-            return math::make_box(bx + name_col_w_ + 2, ry + 1, bw - name_col_w_ - 4, row_h_ - 2);
+            return value_rect(props_[vis[i].prop_idx], bx, bw, ry, /*for_editor=*/true);
         }
         return math::make_box(0, 0, 0, 0);
+    }
+    // A row's value box. `for_editor` = where the inline text editor goes: for a
+    // Range row that is only the number box, not the slider beside it.
+    math::Box value_rect(const Prop& p, float bx, float bw, float ry, bool for_editor) const {
+        math::Box whole;
+        if (style_.stacked) {
+            const float fh = p.multiline ? ml_row_height(p) : style_.field_height;
+            whole = math::make_box(bx + style_.side_padding, ry + style_.label_height,
+                                   bw - style_.side_padding * 2, fh);
+        } else {
+            whole = math::make_box(bx + name_col_w_ + 2, ry + 1, bw - name_col_w_ - 4, row_h_ - 2);
+        }
+        if (!for_editor || p.type != PropertyType::Range) return whole;
+        return range_geom(p, math::x(math::box_min(whole)), math::y(math::box_min(whole)),
+                          math::box_width(whole), math::box_height(whole)).num;
     }
     void ensure_editor() {
         if (editor_) return;
@@ -224,15 +332,15 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
         if (i >= 0) {
             Prop& p = props_[i];
             const std::string t = text ? text : "";
-            if (p.type == PropertyType::Int)        p.int_val   = std::atoi(t.c_str());
-            else if (p.type == PropertyType::Float) p.float_val = (float)std::atof(t.c_str());
-            else if (p.type == PropertyType::Range) {
-                float v = (float)std::atof(t.c_str());
-                if (v < p.range_min) v = p.range_min;
-                if (v > p.range_max) v = p.range_max;
-                p.float_val = v;
+            if (p.type == PropertyType::Range) {
+                // The box shows what was actually stored (clamped / the sentinel),
+                // not the raw keystrokes.
+                range_set(p, range_from_text(p, t));
+            } else {
+                if (p.type == PropertyType::Int)        p.int_val   = std::atoi(t.c_str());
+                else if (p.type == PropertyType::Float) p.float_val = (float)std::atof(t.c_str());
+                p.str_val = t;
             }
-            p.str_val = t;
             if (handler_) handler_->on_property_changed(p.id);
         }
         editor_dismiss();
@@ -262,13 +370,7 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
             case PropertyType::String: p.str_val = edit_buf_; break;
             case PropertyType::Int: p.int_val = std::atoi(edit_buf_.c_str()); break;
             case PropertyType::Float: p.float_val = (float)std::atof(edit_buf_.c_str()); break;
-            case PropertyType::Range: {
-                float v = (float)std::atof(edit_buf_.c_str());
-                if (v < p.range_min) v = p.range_min;
-                if (v > p.range_max) v = p.range_max;
-                p.float_val = v;
-                break;
-            }
+            case PropertyType::Range: range_set(p, range_from_text(p, edit_buf_)); break;
             default: break;
         }
         if (handler_) handler_->on_property_changed(editing_id_);
@@ -316,7 +418,7 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
             case PropertyType::Int: std::snprintf(buf, sizeof(buf), "%d", p.int_val); break;
             case PropertyType::Float: std::snprintf(buf, sizeof(buf), "%.2f", p.float_val); break;
             case PropertyType::Bool: return p.bool_val ? "true" : "false";
-            case PropertyType::Range: std::snprintf(buf, sizeof(buf), "%.1f", p.float_val); break;
+            case PropertyType::Range: return p.str_val.c_str();   // kept canonical by range_set
             case PropertyType::Color: std::snprintf(buf, sizeof(buf), "(%.2f, %.2f, %.2f, %.2f)", p.vec4_val.x, p.vec4_val.y, p.vec4_val.z, p.vec4_val.w); break;
             case PropertyType::Vec2: std::snprintf(buf, sizeof(buf), "(%.2f, %.2f)", math::x(p.vec2_val), math::y(p.vec2_val)); break;
             case PropertyType::Enum: return (p.enum_idx >= 0 && p.enum_idx < (int)p.enum_opts.size()) ? p.enum_opts[p.enum_idx].c_str() : "";
@@ -420,11 +522,19 @@ class GuiPropertyGrid : public WidgetBase<IGuiPropertyGrid, WidgetType::Custom> 
                 p.float_val += dir * 0.1f;
                 break;
             case PropertyType::Range: {
-                float step = (p.range_max - p.range_min) * 0.01f;
-                if (step < 0.001f) step = 0.1f;
-                p.float_val += dir * step;
-                if (p.float_val < p.range_min) p.float_val = p.range_min;
-                if (p.float_val > p.range_max) p.float_val = p.range_max;
+                // One percent of the track per key press — along the track, so a
+                // logarithmic row moves by a ratio, the same way a drag does.
+                if (!range_has_slider(p)) return;
+                const double before = p.num_val;
+                double t = range_thumb_pos(p) + dir * 0.01;
+                double v = range_value_at(p, t);
+                // A step finer than the snap would round back to where it started.
+                for (int k = 2; v == before && k <= 100 && t > 0.0 && t < 1.0; ++k) {
+                    t = range_thumb_pos(p) + dir * 0.01 * k;
+                    v = range_value_at(p, t);
+                }
+                if (v == before) return;
+                range_set(p, v);
                 break;
             }
             case PropertyType::Enum:
@@ -449,7 +559,48 @@ public:
         base_.mark_dirty();
         return true;
     }
+    // The geometry of a Range row's slider, looked up by property id (empty track
+    // when the row is not visible or has no slider).
+    bool range_geom_for(int prop_id, RangeGeom& out) const {
+        std::vector<VisRow> vis; collect_visible(vis);
+        auto b = base_.get_bounds();
+        const float bx = math::x(math::box_min(b)), by = math::y(math::box_min(b));
+        const float bw = math::box_width(b);
+        for (int i = 0; i < (int)vis.size(); ++i) {
+            if (vis[i].is_cat || props_[vis[i].prop_idx].id != prop_id) continue;
+            const Prop& pr = props_[vis[i].prop_idx];
+            const math::Box whole = value_rect(pr, bx, bw, by + row_offset(vis, i) - scroll_y_, false);
+            out = range_geom(pr, math::x(math::box_min(whole)), math::y(math::box_min(whole)),
+                             math::box_width(whole), math::box_height(whole));
+            return out.slider;
+        }
+        return false;
+    }
+    // Live value while the thumb is being dragged. Nothing is reported to the app
+    // yet — see end_range_drag.
+    void range_drag_to(float x) {
+        int i = find_idx(range_drag_id_);
+        RangeGeom g;
+        if (i < 0 || !range_geom_for(range_drag_id_, g)) return;
+        const double v = range_value_at(props_[i], range_t_at(g, x));
+        if (v == props_[i].num_val) return;
+        range_set(props_[i], v);
+        base_.mark_dirty();
+    }
+    // Release: the app hears about the value once, and only if it actually changed.
+    // Reporting every pixel of a drag would make an app that reacts to a change
+    // (re-query, save, re-layout) do so dozens of times for one gesture.
+    void end_range_drag() {
+        const int id = range_drag_id_;
+        range_drag_id_ = -1;
+        int i = find_idx(id);
+        if (i >= 0 && props_[i].num_val != range_drag_from_ && handler_)
+            handler_->on_property_changed(id);
+        base_.mark_dirty();
+    }
+
     bool handle_mouse_move(const math::Vec2& p) override {
+        if (range_drag_id_ >= 0) { range_drag_to(math::x(p)); return true; }
         if (auto* e = active_editor()) if (e->handle_mouse_move(p)) return true;
         if (sb_drag_) {
             float content_h = get_total_content_height();
@@ -459,6 +610,9 @@ public:
         return base_.handle_mouse_move(p);
     }
     bool handle_mouse_button(MouseButton btn, bool pressed, const math::Vec2& p) override {
+        // A slider drag ends wherever the button comes up — also outside the grid,
+        // so this runs before the bounds check below.
+        if (btn == MouseButton::Left && !pressed && range_drag_id_ >= 0) { end_range_drag(); return true; }
         if (!base_.is_enabled() || !hit_test(p)) return false;
         // The open field editor owns clicks inside itself (caret / drag-select / the
         // multi-line resize grip); a left press anywhere else commits it (blur-commit).
@@ -544,6 +698,26 @@ public:
                             }
                     }
                     selected_ = prop.id;
+
+                    // Range row: a press on the slider part grabs the thumb (and jumps
+                    // it to the cursor); the number box keeps the normal click-to-edit.
+                    if (prop.type == PropertyType::Range && !prop.read_only) {
+                        const math::Box whole = value_rect(prop, bx, bw,
+                                                           by_top + row_offset(visible, row) - scroll_y_, false);
+                        const RangeGeom g = range_geom(prop, math::x(math::box_min(whole)),
+                                                       math::y(math::box_min(whole)),
+                                                       math::box_width(whole), math::box_height(whole));
+                        const float tx0 = math::x(math::box_min(g.track));
+                        if (g.slider && math::x(p) >= tx0 - 4.0f
+                                     && math::x(p) <= tx0 + math::box_width(g.track) + 4.0f) {
+                            cancel_edit();
+                            range_drag_id_   = prop.id;
+                            range_drag_from_ = prop.num_val;
+                            range_drag_to(math::x(p));
+                            base_.mark_dirty();
+                            return true;
+                        }
+                    }
 
                     // Stacked: the whole row is the value zone; table: right of the name column.
                     const bool in_value = style_.stacked || rel_x > name_col_w_;
@@ -636,8 +810,20 @@ public:
     static void apply_value(Prop& p, const PropertyModel& m) {
         switch (m.type) {
             case PropertyType::Int:   p.int_val   = std::atoi(m.svalue.c_str()); p.str_val=m.svalue; break;
-            case PropertyType::Float:
-            case PropertyType::Range: p.float_val = (float)std::atof(m.svalue.c_str()); p.str_val=m.svalue; break;
+            case PropertyType::Float: p.float_val = (float)std::atof(m.svalue.c_str()); p.str_val=m.svalue; break;
+            case PropertyType::Range:
+                // The descriptor travels with the value: the app may widen the range
+                // (a list arrived) without anything else about the row changing.
+                p.range_min = m.range_min; p.range_max = m.range_max; p.range_step = m.range_step;
+                p.range_log = m.range_log; p.range_integer = m.range_integer;
+                p.range_has_sentinel = m.range_has_sentinel; p.range_sentinel = m.range_sentinel;
+                p.range_sentinel_thumb = m.range_sentinel_thumb;
+                p.range_readout = m.range_readout; p.range_caption = m.range_caption;
+                // Shown as stored — a value outside the range is NOT clamped on the way
+                // in (the user must be able to see what the model really holds); only
+                // an edit clamps.
+                p.num_val = std::atof(m.svalue.c_str()); p.float_val = (float)p.num_val; p.str_val = m.svalue;
+                break;
             case PropertyType::Bool:  p.bool_val  = m.bvalue; break;
             case PropertyType::Enum:  p.enum_opts = m.options; p.enum_values = m.option_values; p.enum_idx = m.enum_index; break;
             default:                  p.str_val   = m.svalue; break;
@@ -646,8 +832,16 @@ public:
     static bool value_equal(const Prop& p, const PropertyModel& m) {
         switch (m.type) {
             case PropertyType::Int:   return p.int_val   == std::atoi(m.svalue.c_str());
-            case PropertyType::Float:
-            case PropertyType::Range: return p.float_val == (float)std::atof(m.svalue.c_str());
+            case PropertyType::Float: return p.float_val == (float)std::atof(m.svalue.c_str());
+            case PropertyType::Range:
+                return p.str_val == m.svalue
+                    && p.range_min == m.range_min && p.range_max == m.range_max
+                    && p.range_step == m.range_step && p.range_log == m.range_log
+                    && p.range_integer == m.range_integer
+                    && p.range_has_sentinel == m.range_has_sentinel
+                    && p.range_sentinel == m.range_sentinel
+                    && p.range_sentinel_thumb == m.range_sentinel_thumb
+                    && p.range_readout == m.range_readout;
             case PropertyType::Bool:  return p.bool_val  == m.bvalue;
             case PropertyType::Enum:  return p.enum_idx  == m.enum_index && p.enum_opts == m.options;
             default:                  return p.str_val   == m.svalue;
@@ -673,6 +867,8 @@ public:
         }
         if (struct_same) {
             if (editing_id_ >= 0) return;                 // don't disturb an in-progress edit
+            if (range_drag_id_ >= 0) return;              // …or a slider being dragged: the model
+                                                          //   still holds the pre-drag value
             bool changed = false;
             for (size_t i=0;i<model.size();++i)
                 if (!value_equal(props_[i], model[i])) { apply_value(props_[i], model[i]); changed = true; }
@@ -680,6 +876,7 @@ public:
             return;
         }
         cancel_edit();
+        range_drag_id_ = -1;                              // the row being dragged may be gone
         props_.clear(); props_.reserve(model.size());
         for (auto& m : model) {
             // App props default id to -1 (they route by key); give each a UNIQUE stable id
@@ -762,7 +959,11 @@ public:
     int get_int_value(int id) const override { int i=find_idx(id); return i>=0?props_[i].int_val:0; }
     void set_int_value(int id,int v) override { int i=find_idx(id); if(i>=0)props_[i].int_val=v; }
     float get_float_value(int id) const override { int i=find_idx(id); return i>=0?props_[i].float_val:0; }
-    void set_float_value(int id,float v) override { int i=find_idx(id); if(i>=0)props_[i].float_val=v; }
+    void set_float_value(int id,float v) override {
+        int i=find_idx(id); if(i<0) return;
+        if (props_[i].type == PropertyType::Range) range_set(props_[i], v);   // keeps the number box + thumb in step
+        else props_[i].float_val=v;
+    }
     bool get_bool_value(int id) const override { int i=find_idx(id); return i>=0?props_[i].bool_val:false; }
     void set_bool_value(int id,bool v) override { int i=find_idx(id); if(i>=0)props_[i].bool_val=v; }
     math::Vec2 get_vec2_value(int id) const override { int i=find_idx(id); return i>=0?props_[i].vec2_val:math::Vec2(); }
@@ -858,6 +1059,51 @@ public:
         return n;
     }
 
+    // A Range row inside the value box (fx, fy, fw, fh): the number box (the inline
+    // editor child draws over it while editing), then the slider track with its
+    // filled part and thumb, then the caption.
+    void draw_range_row(const Prop& pr, int idx, float fx, float fy, float fw, float fh,
+                        float font, int32_t& d, const math::Box& clip) const {
+        const auto& s = style_;
+        const RangeGeom g = range_geom(pr, fx, fy, fw, fh);
+        const float nx = math::x(math::box_min(g.num)), nw = math::box_width(g.num);
+        const math::Vec4 vc = pr.read_only
+            ? math::Vec4(s.value_text_color.x*0.6f, s.value_text_color.y*0.6f, s.value_text_color.z*0.6f, 1.0f)
+            : s.value_text_color;
+        if (s.stacked) {
+            ri_.push_round_rect(nx, fy, nw, fh, s.field_corner_radius, s.field_background, d++, clip);
+            if (s.field_border_color.w > 0.0f)
+                ri_.push_outline(nx, fy, nw, fh, s.field_border_color, d, clip);
+        }
+        const bool editing = (editing_id_ == pr.id && active_editor());
+        if (!editing)
+            ri_.push_text(format_value(idx), nx + (s.stacked ? 8.0f : 0.0f), fy,
+                          nw - (s.stacked ? 16.0f : 0.0f), fh, vc, font, Alignment::CenterLeft, d++, clip);
+        if (!g.slider) return;
+
+        const float tx = math::x(math::box_min(g.track)) + kRangeThumbR;
+        const float tw = math::box_width(g.track) - 2.0f * kRangeThumbR;
+        if (tw <= 0.0f) return;
+        const float cy = fy + fh * 0.5f;
+        const float t  = (float)range_thumb_pos(pr);
+        const bool  dragging = (range_drag_id_ == pr.id);
+        const math::Vec4 rail(0.26f, 0.27f, 0.31f, 1.0f);
+        const math::Vec4 fill  = pr.read_only ? math::Vec4(0.33f, 0.35f, 0.40f, 1.0f)
+                                              : math::Vec4(0.23f, 0.38f, 0.66f, 1.0f);
+        const math::Vec4 thumb = pr.read_only ? math::Vec4(0.50f, 0.52f, 0.57f, 1.0f)
+                               : dragging     ? math::Vec4(1.00f, 1.00f, 1.00f, 1.0f)
+                                              : math::Vec4(0.86f, 0.88f, 0.92f, 1.0f);
+        ri_.push_round_rect(tx, cy - 2.0f, tw, 4.0f, 2.0f, rail, d++, clip);
+        if (t > 0.0f) ri_.push_round_rect(tx, cy - 2.0f, tw * t, 4.0f, 2.0f, fill, d++, clip);
+        ri_.push_circle(tx + tw * t, cy, dragging ? kRangeThumbR + 1.0f : kRangeThumbR, thumb, d++, clip);
+        if (g.cap_w > 0.0f) {
+            const std::string cap = range_caption_text(pr);
+            ri_.push_text(cap.c_str(), g.cap_x, fy, g.cap_w, fh,
+                          s.name_text_color, s.stacked ? s.label_font : 11.0f,
+                          Alignment::CenterRight, d++, clip);
+        }
+    }
+
     // ── semantic driving (automation) — apply a change by KEY, fire the handler ──────
     int find_by_key(const char* key) const {
         if (key) for (const auto& p : props_) if (p.key == key) return p.id;
@@ -870,11 +1116,38 @@ public:
         int i = find_idx(find_by_key(key)); if (i < 0) return false;
         Prop& p = props_[i];
         const std::string t = text ? text : "";
-        if (p.type == PropertyType::Int)        p.int_val   = std::atoi(t.c_str());
-        else if (p.type == PropertyType::Float) p.float_val = (float)std::atof(t.c_str());
-        p.str_val = t;                                    // canonical_value returns str_val for these
+        if (p.type == PropertyType::Range) {
+            range_set(p, range_from_text(p, t));          // same rule as typing into the number box
+        } else {
+            if (p.type == PropertyType::Int)        p.int_val   = std::atoi(t.c_str());
+            else if (p.type == PropertyType::Float) p.float_val = (float)std::atof(t.c_str());
+            p.str_val = t;                                // canonical_value returns str_val for these
+        }
         if (handler_) handler_->on_property_changed(p.id);
         return true;
+    }
+    // Drag-and-release on a Range row's slider, by key: `position` is where along the
+    // track the thumb is dropped (0 = left end, 1 = right end). The value goes through
+    // the same track mapping + snap a real drag uses, and the handler fires once.
+    bool drag_range_to(const char* key, double position) override {
+        refresh_bindings();
+        int i = find_idx(find_by_key(key)); if (i < 0) return false;
+        Prop& p = props_[i];
+        if (p.type != PropertyType::Range || p.read_only || !range_has_slider(p)) return false;
+        const double v = range_value_at(p, position);
+        if (v == p.num_val) return true;                  // dropped where it already was
+        range_set(p, v);
+        if (handler_) handler_->on_property_changed(p.id);
+        base_.mark_dirty();
+        return true;
+    }
+    // Where a Range row's thumb currently sits (0..1), or -1 if `key` is not such a row.
+    double get_range_position(const char* key) const override {
+        const_cast<GuiPropertyGrid*>(this)->refresh_bindings();
+        int i = find_idx(find_by_key(key)); if (i < 0) return -1.0;
+        const Prop& p = props_[i];
+        if (p.type != PropertyType::Range || !range_has_slider(p)) return -1.0;
+        return range_thumb_pos(p);
     }
     bool select_enum(const char* key, int opt) override {
         refresh_bindings();
@@ -1000,7 +1273,12 @@ public:
                 const float ah = pr.multiline ? s.field_height : fh;   // action buttons stay a normal size
                 float act_w = 0.0f;
                 for (const auto& a : pr.actions) { (void)a; act_w += (ah-6.0f) + 3.0f; }
-                if (pr.read_only && pr.type == PropertyType::String && !pr.multiline) {
+                if (pr.type == PropertyType::Range) {
+                    // number box + slider + caption share the value box. Full width:
+                    // the mouse and the inline editor go by value_rect, which does not
+                    // set room aside for action buttons either.
+                    draw_range_row(pr, idx, sx, fy, sw, fh, s.font_size, d, clip);
+                } else if (pr.read_only && pr.type == PropertyType::String && !pr.multiline) {
                     // read-only text (subtitle/info): plain value, no box
                     ri_.push_text(format_value(idx), sx, fy, sw - act_w, fh,
                                   s.value_text_color, s.font_size, Alignment::CenterLeft, d++, clip);
@@ -1162,6 +1440,11 @@ public:
                         float cx = bx + bw - chev_w;
                         ri_.push_text("v", cx, ry, chev_w, row_h_, vc, 9.0f, Alignment::Center, d++, clip);
                     }
+                } else if (props_[idx].type == PropertyType::Range) {
+                    // Same geometry the mouse and the inline editor use (value_rect).
+                    const math::Box whole = value_rect(props_[idx], bx, bw, ry, false);
+                    draw_range_row(props_[idx], idx, math::x(math::box_min(whole)), math::y(math::box_min(whole)),
+                                   math::box_width(whole), math::box_height(whole), 11.0f, d, clip);
                 } else {
                     bool editing = (editing_id_ == props_[idx].id && editor_ && editor_->is_visible());
                     if (editing) {

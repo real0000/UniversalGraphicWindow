@@ -94,6 +94,33 @@ struct PropertyModel {
     // the app just declares `multiline = true` once and never tracks the size.
     bool        multiline = false;
     std::vector<PropertyAction> actions;               // right-aligned row buttons
+
+    // ── Range rows (PropertyType::Range): a number box with a slider beside it ──
+    // The value still travels as text in `svalue` (what the number box shows and
+    // what get_property_value returns); the fields below describe the slider.
+    // The two controls edit the same value: dragging updates the box, typing moves
+    // the thumb. on_property_changed fires when a drag is RELEASED (not per pixel)
+    // and when typed text is committed.
+    double      range_min  = 0.0;
+    double      range_max  = 0.0;                      // <= range_min → no upper bound: number box only
+    double      range_step = 0.0;                      // slider snaps to multiples of this (0 = continuous);
+                                                       //   typed values are not snapped
+    bool        range_log  = false;                    // logarithmic track: equal travel = equal ratio
+                                                       //   (needs range_min > 0; for ranges spanning decades)
+    bool        range_integer = false;                 // whole-number values (formatting + rounding)
+    // One value OUTSIDE [range_min, range_max] that typing may still commit as-is —
+    // the usual "0 = automatic". Typed text that is not a number, or lies at/beyond
+    // the sentinel on its side of the range, commits the sentinel; anything else is
+    // clamped into the range. While the value is the sentinel the thumb rests at
+    // range_sentinel_thumb (e.g. what "automatic" resolves to).
+    bool        range_has_sentinel   = false;
+    double      range_sentinel       = 0.0;
+    double      range_sentinel_thumb = 0.0;
+    // Optional caption right of the slider — the app's own formatting of the current
+    // value ("128K", "auto"). The grid cannot know the unit, so while a drag is in
+    // progress it calls range_caption (when set) with the live value instead.
+    std::string range_readout;
+    std::function<std::string(double)> range_caption;
 };
 
 class IPropertyGridEventHandler {
@@ -357,7 +384,13 @@ public:
     // Semantic driving (automation / scripting) — apply an edit by KEY exactly as a user
     // interaction would and fire the SAME handler callbacks, so a driver never needs the
     // grid's internal geometry. Return false if no row matches `key`.
-    virtual bool commit_text(const char* key, const char* text) = 0;   // String/Int/Float row
+    virtual bool commit_text(const char* key, const char* text) = 0;   // String/Int/Float/Range row
+    // Range row: drop the slider thumb at `position` along the track (0 = left end,
+    // 1 = right end) → the value a real drag to that spot would give, one
+    // on_property_changed. False if the row is not a Range row with a slider.
+    virtual bool   drag_range_to(const char* key, double position) = 0;
+    // Where a Range row's thumb sits now (0..1); -1 if `key` is not such a row.
+    virtual double get_range_position(const char* key) const = 0;
     virtual bool select_enum(const char* key, int option_index) = 0;   // Enum row → on_property_changed
     virtual bool toggle_bool(const char* key) = 0;                     // Bool row → on_property_changed
     virtual bool invoke_array_add(const char* array_key) = 0;          // section "+" → on_property_array_add

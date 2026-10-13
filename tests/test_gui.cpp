@@ -233,6 +233,155 @@ TEST(factory_property_grid) {
     destroy_gui_context(ctx);
 }
 
+// A Range row is a number box with a slider beside it, both editing one value.
+// The row below is a "context length" style row: logarithmic 8K..1M, snapped to
+// 1K, whole numbers, with 0 as the out-of-range "automatic" sentinel.
+struct RangeChanges : IPropertyGridEventHandler {
+    IGuiPropertyGrid* pg = nullptr;
+    int count = 0;
+    std::string last;
+    void on_property_changed(int id) override { ++count; last = pg->get_property_value(id); }
+};
+
+static PropertyModel range_row(const char* value) {
+    PropertyModel m;
+    m.key = "ctx"; m.name = "Context"; m.type = PropertyType::Range; m.svalue = value;
+    m.range_min = 8192; m.range_max = 1048576; m.range_step = 1024;
+    m.range_log = true; m.range_integer = true;
+    m.range_has_sentinel = true; m.range_sentinel = 0; m.range_sentinel_thumb = 262144;
+    m.range_readout = "x";
+    return m;
+}
+
+TEST(property_grid_range_row) {
+    IGuiContext* ctx = create_gui_context();
+    IGuiPropertyGrid* pg = ctx->create_property_grid();
+    pg->set_bounds(window::math::make_box(0, 0, 400, 200));
+    ctx->get_root()->add_child(pg);
+    RangeChanges ch; ch.pg = pg;
+    pg->set_property_event_handler(&ch);
+    pg->set_properties({ range_row("32768") });
+
+    // Both ends of the track are the ends of the range, exactly.
+    ASSERT(pg->drag_range_to("ctx", 0.0));
+    ASSERT_EQ(ch.last, std::string("8192"));
+    ASSERT(pg->drag_range_to("ctx", 1.0));
+    ASSERT_EQ(ch.last, std::string("1048576"));
+    ASSERT_EQ(ch.count, 2);
+
+    // Logarithmic: the middle of the track is the geometric mean (~92.7K), not
+    // the arithmetic one (~528K), and every slider value is a multiple of the step.
+    ASSERT(pg->drag_range_to("ctx", 0.5));
+    const long mid = std::atol(ch.last.c_str());
+    ASSERT(mid > 80000 && mid < 110000);
+    ASSERT_EQ(mid % 1024, 0L);
+    long prev = 0; bool monotonic = true, snapped = true;
+    for (int i = 0; i <= 200; ++i) {
+        pg->drag_range_to("ctx", i / 200.0);
+        const long v = std::atol(pg->get_property_value(0));
+        if (v < prev) monotonic = false;
+        if (v % 1024 != 0) snapped = false;
+        prev = v;
+    }
+    ASSERT(monotonic);
+    ASSERT(snapped);
+
+    // Dropping the thumb where it already is reports nothing.
+    pg->drag_range_to("ctx", 1.0);
+    const int before = ch.count;
+    ASSERT(pg->drag_range_to("ctx", 1.0));
+    ASSERT_EQ(ch.count, before);
+
+    // Typing: clamped into the range, not snapped; the sentinel and anything that
+    // is not a number commit the sentinel.
+    pg->commit_text("ctx", "4096");      ASSERT_EQ(ch.last, std::string("8192"));
+    pg->commit_text("ctx", "99999999");  ASSERT_EQ(ch.last, std::string("1048576"));
+    pg->commit_text("ctx", "50000");     ASSERT_EQ(ch.last, std::string("50000"));
+    pg->commit_text("ctx", "0");         ASSERT_EQ(ch.last, std::string("0"));
+    pg->commit_text("ctx", "-5");        ASSERT_EQ(ch.last, std::string("0"));
+    pg->commit_text("ctx", "abc");       ASSERT_EQ(ch.last, std::string("0"));
+    pg->commit_text("ctx", "");          ASSERT_EQ(ch.last, std::string("0"));
+
+    // At the sentinel the thumb rests where the app said "automatic" lands, and a
+    // common value round-trips through its own thumb position.
+    const double at_auto = pg->get_range_position("ctx");
+    pg->commit_text("ctx", "262144");
+    ASSERT(at_auto == pg->get_range_position("ctx"));
+    for (long v : { 8192L, 16384L, 32768L, 65536L, 131072L, 262144L, 524288L, 1048576L }) {
+        pg->commit_text("ctx", std::to_string(v).c_str());
+        pg->drag_range_to("ctx", 0.0);
+        pg->commit_text("ctx", std::to_string(v).c_str());
+        const double pos = pg->get_range_position("ctx");
+        pg->drag_range_to("ctx", 0.0);
+        pg->drag_range_to("ctx", pos);
+        ASSERT_EQ(std::atol(ch.last.c_str()), v);
+    }
+
+    // A stored value outside the range is shown as stored (only an edit clamps).
+    pg->set_properties({ range_row("4096") });
+    ASSERT_STREQ(pg->get_property_value(0), "4096");
+    ASSERT(pg->get_range_position("ctx") == 0.0);
+
+    // Mouse: press on the slider part, drag, release. The app hears once, on
+    // release. Table layout: 24px rows, the value cell starts after the 150px name
+    // column, so x=300 is on the track and x=20 is the name column.
+    pg->set_properties({ range_row("32768") });
+    ch.count = 0;
+    pg->handle_mouse_button(MouseButton::Left, true, window::math::Vec2(300, 12));
+    ASSERT_EQ(ch.count, 0);
+    const long at_press = std::atol(pg->get_property_value(0));
+    pg->handle_mouse_move(window::math::Vec2(330, 12));
+    const long at_move = std::atol(pg->get_property_value(0));
+    ASSERT(at_move > at_press);
+    ASSERT_EQ(ch.count, 0);
+    // A rebind while dragging must not snap the live value back to the model's.
+    pg->set_properties({ range_row("32768") });
+    ASSERT_EQ(std::atol(pg->get_property_value(0)), at_move);
+    // Far past the right end, and released outside the grid.
+    pg->handle_mouse_move(window::math::Vec2(5000, 12));
+    ASSERT_STREQ(pg->get_property_value(0), "1048576");
+    pg->handle_mouse_button(MouseButton::Left, false, window::math::Vec2(5000, 900));
+    ASSERT_EQ(ch.count, 1);
+    ASSERT_EQ(ch.last, std::string("1048576"));
+    // After the release, moving the mouse no longer changes anything.
+    pg->handle_mouse_move(window::math::Vec2(200, 12));
+    ASSERT_STREQ(pg->get_property_value(0), "1048576");
+    ASSERT_EQ(ch.count, 1);
+
+    // A read-only row does not drag.
+    PropertyModel ro = range_row("32768"); ro.read_only = true;
+    pg->set_properties({ ro });
+    ch.count = 0;
+    pg->handle_mouse_button(MouseButton::Left, true, window::math::Vec2(300, 12));
+    pg->handle_mouse_move(window::math::Vec2(340, 12));
+    pg->handle_mouse_button(MouseButton::Left, false, window::math::Vec2(340, 12));
+    ASSERT_EQ(ch.count, 0);
+    ASSERT_STREQ(pg->get_property_value(0), "32768");
+    ASSERT(!pg->drag_range_to("ctx", 1.0));
+
+    // No upper bound (max <= min): number box only — typing still honours the
+    // lower bound and the sentinel, and there is no slider to drive.
+    PropertyModel open = range_row("0"); open.range_max = 0;
+    pg->set_properties({ open });
+    ASSERT(!pg->drag_range_to("ctx", 0.5));
+    ASSERT(pg->get_range_position("ctx") < 0.0);
+    pg->commit_text("ctx", "100");        ASSERT_EQ(ch.last, std::string("8192"));
+    pg->commit_text("ctx", "5000000");    ASSERT_EQ(ch.last, std::string("5000000"));
+    pg->commit_text("ctx", "0");          ASSERT_EQ(ch.last, std::string("0"));
+
+    // Linear rows behave as before the log option existed.
+    PropertyModel lin;
+    lin.key = "op"; lin.name = "Opacity"; lin.type = PropertyType::Range; lin.svalue = "0.5";
+    lin.range_min = 0.0; lin.range_max = 1.0;
+    pg->set_properties({ lin });
+    pg->drag_range_to("op", 0.25);
+    ASSERT_EQ(ch.last, std::string("0.25"));
+    pg->commit_text("op", "7");
+    ASSERT_EQ(ch.last, std::string("1"));
+
+    destroy_gui_context(ctx);
+}
+
 TEST(factory_dialog) {
     IGuiContext* ctx = create_gui_context();
     IGuiDialog* dlg = ctx->create_dialog("Test Dialog", DialogButtons::OKCancel);
@@ -617,6 +766,7 @@ int main() {
     RUN_TEST(factory_treeview);
     RUN_TEST(factory_tabcontrol);
     RUN_TEST(factory_property_grid);
+    RUN_TEST(property_grid_range_row);
     RUN_TEST(factory_dialog);
     RUN_TEST(factory_popup);
     RUN_TEST(factory_menu);
