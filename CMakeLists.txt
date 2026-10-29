@@ -1024,7 +1024,7 @@ if(WINDOW_ENABLE_SHADER_COMPILER AND WINDOW_ENABLE_RENDERER)
     set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
     window_fetch_content(glslang
         GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
-        GIT_TAG 14.3.0
+        GIT_TAG 15.0.0
     )
     FetchContent_MakeAvailable(glslang)
 
